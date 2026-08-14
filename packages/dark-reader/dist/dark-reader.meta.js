@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dark Reader
 // @namespace    com.skula.wblock
-// @version      4.9.128-wblock.3
+// @version      4.9.128-wblock.4
 // @description  Dark Reader's MIT-licensed API engine for wBlock (beta; without the full site-fix database).
 // @author       Dark Reader Ltd. and wBlock
 // @match        http://*/*
