@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.2
+// @version      0.1.3
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -994,6 +994,31 @@
         } catch (e) { /* ignore */ }
     }
 
+    // Node.contains() stops at a shadow boundary. Walk through ShadowRoot.host so
+    // an outer custom-element player is never mistaken for detached chrome and
+    // hidden along with the media inside its closed shadow root.
+    function composedParent(node) {
+        if (!node) { return null; }
+        if (node.parentNode) { return node.parentNode; }
+        try {
+            var root = node.getRootNode && node.getRootNode();
+            return root && root !== node && root.host ? root.host :
+                (node.host || null);
+        } catch (e) { return null; }
+    }
+
+    function composedContains(ancestor, node) {
+        if (!ancestor || !node) { return false; }
+        for (var current = node; current; current = composedParent(current)) {
+            if (current === ancestor) { return true; }
+        }
+        return false;
+    }
+
+    function composedRelated(a, b) {
+        return composedContains(a, b) || composedContains(b, a);
+    }
+
     // Generic chrome hiding. Instead of maintaining a per-library selector list
     // (which inevitably misses bespoke players), walk every element inside the
     // container and hide anything that is not the video, an ancestor of the
@@ -1011,8 +1036,8 @@
         for (var i = 0; i < elements.length; i++) {
             var el = elements[i];
             if (el === video) continue;
-            if (video.contains(el)) continue;   // <source>, <track>
-            if (el.contains(video)) continue;   // ancestor wrappers
+            if (composedContains(video, el)) continue;   // <source>, <track>
+            if (composedContains(el, video)) continue;   // ancestor wrappers/hosts
             if (isFacebookProtected(el, video)) continue;
             if (aggressive) {
                 hideElement(el);
@@ -1148,7 +1173,7 @@
     // roots whose box is off the video are pruned; remaining static roots are
     // walked only for positioned descendants so post text/reactions stay.
     function hideOverlappingSubtree(root, video, vr) {
-        if (root === video || root.contains(video) || video.contains(root) ||
+        if (root === video || composedRelated(root, video) ||
             isFacebookProtected(root, video)) { return; }
         var rr;
         try { rr = root.getBoundingClientRect(); } catch (e) { return; }
@@ -1170,7 +1195,7 @@
         var els = root.querySelectorAll('*');
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
-            if (el === video || el.contains(video) || video.contains(el) ||
+            if (el === video || composedRelated(el, video) ||
                 isFacebookProtected(el, video)) { continue; }
             try {
                 var p = getComputedStyle(el).position;
@@ -1192,7 +1217,22 @@
         catch (e) { return false; }
     }
 
+    function hideKnownSiblingChrome(video) {
+        // Akamai AMP keeps all custom UI in siblings of .amp-video. Hide the
+        // sibling roots themselves so late React class changes or remounts cannot
+        // repaint an otherwise-empty layer over Safari's native controls.
+        var ampShell = null;
+        try { ampShell = video.closest && video.closest('.amp-player'); }
+        catch (e) { /* not an AMP player */ }
+        if (!ampShell || !ampShell.querySelectorAll) { return; }
+        var chrome = ampShell.querySelectorAll('.amp-react,.amp-overlays');
+        for (var i = 0; i < chrome.length; i++) {
+            if (!composedRelated(chrome[i], video)) { hideElement(chrome[i]); }
+        }
+    }
+
     function hideOverlappingChrome(video) {
+        hideKnownSiblingChrome(video);
         // Twitch's player is embedded in a persistent page shell; sibling and
         // ancestor scans can otherwise classify stream metadata as chrome.
         if (isTwitchHost()) { return; }
@@ -1217,13 +1257,12 @@
     // positioned chrome and static/relative full-bleed covers (LinkedIn).
     function hideIfDetachedOverlay(el, video, vr) {
         if (!el || el === video || el === document.documentElement || el === document.body) { return; }
-        if (video.contains(el) || (el.contains && el.contains(video)) ||
-            isFacebookProtected(el, video)) { return; }
+        if (composedRelated(el, video) || isFacebookProtected(el, video)) { return; }
         // A hit often lands on a control (slider/button) nested in a static bar;
         // hide the bar rather than the inner control, which the caller sees.
         var bar = el;
         for (var i = 0; i < 6 && bar && bar !== document.body; i++) {
-            if (bar !== video && !video.contains(bar) && isControlBar(bar, vr)) {
+            if (bar !== video && !composedRelated(bar, video) && isControlBar(bar, vr)) {
                 hideElement(bar);
                 return;
             }
@@ -1270,7 +1309,7 @@
                 if (!stack) { continue; }
                 for (var s = 0; s < stack.length; s++) {
                     var hit = stack[s];
-                    if (hit === video || video.contains(hit)) { break; }
+                    if (hit === video || composedRelated(hit, video)) { break; }
                     hideIfDetachedOverlay(hit, video, vr);
                 }
             }

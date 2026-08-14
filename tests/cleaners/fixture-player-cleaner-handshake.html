@@ -37,6 +37,13 @@
         document.getElementById('amp-video').dispatchEvent(new Event('playing'));
         document.getElementById('fave-video').dispatchEvent(new Event('playing'));
       };
+      window.__remountAMPChrome = function () {
+        var shell = document.getElementById('amp-shell');
+        shell.querySelector('.amp-react').outerHTML =
+          '<div class="amp-react"><button class="amp-pause-overlay">Play again</button><div class="amp-controls">New controls</div></div>';
+        shell.querySelector('.amp-overlays').outerHTML =
+          '<div class="amp-overlays">New overlay</div>';
+      };
     })();
   </script>
 </body>

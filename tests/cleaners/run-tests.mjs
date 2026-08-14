@@ -1909,6 +1909,22 @@ async function qualityUISelectionCheck(page, scenario) {
       detail: `present=${!!chrome} display=${chrome && chrome.style.display}` };
   });
 
+  await page.waitForFunction(() => {
+    const v = window.__wblockClosedPlayerRoot && window.__wblockClosedPlayerRoot.querySelector('video');
+    return v && v.hasAttribute('data-wblock-player-cleaner');
+  });
+  await check(page, S, 'keeps the closed-shadow player host visible', () => {
+    const frame = document.getElementById('closed-player-frame');
+    const host = frame && frame.querySelector('test-closed-player');
+    const v = window.__wblockClosedPlayerRoot && window.__wblockClosedPlayerRoot.querySelector('video');
+    const chrome = window.__wblockClosedPlayerRoot && window.__wblockClosedPlayerRoot.querySelector('.controls');
+    const visible = frame && host && getComputedStyle(frame).display !== 'none' &&
+      getComputedStyle(host).display !== 'none' && !frame.hasAttribute('data-wblock-pc-hidden') &&
+      !host.hasAttribute('data-wblock-pc-hidden');
+    return { pass: !!(visible && v && v.controls && chrome && getComputedStyle(chrome).display === 'none'),
+      detail: `visible=${!!visible} controls=${v && v.controls} chrome=${chrome && getComputedStyle(chrome).display}` };
+  });
+
   await page.evaluate(() => {
     document.querySelector('test-play-av').shadowRoot.querySelector('video').removeAttribute('controls');
   });
@@ -2740,14 +2756,16 @@ for (const config of [
       detail: `controls=${videos.map(v => v && v.controls)} done=${videos.map(v => v && v.getAttribute('data-wblock-player-cleaner'))}` };
   });
 
-  await check(page, S, 'keeps the original MSE sources and hides original overlay chrome', () => {
+  await page.evaluate(() => window.__remountAMPChrome());
+  await check(page, S, 'keeps MSE sources and hides remounted AMP chrome roots', () => {
     const amp = document.getElementById('amp-video');
     const fave = document.getElementById('fave-video');
     const sources = window.__wblockHandshakeSources || [];
-    const chrome = [document.querySelector('.amp-pause-overlay'), document.querySelector('.amp-controls'),
-      document.querySelector('.amp-overlays'), document.querySelector('.fave-controls')];
-    const hidden = chrome.every(el => el && (getComputedStyle(el).display === 'none' ||
-      el.closest('[data-wblock-pc-hidden]')));
+    const ampRoots = [document.querySelector('.amp-react'), document.querySelector('.amp-overlays')];
+    const faveControls = document.querySelector('.fave-controls');
+    const hidden = ampRoots.every(el => el && el.hasAttribute('data-wblock-pc-hidden') &&
+      getComputedStyle(el).display === 'none') && faveControls &&
+      getComputedStyle(faveControls).display === 'none';
     const sourceKept = amp && fave && amp.src === sources[0] && fave.src === sources[1] &&
       !amp._wblockCleaned && !fave._wblockCleaned;
     return { pass: hidden && sourceKept, detail: `hidden=${hidden} sourceKept=${sourceKept}` };
