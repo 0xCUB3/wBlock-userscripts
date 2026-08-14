@@ -1,0 +1,15 @@
+{
+  "name": "wblock-userscripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Maintained wBlock userscripts and deterministic distribution builds.",
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "check": "node tools/check.mjs",
+    "test:dark-reader": "node tests/dark-reader.test.mjs",
+    "test:cleaners": "node tests/cleaners/run-tests.mjs",
+    "test": "npm run build && npm run check && npm run test:dark-reader && npm run test:cleaners"
+  },
+  "devDependencies": { "playwright": "^1.61.1" }
+}
