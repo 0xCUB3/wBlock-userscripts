@@ -34,6 +34,7 @@ const FIXTURE_PLAYER_REPLACE_URL = pathToFileURL(join(__dirname, 'fixture-player
 const FIXTURE_PLAYER_DISCOVERY_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-discovery.html')).href;
 const FIXTURE_PLAYER_JW_INIT_RACE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-jw-init-race.html')).href;
 const FIXTURE_PLAYER_LIVE_BLOB_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-live-blob.html')).href;
+const FIXTURE_PLAYER_HANDSHAKE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-handshake.html')).href;
 const FIXTURE_PLAYER_SHADOW_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-shadow.html')).href;
 const FIXTURE_PLAYER_BARE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-bare.html')).href;
 const FIXTURE_PLAYER_RELATIVE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-relative.html')).href;
@@ -1758,6 +1759,18 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: done && declassed, detail: `done=${done}, declassed=${declassed}` };
   });
 
+  await check(page, S, 'removes Video.js fluid padding without doubling the player box', () => {
+    const c = document.getElementById('player-replace');
+    const v = c && c.querySelector('video');
+    if (!c || !v) return { pass: false, detail: 'missing player' };
+    const cr = c.getBoundingClientRect();
+    const vr = v.getBoundingClientRect();
+    const style = getComputedStyle(c);
+    const pass = !c.classList.contains('vjs-fluid') && parseFloat(style.paddingBottom) === 0 &&
+      Math.abs(cr.height - vr.height) < 2;
+    return { pass, detail: `class=${c.className} padding=${style.paddingBottom} heights=${cr.height}/${vr.height}` };
+  });
+
   await check(page, S, 'overrides document.hidden (background playback)', () => {
     const desc = Object.getOwnPropertyDescriptor(document, 'hidden');
     return { pass: !!(desc && typeof desc.get === 'function' && document.hidden === false),
@@ -2700,6 +2713,48 @@ for (const config of [
     record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
     await browser.close();
   }
+}
+
+// ---- Scenario: delayed AMP/FAVE startup handshake ------------------------
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (delayed player startup)', {
+    fixture: FIXTURE_PLAYER_HANDSHAKE_URL,
+    scriptSource: playerUserscript,
+    viewport: { width: 900, height: 820 },
+  });
+  const S = 'player-cleaner-startup-handshake';
+
+  await page.waitForTimeout(250);
+  await check(page, S, 'leaves AMP/FAVE custom controls in charge during source startup', () => {
+    const videos = [document.getElementById('amp-video'), document.getElementById('fave-video')];
+    const chrome = [document.querySelector('.amp-pause-overlay'), document.querySelector('.fave-controls')];
+    const pass = videos.every(v => v && !v.controls && !v.hasAttribute('data-wblock-player-cleaner')) &&
+      chrome.every(el => el && getComputedStyle(el).display !== 'none');
+    return { pass, detail: `controls=${videos.map(v => v && v.controls)} done=${videos.map(v => v && v.getAttribute('data-wblock-player-cleaner'))}` };
+  });
+
+  await page.evaluate(() => window.__startHandshakePlayers());
+  await check(page, S, 'nativeizes after the custom playing event completes', () => {
+    const videos = [document.getElementById('amp-video'), document.getElementById('fave-video')];
+    return { pass: videos.every(v => v && v.controls && v.getAttribute('data-wblock-player-cleaner') === '1'),
+      detail: `controls=${videos.map(v => v && v.controls)} done=${videos.map(v => v && v.getAttribute('data-wblock-player-cleaner'))}` };
+  });
+
+  await check(page, S, 'keeps the original MSE sources and hides original overlay chrome', () => {
+    const amp = document.getElementById('amp-video');
+    const fave = document.getElementById('fave-video');
+    const sources = window.__wblockHandshakeSources || [];
+    const chrome = [document.querySelector('.amp-pause-overlay'), document.querySelector('.amp-controls'),
+      document.querySelector('.amp-overlays'), document.querySelector('.fave-controls')];
+    const hidden = chrome.every(el => el && (getComputedStyle(el).display === 'none' ||
+      el.closest('[data-wblock-pc-hidden]')));
+    const sourceKept = amp && fave && amp.src === sources[0] && fave.src === sources[1] &&
+      !amp._wblockCleaned && !fave._wblockCleaned;
+    return { pass: hidden && sourceKept, detail: `hidden=${hidden} sourceKept=${sourceKept}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
 }
 
 // ---- Scenario: Twitch persistent-player shell boundary -------------------

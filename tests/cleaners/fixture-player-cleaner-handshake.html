@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delayed player startup handshake (Player Cleaner test)</title>
+<style>
+  body { margin: 0; background: #111; }
+  .amp-player, .fave-player-container { position: relative; width: 640px; height: 360px; margin: 20px; background: #000; }
+  .amp-video, .amp-video video, .fave-player-container video { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .amp-react, .amp-overlays, .fave-controls { position: absolute; inset: 0; z-index: 2; background: rgba(0, 0, 0, .2); }
+  .amp-controls, .fave-controls { top: auto; height: 48px; }
+</style>
+</head>
+<body>
+  <div id="amp-shell" class="amp-html5 amp-player">
+    <div class="amp-video"><video id="amp-video"></video></div>
+    <div class="amp-react"><button class="amp-pause-overlay">Play</button><div class="amp-controls">Controls</div></div>
+    <div class="amp-overlays">Overlay</div>
+  </div>
+
+  <div id="fave-shell" class="fave-player-container">
+    <video id="fave-video"></video>
+    <div class="fave-controls">Controls</div>
+  </div>
+
+  <script>
+    (function () {
+      var urls = [];
+      ['amp-video', 'fave-video'].forEach(function (id) {
+        var url = URL.createObjectURL(new MediaSource());
+        urls.push(url);
+        document.getElementById(id).src = url;
+      });
+      window.__wblockHandshakeSources = urls;
+      window.__startHandshakePlayers = function () {
+        document.getElementById('amp-video').dispatchEvent(new Event('playing'));
+        document.getElementById('fave-video').dispatchEvent(new Event('playing'));
+      };
+    })();
+  </script>
+</body>
+</html>

@@ -7,6 +7,7 @@
 <style>
   body { margin: 0; background: #111; }
   .video-js { position: relative; width: 960px; max-width: 100%; aspect-ratio: 16 / 9; margin: 24px auto; background: #000; }
+  .vjs-fluid { height: 0; padding-bottom: 56.25%; aspect-ratio: auto; }
   .video-js video { width: 100%; height: 100%; background: #222; }
   .vjs-control-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: rgba(0,0,0,.7); }
   .vjs-big-play-button { position: absolute; top: 40%; left: 45%; width: 60px; height: 60px; background: rgba(0,0,0,.6); border-radius: 50%; }
@@ -17,8 +18,8 @@
        (via a <source> child) plus a poster and a caption track. Player Cleaner
        should resolve the source and swap in a brand-new native <video>,
        carrying the poster and track over and dropping the custom chrome. -->
-  <div class="video-js" id="player-replace">
-    <video data-test-original="1" poster="https://example.com/poster.jpg" preload="metadata">
+  <div class="video-js vjs-fluid" id="player-replace">
+    <video data-test-original="1" width="960" height="540" poster="https://example.com/poster.jpg" preload="metadata">
       <source src="https://example.com/media/movie.mp4" type="video/mp4">
       <track kind="captions" src="https://example.com/captions.vtt" srclang="en" label="English">
     </video>

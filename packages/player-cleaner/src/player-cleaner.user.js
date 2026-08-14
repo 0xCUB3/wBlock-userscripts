@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.1
+// @version      0.1.2
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -192,6 +192,7 @@
         video._wblockChromeWatch = false;
         video._wblockEnhanced = false;
         video._wblockUpgradeable = false;
+        video._wblockPlaybackReady = false;
         video._wblockCleaned = false;
         var _ei = enhancedVideos.indexOf(video);
         if (_ei !== -1) { enhancedVideos.splice(_ei, 1); }
@@ -1589,7 +1590,14 @@
         video.setAttribute(ATTR_DONE, '1');
         container.setAttribute(ATTR_DONE, '1');
         try {
-            container.classList.remove('video-js', 'vjs-paused', 'vjs-playing');
+            var wasVideoJS = container.classList.contains('video-js');
+            container.classList.remove('video-js', 'vjs-paused', 'vjs-playing',
+                'vjs-fluid', 'vjs-16-9', 'vjs-4-3');
+            if (wasVideoJS) {
+                container.style.setProperty('height', 'auto', 'important');
+                container.style.setProperty('padding-top', '0', 'important');
+                container.style.setProperty('padding-bottom', '0', 'important');
+            }
         } catch (e) { /* ignore */ }
         applyCleanSizing(container, video);
         forceNativeControls(video);
@@ -1704,7 +1712,21 @@
     function onMediaSourceReady(event) {
         var video = event.target;
         if (!(video instanceof HTMLVideoElement)) { return; }
-        if (!video._wblockEnhanced || !video._wblockUpgradeable || video._wblockCleaned) { return; }
+        // Akamai AMP and CNN FAVE players can expose a source before their first
+        // playing event has finished. Nativeizing from inside that startup turn
+        // resets their MSE pipeline. Let the custom play gesture complete, then
+        // take over in the next task.
+        if (!video._wblockEnhanced) {
+            if (event.type === 'playing' && !video._wblockPlaybackReady) {
+                setTimeout(function () {
+                    if (!video.isConnected || video._wblockEnhanced) { return; }
+                    video._wblockPlaybackReady = true;
+                    scan(video, false);
+                }, 0);
+            }
+            return;
+        }
+        if (!video._wblockUpgradeable || video._wblockCleaned) { return; }
         var container = containerForVideo(video);
         try { replacePlayer(container, true); } catch (e) { log('upgrade failed', e); }
     }
@@ -1721,6 +1743,14 @@
     function needsBareEnhancement(video) {
         if (video.getAttribute && video.getAttribute(ATTR_DONE)) { return false; }
         if (video.controls) { return false; } // native controls already present
+        // These players attach media during their own play-event dispatch. Wait
+        // for the delegated playing handler above so controls/chrome changes do
+        // not interrupt startup.
+        try {
+            var handshakePlayer = video.closest &&
+                video.closest('.amp-player,.fave-player-container');
+            if (handshakePlayer && !video._wblockPlaybackReady) { return false; }
+        } catch (e) { /* use the normal bare-player path */ }
         // Must have (or be about to have) a source to be a real player.
         var src = video.currentSrc || video.src ||
             (video.getAttribute && video.getAttribute('src'));
@@ -1825,6 +1855,7 @@
         try {
             root.removeEventListener('loadedmetadata', onMediaSourceReady, true);
             root.removeEventListener('durationchange', onMediaSourceReady, true);
+            root.removeEventListener('playing', onMediaSourceReady, true);
         } catch (e) { /* ignore */ }
         observedRoots.splice(index, 1);
         observedRootObservers.splice(index, 1);
@@ -1945,6 +1976,7 @@
         try {
             root.addEventListener('loadedmetadata', onMediaSourceReady, true);
             root.addEventListener('durationchange', onMediaSourceReady, true);
+            root.addEventListener('playing', onMediaSourceReady, true);
         } catch (e) { /* ignore */ }
         discoverShadowRoots(root);
         scan(root, document.readyState !== 'loading');
