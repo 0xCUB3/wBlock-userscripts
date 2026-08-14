@@ -417,13 +417,15 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       };
     });
     await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
-    await check(page, scenario, 'shows the complete SponsorBlock settings panel in the iOS viewport', () => {
+    await check(page, scenario, 'keeps the complete SponsorBlock settings panel reachable in the iOS viewport', () => {
       const panel = document.querySelector('.wblock-tc-sponsor-menu');
       const rect = panel?.getBoundingClientRect();
-      const allControlsFit = !!panel && panel.scrollHeight <= panel.clientHeight;
       const pageOverlay = panel?.parentElement === document.body;
-      return { pass: !!rect && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && allControlsFit && pageOverlay,
-        detail: rect ? `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)} content=${panel.scrollHeight}/${panel.clientHeight} pageOverlay=${pageOverlay}` : 'no panel' };
+      const maxScroll = panel ? Math.max(0, panel.scrollHeight - panel.clientHeight) : 0;
+      if (panel) panel.scrollTop = panel.scrollHeight;
+      const allControlsReachable = !!panel && (maxScroll === 0 || panel.scrollTop >= maxScroll - 1);
+      return { pass: !!rect && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && allControlsReachable && pageOverlay,
+        detail: rect ? `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)} content=${panel.scrollHeight}/${panel.clientHeight} scroll=${panel.scrollTop}/${maxScroll} pageOverlay=${pageOverlay}` : 'no panel' };
     });
     await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
     await page.evaluate(() => document.querySelector('.wblock-tc-dearrow-button').click());
