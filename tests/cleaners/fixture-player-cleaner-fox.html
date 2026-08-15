@@ -1,0 +1,30 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Fox article video regression</title>
+<style>
+  body { margin: 0; }
+  .article-video { position: relative; width: 640px; height: 360px; }
+  .article-video video { width: 100%; height: 100%; }
+  .mvpd-picker { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+</style></head><body>
+  <div class="article-video">
+    <video id="fox-audio-host">
+      <source type="application/x-mpegURL" src="https://cdn.example.test/stream.m3u8">
+      <source type="audio/mpeg" src="https://cdn.beyondwords.io/story.mp3">
+    </video>
+    <iframe class="mvpd-picker" aria-label="MVPD Picker"
+      src="//static.foxnews.com/static/orion/html/video/iframe/vod.html?fixture=1"
+      allow="autoplay; encrypted-media"></iframe>
+  </div>
+  <script>
+    (function () {
+      var video = document.getElementById('fox-audio-host');
+      video.src = 'blob:https://www.foxnews.com/00000000-0000-0000-0000-000000000000';
+      try { Object.defineProperty(video, 'readyState', { configurable: true, value: 4 }); } catch (e) {}
+      video.play = function () {
+        this.currentTime = (this.currentTime || 0) + 1;
+        return Promise.resolve();
+      };
+      window.__foxPlayVideo = video;
+    })();
+  </script>
+</body></html>

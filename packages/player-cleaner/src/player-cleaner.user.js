@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.4
+// @version      0.1.5
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -830,6 +830,22 @@
         return false;
     }
 
+    // Some pages use <video> as the host for an audio-only source. Do not add
+    // video-player controls or chrome cleanup to media explicitly declared that way.
+    function isDeclaredAudioOnly(video) {
+        var sawAudio = false;
+        var sawVideo = false;
+        try {
+            var sources = video.getElementsByTagName('source');
+            for (var i = 0; i < sources.length; i++) {
+                var type = (sources[i].getAttribute('type') || '').toLowerCase();
+                if (type.indexOf('audio/') === 0) { sawAudio = true; }
+                if (type.indexOf('video/') === 0) { sawVideo = true; }
+            }
+        } catch (e) { return false; }
+        return sawAudio && !sawVideo;
+    }
+
     // ------------------------------------------------------------------
     // Replacement
     // ------------------------------------------------------------------
@@ -1306,8 +1322,21 @@
     // Hide a candidate that sits over the video but is not an ancestor/descendant
     // of it. Used by both hit-testing and the detached (portal) scan. Accepts
     // positioned chrome and static/relative full-bleed covers (LinkedIn).
+    function isPlayableMediaIframe(el) {
+        if (!el || el.tagName !== 'IFRAME') { return false; }
+        var allow = (el.getAttribute('allow') || '').toLowerCase();
+        var src = el.getAttribute('src') || '';
+        var label = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
+        var permissions = /(^|[;\s])autoplay([;\s]|$)/.test(allow) &&
+            /(^|[;\s])encrypted-media([;\s]|$)/.test(allow);
+        var source = /\/(?:video|vod|player|iframe)(?:[/?#]|$)/i.test(src);
+        var named = /video|media|player|mvpd|picker/.test(label);
+        return permissions && (source || named);
+    }
+
     function hideIfDetachedOverlay(el, video, vr) {
         if (!el || el === video || el === document.documentElement || el === document.body) { return; }
+        if (isPlayableMediaIframe(el)) { return; }
         if (composedRelated(el, video) || isFacebookProtected(el, video)) { return; }
         // A hit often lands on a control (slider/button) nested in a static bar;
         // hide the bar rather than the inner control, which the caller sees.
@@ -1747,6 +1776,10 @@
             log('player initializing; waiting for media element source');
             return;
         }
+        if (isDeclaredAudioOnly(video)) {
+            log('declared audio-only media; leaving video untouched');
+            return;
+        }
 
         // Native controls are the critical path once the media element owns a
         // source. Apply them in this mutation microtask before the next paint.
@@ -1837,6 +1870,7 @@
     function needsBareEnhancement(video) {
         if (video.getAttribute && video.getAttribute(ATTR_DONE)) { return false; }
         if (video.controls) { return false; } // native controls already present
+        if (isDeclaredAudioOnly(video)) { return false; }
         // These players attach media during their own play-event dispatch. Wait
         // for the delegated playing handler above so controls/chrome changes do
         // not interrupt startup.

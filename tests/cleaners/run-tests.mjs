@@ -43,6 +43,7 @@ const FIXTURE_PLAYER_EARLY_URL = pathToFileURL(join(__dirname, 'fixture-player-c
 const FIXTURE_PLAYER_ARTDECO_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-artdeco.html')).href;
 const FIXTURE_PLAYER_ESPN_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-espn.html')).href;
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
+const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
 
 const userscript = readFileSync(SCRIPT_PATH, 'utf8');
 const playerUserscript = readFileSync(PLAYER_SCRIPT_PATH, 'utf8');
@@ -1673,6 +1674,39 @@ async function qualityUISelectionCheck(page, scenario) {
   }));
 
   record('player-cleaner', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: Fox article audio host and media iframe -------------------
+// Fox renders an audio-only stream through <video> beside a real media iframe.
+// The audio host must not trigger Player Cleaner, and its iframe must remain usable.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Fox article video regression)', {
+    fixture: FIXTURE_PLAYER_FOX_URL,
+    scriptSource: playerUserscript,
+    readySignal: '.mvpd-picker',
+    viewport: { width: 800, height: 500 },
+  });
+  const S = 'player-cleaner-fox';
+
+  await check(page, S, 'leaves declared audio-only video untouched', () => {
+    const video = document.querySelector('#fox-audio-host');
+    return { pass: !!(video && !video.hasAttribute('data-wblock-player-cleaner') &&
+      !video.hasAttribute('controls')), detail: video ? `controls=${video.controls} marked=${video.hasAttribute('data-wblock-player-cleaner')}` : 'no video' };
+  });
+  await check(page, S, 'preserves the playable MVPD iframe', () => {
+    const iframe = document.querySelector('.mvpd-picker');
+    const style = iframe && getComputedStyle(iframe);
+    return { pass: !!(iframe && !iframe.hasAttribute('data-wblock-pc-hidden') &&
+      style && style.display !== 'none' && style.visibility !== 'hidden'), detail: iframe ? `display=${style.display} visibility=${style.visibility}` : 'no iframe' };
+  });
+  await check(page, S, 'audio host still reaches readyState 4 and advances on Play', async () => {
+    const video = window.__foxPlayVideo;
+    const before = video && video.currentTime;
+    if (video) await video.play();
+    return { pass: !!(video && video.readyState === 4 && video.currentTime > before), detail: video ? `readyState=${video.readyState} before=${before} after=${video.currentTime}` : 'no video' };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
 
