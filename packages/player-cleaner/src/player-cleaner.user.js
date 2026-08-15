@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.3
+// @version      0.1.4
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -193,6 +193,7 @@
         video._wblockEnhanced = false;
         video._wblockUpgradeable = false;
         video._wblockPlaybackReady = false;
+        video._wblockHandshakeStarted = false;
         video._wblockCleaned = false;
         var _ei = enhancedVideos.indexOf(video);
         if (_ei !== -1) { enhancedVideos.splice(_ei, 1); }
@@ -1217,6 +1218,49 @@
         catch (e) { return false; }
     }
 
+    function isHandshakePlayer(video) {
+        try {
+            return !!(video.closest && video.closest('.amp-player,.fave-player-container'));
+        } catch (e) { return false; }
+    }
+
+    function isVisiblyPainted(el) {
+        if (!el) { return false; }
+        try {
+            var style = getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || +style.opacity === 0) {
+                return false;
+            }
+            var rect = el.getBoundingClientRect();
+            return rect.width > 8 && rect.height > 8;
+        } catch (e) { return false; }
+    }
+
+    // Fox's Akamai AMP preroll keeps Skip Ad and the 10/15s bar in siblings of
+    // .amp-video. Nativeizing during that turn leaves those buttons painted over
+    // Safari's controls and unclickable.
+    function ampAdActive(video) {
+        var shell = null;
+        try { shell = video.closest && video.closest('.amp-player'); }
+        catch (e) { return false; }
+        if (!shell) { return false; }
+        var cls = ' ' + (shell.className || '') + ' ';
+        if (cls.indexOf(' amp-ad ') !== -1 || cls.indexOf(' amp-ads ') !== -1) {
+            return true;
+        }
+        var nodes = shell.querySelectorAll('.amp-ads,.amp-ad,.fw-ad,[class*="amp-ad-"]');
+        for (var i = 0; i < nodes.length; i++) {
+            if (isVisiblyPainted(nodes[i])) { return true; }
+        }
+        var labels = shell.querySelectorAll('button,[role="button"],.amp-component');
+        for (var j = 0; j < labels.length; j++) {
+            var text = ((labels[j].textContent || '') + ' ' +
+                (labels[j].getAttribute('aria-label') || '')).toLowerCase();
+            if (/skip\s*ad/.test(text) && isVisiblyPainted(labels[j])) { return true; }
+        }
+        return false;
+    }
+
     function hideKnownSiblingChrome(video) {
         // Akamai AMP keeps all custom UI in siblings of .amp-video. Hide the
         // sibling roots themselves so late React class changes or remounts cannot
@@ -1224,10 +1268,17 @@
         var ampShell = null;
         try { ampShell = video.closest && video.closest('.amp-player'); }
         catch (e) { /* not an AMP player */ }
-        if (!ampShell || !ampShell.querySelectorAll) { return; }
-        var chrome = ampShell.querySelectorAll('.amp-react,.amp-overlays');
-        for (var i = 0; i < chrome.length; i++) {
-            if (!composedRelated(chrome[i], video)) { hideElement(chrome[i]); }
+        if (!ampShell || !ampShell.children) { return; }
+        if (ampAdActive(video)) { return; }
+        var kids = ampShell.children;
+        for (var i = 0; i < kids.length; i++) {
+            if (!composedRelated(kids[i], video)) { hideElement(kids[i]); }
+        }
+        var chrome = ampShell.querySelectorAll(
+            '.amp-react,.amp-overlays,.amp-controls,.amp-ads,.amp-ad,.amp-sharing,.fw-ad'
+        );
+        for (var j = 0; j < chrome.length; j++) {
+            if (!composedRelated(chrome[j], video)) { hideElement(chrome[j]); }
         }
     }
 
@@ -1756,9 +1807,13 @@
         // resets their MSE pipeline. Let the custom play gesture complete, then
         // take over in the next task.
         if (!video._wblockEnhanced) {
-            if (event.type === 'playing' && !video._wblockPlaybackReady) {
+            var handshake = isHandshakePlayer(video);
+            if (event.type === 'playing' || (handshake &&
+                (event.type === 'durationchange' || event.type === 'loadedmetadata'))) {
                 setTimeout(function () {
                     if (!video.isConnected || video._wblockEnhanced) { return; }
+                    if (handshake) { video._wblockHandshakeStarted = true; }
+                    if (handshake && ampAdActive(video)) { return; }
                     video._wblockPlaybackReady = true;
                     scan(video, false);
                 }, 0);
@@ -1785,11 +1840,10 @@
         // These players attach media during their own play-event dispatch. Wait
         // for the delegated playing handler above so controls/chrome changes do
         // not interrupt startup.
-        try {
-            var handshakePlayer = video.closest &&
-                video.closest('.amp-player,.fave-player-container');
-            if (handshakePlayer && !video._wblockPlaybackReady) { return false; }
-        } catch (e) { /* use the normal bare-player path */ }
+        if (isHandshakePlayer(video) &&
+            (!video._wblockPlaybackReady || ampAdActive(video))) {
+            return false;
+        }
         // Must have (or be about to have) a source to be a real player.
         var src = video.currentSrc || video.src ||
             (video.getAttribute && video.getAttribute('src'));
@@ -1957,6 +2011,20 @@
         // UI churn is nativeization-only.
         var mayClean = sourceRelevant && document.readyState !== 'loading';
         for (var r = 0; r < roots.length; r++) { scan(roots[r], mayClean); }
+        // Fox AMP often ends a preroll by flipping .amp-ad off without another
+        // playing event. Class mutations still land here; promote the handshake
+        // once the ad chrome is gone.
+        for (var hv = 0; hv < roots.length; hv++) {
+            var handshakeVideos = [];
+            collectVideos(roots[hv], handshakeVideos);
+            for (var hi = 0; hi < handshakeVideos.length; hi++) {
+                var handshakeVideo = handshakeVideos[hi];
+                if (handshakeVideo._wblockEnhanced || !isHandshakePlayer(handshakeVideo)) { continue; }
+                if (!handshakeVideo._wblockHandshakeStarted || ampAdActive(handshakeVideo)) { continue; }
+                handshakeVideo._wblockPlaybackReady = true;
+                scan(handshakeVideo, false);
+            }
+        }
         // Re-hide overlay chrome for already-enhanced videos whose player region a
         // mutation just touched. Custom players (LinkedIn) (re)mount or refresh
         // their control overlay after the one-shot hide — typically on play — so

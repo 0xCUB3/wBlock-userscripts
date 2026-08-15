@@ -17,6 +17,7 @@
     <div class="amp-video"><video id="amp-video"></video></div>
     <div class="amp-react"><button class="amp-pause-overlay">Play</button><div class="amp-controls">Controls</div></div>
     <div class="amp-overlays">Overlay</div>
+    <div class="amp-ads" style="display:none"><button class="amp-skip-ad">Skip Ad</button></div>
   </div>
 
   <div id="fave-shell" class="fave-player-container">
@@ -34,8 +35,17 @@
       });
       window.__wblockHandshakeSources = urls;
       window.__startHandshakePlayers = function () {
+        var shell = document.getElementById('amp-shell');
+        shell.classList.add('amp-ad');
+        shell.querySelector('.amp-ads').style.display = 'block';
         document.getElementById('amp-video').dispatchEvent(new Event('playing'));
         document.getElementById('fave-video').dispatchEvent(new Event('playing'));
+      };
+      window.__finishAMPAd = function () {
+        var shell = document.getElementById('amp-shell');
+        shell.classList.remove('amp-ad');
+        shell.querySelector('.amp-ads').style.display = 'none';
+        document.getElementById('amp-video').dispatchEvent(new Event('playing'));
       };
       window.__remountAMPChrome = function () {
         var shell = document.getElementById('amp-shell');

@@ -2750,10 +2750,21 @@ for (const config of [
   });
 
   await page.evaluate(() => window.__startHandshakePlayers());
-  await check(page, S, 'nativeizes after the custom playing event completes', () => {
-    const videos = [document.getElementById('amp-video'), document.getElementById('fave-video')];
-    return { pass: videos.every(v => v && v.controls && v.getAttribute('data-wblock-player-cleaner') === '1'),
-      detail: `controls=${videos.map(v => v && v.controls)} done=${videos.map(v => v && v.getAttribute('data-wblock-player-cleaner'))}` };
+  await check(page, S, 'leaves AMP ad chrome clickable while FAVE nativeizes', () => {
+    const amp = document.getElementById('amp-video');
+    const fave = document.getElementById('fave-video');
+    const skip = document.querySelector('.amp-skip-ad');
+    const pass = amp && !amp.controls && !amp.hasAttribute('data-wblock-player-cleaner') &&
+      fave && fave.controls && fave.getAttribute('data-wblock-player-cleaner') === '1' &&
+      skip && getComputedStyle(skip).display !== 'none' && !skip.closest('[data-wblock-pc-hidden]');
+    return { pass, detail: `amp=${amp && amp.controls}/${amp && amp.getAttribute('data-wblock-player-cleaner')} fave=${fave && fave.controls} skip=${skip && getComputedStyle(skip).display}` };
+  });
+
+  await page.evaluate(() => window.__finishAMPAd());
+  await check(page, S, 'nativeizes AMP after the preroll ends', () => {
+    const amp = document.getElementById('amp-video');
+    return { pass: !!(amp && amp.controls && amp.getAttribute('data-wblock-player-cleaner') === '1'),
+      detail: `controls=${amp && amp.controls} done=${amp && amp.getAttribute('data-wblock-player-cleaner')}` };
   });
 
   await page.evaluate(() => window.__remountAMPChrome());
