@@ -2825,7 +2825,7 @@ for (const config of [
   await browser.close();
 }
 
-// ---- Scenario: iOS CNN FAVE keeps its site-owned MSE pipeline --------------
+// ---- Scenario: iOS CNN FAVE adds controls without replacing its MSE pipeline
 {
   const iphone = devices['iPhone 13'];
   const { browser, page, pageErrors } = await runScenario('Player Cleaner (iOS CNN FAVE)', {
@@ -2839,15 +2839,17 @@ for (const config of [
 
   await page.evaluate(() => document.getElementById('fave-video').dispatchEvent(new Event('playing')));
   await page.waitForTimeout(250);
-  await check(page, S, 'leaves CNN FAVE controls and MSE source untouched', () => {
+  await check(page, S, 'adds native controls while preserving CNN FAVE source and wrapper', () => {
     const video = document.getElementById('fave-video');
-    const controls = document.querySelector('.fave-controls');
+    const wrapper = document.querySelector('.fave-player-container');
+    const siteControls = document.querySelector('.fave-controls');
     const source = (window.__wblockHandshakeSources || [])[1];
-    const pass = video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
-      !video._wblockEnhanced && video.src === source && controls &&
-      getComputedStyle(controls).display !== 'none' && !controls.closest('[data-wblock-pc-hidden]');
+    const pass = video && video.controls && video.hasAttribute('data-wblock-player-cleaner') &&
+      !video._wblockEnhanced && video.src === source && wrapper && wrapper.contains(video) &&
+      siteControls && getComputedStyle(siteControls).display !== 'none' &&
+      !siteControls.closest('[data-wblock-pc-hidden]');
     return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced +
-      ' sourceKept=' + (video.src === source) : 'no video' };
+      ' sourceKept=' + (video.src === source) + ' wrapperKept=' + !!(wrapper && wrapper.contains(video)) : 'no video' };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
