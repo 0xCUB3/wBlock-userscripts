@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.5
+// @version      0.1.6
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1234,6 +1234,24 @@
         catch (e) { return false; }
     }
 
+    function isIOSLikeDevice() {
+        try {
+            return /iP(?:hone|ad|od)/i.test(navigator.platform || '') ||
+                /iP(?:hone|ad|od)/i.test(navigator.userAgent || '') ||
+                (/Mac/i.test(navigator.platform || '') && navigator.maxTouchPoints > 1);
+        } catch (e) { return false; }
+    }
+
+    // CNN's FAVE player owns an MSE decoder pipeline that iOS WebKit loses when
+    // native controls or playsinline are changed after the first playing event.
+    // Keep that player entirely site-owned on iOS; desktop FAVE still nativeizes.
+    function preserveIOSCNNFave(video) {
+        try {
+            return isIOSLikeDevice() && /(^|\.)cnn\.com$/i.test(location.hostname) &&
+                !!(video && video.closest && video.closest('.fave-player-container'));
+        } catch (e) { return false; }
+    }
+
     function isHandshakePlayer(video) {
         try {
             return !!(video.closest && video.closest('.amp-player,.fave-player-container'));
@@ -1780,6 +1798,10 @@
             log('declared audio-only media; leaving video untouched');
             return;
         }
+        if (preserveIOSCNNFave(video)) {
+            log('preserving CNN FAVE pipeline on iOS');
+            return;
+        }
 
         // Native controls are the critical path once the media element owns a
         // source. Apply them in this mutation microtask before the next paint.
@@ -1869,6 +1891,7 @@
     // left intact.
     function needsBareEnhancement(video) {
         if (video.getAttribute && video.getAttribute(ATTR_DONE)) { return false; }
+        if (preserveIOSCNNFave(video)) { return false; }
         if (video.controls) { return false; } // native controls already present
         if (isDeclaredAudioOnly(video)) { return false; }
         // These players attach media during their own play-event dispatch. Wait

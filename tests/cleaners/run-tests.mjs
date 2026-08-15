@@ -332,6 +332,11 @@ async function runScenario(name, { device, fixture, ua, hasTouch, viewport, scri
       contentType: 'text/html',
       body: responseBody || '',
     }));
+    await context.route(/https:\/\/www\.cnn\.com\//, route => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: responseBody || '',
+    }));
   }
   const page = await context.newPage();
 
@@ -2814,6 +2819,35 @@ for (const config of [
     const sourceKept = amp && fave && amp.src === sources[0] && fave.src === sources[1] &&
       !amp._wblockCleaned && !fave._wblockCleaned;
     return { pass: hidden && sourceKept, detail: `hidden=${hidden} sourceKept=${sourceKept}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: iOS CNN FAVE keeps its site-owned MSE pipeline --------------
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (iOS CNN FAVE)', {
+    device: iphone,
+    hasTouch: true,
+    gotoURL: 'https://www.cnn.com/video/fixture',
+    responseBody: readFileSync(join(__dirname, 'fixture-player-cleaner-handshake.html'), 'utf8'),
+    scriptSource: playerUserscript,
+  });
+  const S = 'player-cleaner-ios-cnn-fave';
+
+  await page.evaluate(() => document.getElementById('fave-video').dispatchEvent(new Event('playing')));
+  await page.waitForTimeout(250);
+  await check(page, S, 'leaves CNN FAVE controls and MSE source untouched', () => {
+    const video = document.getElementById('fave-video');
+    const controls = document.querySelector('.fave-controls');
+    const source = (window.__wblockHandshakeSources || [])[1];
+    const pass = video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
+      !video._wblockEnhanced && video.src === source && controls &&
+      getComputedStyle(controls).display !== 'none' && !controls.closest('[data-wblock-pc-hidden]');
+    return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced +
+      ' sourceKept=' + (video.src === source) : 'no video' };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
