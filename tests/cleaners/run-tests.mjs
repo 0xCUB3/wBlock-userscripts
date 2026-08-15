@@ -321,21 +321,12 @@ async function runScenario(name, { device, fixture, ua, hasTouch, viewport, scri
     contentType: 'image/svg+xml',
     body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"><rect width="16" height="9" fill="#345"/></svg>',
   }));
-  if (gotoURL) {
-    await context.route(/https:\/\/www\.youtube\.com\/shorts\//, route => route.fulfill({
+  if (gotoURL && responseBody != null) {
+    const origin = new URL(gotoURL).origin + '/**';
+    await context.route(origin, route => route.fulfill({
       status: 200,
       contentType: 'text/html',
-      body: responseBody || '',
-    }));
-    await context.route(/https:\/\/www\.twitch\.tv\//, route => route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: responseBody || '',
-    }));
-    await context.route(/https:\/\/www\.cnn\.com\//, route => route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: responseBody || '',
+      body: responseBody,
     }));
   }
   const page = await context.newPage();
@@ -2825,21 +2816,25 @@ for (const config of [
   await browser.close();
 }
 
-// ---- Scenario: iOS CNN FAVE adds controls without replacing its MSE pipeline
+// ---- Scenario: iOS opaque MSE gets native controls without replacement ------
 {
   const iphone = devices['iPhone 13'];
-  const { browser, page, pageErrors } = await runScenario('Player Cleaner (iOS CNN FAVE)', {
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (iOS opaque MSE)', {
     device: iphone,
     hasTouch: true,
-    gotoURL: 'https://www.cnn.com/video/fixture',
+    gotoURL: 'https://www.foxnews.com/video/fixture',
     responseBody: readFileSync(join(__dirname, 'fixture-player-cleaner-handshake.html'), 'utf8'),
     scriptSource: playerUserscript,
   });
-  const S = 'player-cleaner-ios-cnn-fave';
+  const S = 'player-cleaner-ios-opaque-mse';
 
-  await page.evaluate(() => document.getElementById('fave-video').dispatchEvent(new Event('playing')));
+  await page.evaluate(() => {
+    const fave = document.getElementById('fave-video');
+    Object.defineProperty(fave, 'paused', { configurable: true, get: () => false });
+    fave.dispatchEvent(new Event('playing'));
+  });
   await page.waitForTimeout(250);
-  await check(page, S, 'adds native controls and hides CNN FAVE chrome without replacing the source', () => {
+  await check(page, S, 'adds native controls and hides FAVE chrome without replacing the source', () => {
     const video = document.getElementById('fave-video');
     const wrapper = document.querySelector('.fave-player-container');
     const siteControls = document.querySelector('.fave-controls');
@@ -2851,6 +2846,29 @@ for (const config of [
     return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced +
       ' sourceKept=' + (video.src === source) + ' wrapperKept=' + !!(wrapper && wrapper.contains(video)) +
       ' chromeHidden=' + chromeHidden : 'no video' };
+  });
+
+  await page.evaluate(() => window.__startHandshakePlayers());
+  await check(page, S, 'leaves AMP preroll chrome clickable on iOS', () => {
+    const amp = document.getElementById('amp-video');
+    const skip = document.querySelector('.amp-skip-ad');
+    const pass = amp && !amp.controls && !amp.hasAttribute('data-wblock-player-cleaner') &&
+      skip && getComputedStyle(skip).display !== 'none' && !skip.closest('[data-wblock-pc-hidden]');
+    return { pass, detail: `amp=${amp && amp.controls}/${amp && amp.getAttribute('data-wblock-player-cleaner')} skip=${skip && getComputedStyle(skip).display}` };
+  });
+
+  await page.evaluate(() => {
+    const amp = document.getElementById('amp-video');
+    Object.defineProperty(amp, 'paused', { configurable: true, get: () => false });
+    window.__finishAMPAd();
+  });
+  await page.waitForTimeout(250);
+  await check(page, S, 'nativeizes AMP after preroll without replacing its MSE source', () => {
+    const amp = document.getElementById('amp-video');
+    const source = (window.__wblockHandshakeSources || [])[0];
+    const pass = !!(amp && amp.controls && amp.getAttribute('data-wblock-player-cleaner') === '1' &&
+      !amp._wblockEnhanced && amp.src === source);
+    return { pass, detail: `controls=${amp && amp.controls} enhanced=${!!(amp && amp._wblockEnhanced)} sourceKept=${amp && amp.src === source}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.8
+// @version      0.1.9
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1242,26 +1242,34 @@
         } catch (e) { return false; }
     }
 
-    // CNN's iOS FAVE player must retain its MSE-owned source and DOM. Expose
-    // native controls and hide FAVE chrome only — the generic cleanup path
-    // can leave this player rendering a black frame.
-    function isIOSCNNFave(video) {
+    // iOS WebKit can drop an MSE decoder if we mutate playsinline or rebuild
+    // the wrapper after the first playing event. Keep the existing media
+    // element and only expose native controls + hide site chrome.
+    function isIOSPreservedPlayer(video) {
         try {
-            return isIOSLikeDevice() && /(^|\.)cnn\.com$/i.test(location.hostname) &&
-                !!(video && video.closest && video.closest('.fave-player-container'));
+            return isIOSLikeDevice() && !!video && hasOpaqueMediaSource(video);
         } catch (e) { return false; }
     }
 
-    function enableIOSCNNFaveControls(container, video) {
+    function isAlreadyPlaying(video) {
+        try { return !!(video && !video.paused && !video.ended); }
+        catch (e) { return false; }
+    }
+
+    function shouldDeferHandshake(video) {
+        return isHandshakePlayer(video) &&
+            (!(video._wblockPlaybackReady || isAlreadyPlaying(video)) || ampAdActive(video));
+    }
+
+    function enableIOSPreservedControls(container, video) {
+        if (shouldDeferHandshake(video)) { return; }
         video.setAttribute(ATTR_DONE, '1');
         if (container && container.setAttribute) { container.setAttribute(ATTR_DONE, '1'); }
         forceNativeControls(video);
         guardNativeControls(video);
-        hideKnownSiblingChrome(video);
-        hideOverlappingChrome(video);
-        hideStackedChrome(video);
+        suppressChrome(container, video);
         armChromeWatch(video);
-        log('enabled native controls without replacing CNN FAVE on iOS');
+        log('enabled native controls without replacing iOS MSE player');
     }
 
     function isHandshakePlayer(video) {
@@ -1828,8 +1836,9 @@
             log('declared audio-only media; leaving video untouched');
             return;
         }
-        if (isIOSCNNFave(video)) {
-            enableIOSCNNFaveControls(container, video);
+        if (isIOSPreservedPlayer(video)) {
+            if (shouldDeferHandshake(video)) { return; }
+            enableIOSPreservedControls(container, video);
             return;
         }
 
@@ -1921,16 +1930,14 @@
     // left intact.
     function needsBareEnhancement(video) {
         if (video.getAttribute && video.getAttribute(ATTR_DONE)) { return false; }
-        if (isIOSCNNFave(video)) { return false; }
+        if (isIOSPreservedPlayer(video)) { return false; }
         if (video.controls) { return false; } // native controls already present
         if (isDeclaredAudioOnly(video)) { return false; }
         // These players attach media during their own play-event dispatch. Wait
         // for the delegated playing handler above so controls/chrome changes do
-        // not interrupt startup.
-        if (isHandshakePlayer(video) &&
-            (!video._wblockPlaybackReady || ampAdActive(video))) {
-            return false;
-        }
+        // not interrupt startup. A late inject after playing already fired
+        // still counts as ready.
+        if (shouldDeferHandshake(video)) { return false; }
         // Must have (or be about to have) a source to be a real player.
         var src = video.currentSrc || video.src ||
             (video.getAttribute && video.getAttribute('src'));
@@ -1994,8 +2001,10 @@
         for (var k = 0; k < descendants.length; k++) { bareVideos.push(descendants[k]); }
         for (var v = 0; v < bareVideos.length; v++) {
             var video = bareVideos[v];
-            if (isIOSCNNFave(video)) {
-                enableIOSCNNFaveControls(containerForVideo(video), video);
+            if (isIOSPreservedPlayer(video)) {
+                if (!shouldDeferHandshake(video)) {
+                    enableIOSPreservedControls(containerForVideo(video), video);
+                }
                 continue;
             }
             if (!needsBareEnhancement(video)) { continue; }
@@ -2102,16 +2111,18 @@
         // UI churn is nativeization-only.
         var mayClean = sourceRelevant && document.readyState !== 'loading';
         for (var r = 0; r < roots.length; r++) { scan(roots[r], mayClean); }
-        // Fox AMP often ends a preroll by flipping .amp-ad off without another
-        // playing event. Class mutations still land here; promote the handshake
-        // once the ad chrome is gone.
+        // Handshake players often end a preroll by flipping .amp-ad off without
+        // another playing event. Class mutations still land here; promote once
+        // the ad chrome is gone, or if playback already started before inject.
         for (var hv = 0; hv < roots.length; hv++) {
             var handshakeVideos = [];
             collectVideos(roots[hv], handshakeVideos);
             for (var hi = 0; hi < handshakeVideos.length; hi++) {
                 var handshakeVideo = handshakeVideos[hi];
-                if (handshakeVideo._wblockEnhanced || !isHandshakePlayer(handshakeVideo)) { continue; }
-                if (!handshakeVideo._wblockHandshakeStarted || ampAdActive(handshakeVideo)) { continue; }
+                if (handshakeVideo._wblockEnhanced || handshakeVideo.getAttribute(ATTR_DONE)) { continue; }
+                if (!isHandshakePlayer(handshakeVideo) && !isIOSPreservedPlayer(handshakeVideo)) { continue; }
+                if (ampAdActive(handshakeVideo)) { continue; }
+                if (!handshakeVideo._wblockHandshakeStarted && !isAlreadyPlaying(handshakeVideo)) { continue; }
                 handshakeVideo._wblockPlaybackReady = true;
                 scan(handshakeVideo, false);
             }
@@ -2216,7 +2227,7 @@
         var videos = document.querySelectorAll('video[' + ATTR_DONE + ']');
         for (var i = 0; i < videos.length; i++) {
             var v = videos[i];
-            if (!v._wblockEnhanced && !v._wblockCleaned) continue;
+            if (!v._wblockEnhanced && !v._wblockCleaned && !isIOSPreservedPlayer(v)) continue;
             var c = containerForVideo(v);
             if (!c) continue;
             suppressChrome(c, v);
