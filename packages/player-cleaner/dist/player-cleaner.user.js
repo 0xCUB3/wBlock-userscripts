@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.7
+// @version      0.1.8
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1243,8 +1243,8 @@
     }
 
     // CNN's iOS FAVE player must retain its MSE-owned source and DOM. Expose
-    // native controls without the generic chrome suppression and cleanup path,
-    // which can leave this player rendering a black frame.
+    // native controls and hide FAVE chrome only — the generic cleanup path
+    // can leave this player rendering a black frame.
     function isIOSCNNFave(video) {
         try {
             return isIOSLikeDevice() && /(^|\.)cnn\.com$/i.test(location.hostname) &&
@@ -1257,6 +1257,10 @@
         if (container && container.setAttribute) { container.setAttribute(ATTR_DONE, '1'); }
         forceNativeControls(video);
         guardNativeControls(video);
+        hideKnownSiblingChrome(video);
+        hideOverlappingChrome(video);
+        hideStackedChrome(video);
+        armChromeWatch(video);
         log('enabled native controls without replacing CNN FAVE on iOS');
     }
 
@@ -1310,17 +1314,35 @@
         var ampShell = null;
         try { ampShell = video.closest && video.closest('.amp-player'); }
         catch (e) { /* not an AMP player */ }
-        if (!ampShell || !ampShell.children) { return; }
-        if (ampAdActive(video)) { return; }
-        var kids = ampShell.children;
-        for (var i = 0; i < kids.length; i++) {
-            if (!composedRelated(kids[i], video)) { hideElement(kids[i]); }
+        if (ampShell && ampShell.children && !ampAdActive(video)) {
+            var kids = ampShell.children;
+            for (var i = 0; i < kids.length; i++) {
+                if (!composedRelated(kids[i], video)) { hideElement(kids[i]); }
+            }
+            var chrome = ampShell.querySelectorAll(
+                '.amp-react,.amp-overlays,.amp-controls,.amp-ads,.amp-ad,.amp-sharing,.fw-ad'
+            );
+            for (var j = 0; j < chrome.length; j++) {
+                if (!composedRelated(chrome[j], video)) { hideElement(chrome[j]); }
+            }
         }
-        var chrome = ampShell.querySelectorAll(
-            '.amp-react,.amp-overlays,.amp-controls,.amp-ads,.amp-ad,.amp-sharing,.fw-ad'
-        );
-        for (var j = 0; j < chrome.length; j++) {
-            if (!composedRelated(chrome[j], video)) { hideElement(chrome[j]); }
+
+        // CNN FAVE paints its PUI slate and overlay-root as siblings of the
+        // MSE <video>. Hide those roots only; the video element stays put.
+        var faveShell = null;
+        try { faveShell = video.closest && video.closest('.fave-player-container'); }
+        catch (e) { /* not a FAVE player */ }
+        if (faveShell && faveShell.children) {
+            var faveKids = faveShell.children;
+            for (var f = 0; f < faveKids.length; f++) {
+                if (!composedRelated(faveKids[f], video)) { hideElement(faveKids[f]); }
+            }
+            var faveChrome = faveShell.querySelectorAll(
+                '.pui-wrapper,.pui,#overlay-root,.fave-controls,[class*="pui_"]'
+            );
+            for (var fc = 0; fc < faveChrome.length; fc++) {
+                if (!composedRelated(faveChrome[fc], video)) { hideElement(faveChrome[fc]); }
+            }
         }
     }
 

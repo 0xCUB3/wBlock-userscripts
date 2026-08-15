@@ -2839,17 +2839,18 @@ for (const config of [
 
   await page.evaluate(() => document.getElementById('fave-video').dispatchEvent(new Event('playing')));
   await page.waitForTimeout(250);
-  await check(page, S, 'adds native controls while preserving CNN FAVE source and wrapper', () => {
+  await check(page, S, 'adds native controls and hides CNN FAVE chrome without replacing the source', () => {
     const video = document.getElementById('fave-video');
     const wrapper = document.querySelector('.fave-player-container');
     const siteControls = document.querySelector('.fave-controls');
     const source = (window.__wblockHandshakeSources || [])[1];
+    const chromeHidden = !!(siteControls && (siteControls.hasAttribute('data-wblock-pc-hidden') ||
+      siteControls.closest('[data-wblock-pc-hidden]') || getComputedStyle(siteControls).display === 'none'));
     const pass = video && video.controls && video.hasAttribute('data-wblock-player-cleaner') &&
-      !video._wblockEnhanced && video.src === source && wrapper && wrapper.contains(video) &&
-      siteControls && getComputedStyle(siteControls).display !== 'none' &&
-      !siteControls.closest('[data-wblock-pc-hidden]');
+      !video._wblockEnhanced && video.src === source && wrapper && wrapper.contains(video) && chromeHidden;
     return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced +
-      ' sourceKept=' + (video.src === source) + ' wrapperKept=' + !!(wrapper && wrapper.contains(video)) : 'no video' };
+      ' sourceKept=' + (video.src === source) + ' wrapperKept=' + !!(wrapper && wrapper.contains(video)) +
+      ' chromeHidden=' + chromeHidden : 'no video' };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
