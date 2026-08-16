@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Late dark fixture</title>
+</head>
+<body>
+<h1>Page that themes itself during parsing</h1>
+<script>
+var style = document.createElement('style');
+style.textContent = 'html { background: #101014; } body { color: #e8e8e8; }';
+document.head.appendChild(style);
+</script>
+</body>
+</html>
