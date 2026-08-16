@@ -24,9 +24,15 @@
       // Real Bolt/FAVE attaches ManagedMediaSource through srcObject and
       // never writes a blob: URL. It also does not pre-set
       // disableremoteplayback on the element we first see.
+      window.__startEmptyHandshake = function () {
+        var video = document.getElementById('content-video');
+        Object.defineProperty(video, 'paused', { configurable: true, get: function () { return false; } });
+        video.dispatchEvent(new Event('playing'));
+      };
       window.__attachManagedSource = function () {
         var video = document.getElementById('content-video');
         video.srcObject = new MediaSource();
+        Object.defineProperty(video, 'readyState', { configurable: true, get: function () { return 2; } });
         Object.defineProperty(video, 'paused', { configurable: true, get: function () { return false; } });
         video.dispatchEvent(new Event('playing'));
       };

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.12
+// @version      0.1.13
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -967,8 +967,11 @@
             if (!video.hasAttribute('disableremoteplayback')) {
                 video.setAttribute('disableremoteplayback', '');
             }
-            if (video.getAttribute('x-webkit-airplay') === 'allow') {
-                video.removeAttribute('x-webkit-airplay');
+            // iOS 18/27 still paints the AirPlay picker unless this is an
+            // explicit deny. Removing "allow" is not enough: the default is
+            // still allow, and ManagedMediaSource then never loads.
+            if (video.getAttribute('x-webkit-airplay') !== 'deny') {
+                video.setAttribute('x-webkit-airplay', 'deny');
             }
         } catch (e) { /* ignore */ }
     }
@@ -1319,9 +1322,24 @@
         catch (e) { return false; }
     }
 
+    // CNN FAVE / Bolt dispatch play() before ManagedMediaSource exists.
+    // Nativeizing on that empty playing event paints Safari chrome + AirPlay
+    // and the later srcObject attach is rejected. Wait for a real pipeline.
+    function hasAttachedMediaPipeline(video) {
+        try {
+            if (!video) { return false; }
+            if (video.srcObject) { return true; }
+            if ((video.readyState || 0) >= 2) { return true; }
+            var src = video.currentSrc || video.src || '';
+            return src.indexOf('blob:') === 0 || src.indexOf('http') === 0;
+        } catch (e) { return false; }
+    }
+
     function shouldDeferHandshake(video) {
-        return isHandshakePlayer(video) &&
-            (!(video._wblockPlaybackReady || isAlreadyPlaying(video)) || ampAdActive(video));
+        if (!isHandshakePlayer(video)) { return false; }
+        if (ampAdActive(video)) { return true; }
+        if (!hasAttachedMediaPipeline(video)) { return true; }
+        return !(video._wblockPlaybackReady || isAlreadyPlaying(video));
     }
 
     function enableIOSPreservedControls(container, video) {
@@ -2222,6 +2240,7 @@
                 if (handshakeVideo._wblockEnhanced || handshakeVideo.getAttribute(ATTR_DONE)) { continue; }
                 if (!isHandshakePlayer(handshakeVideo) && !isIOSPreservedPlayer(handshakeVideo)) { continue; }
                 if (ampAdActive(handshakeVideo)) { continue; }
+                if (!hasAttachedMediaPipeline(handshakeVideo)) { continue; }
                 if (!handshakeVideo._wblockHandshakeStarted && !isAlreadyPlaying(handshakeVideo)) { continue; }
                 handshakeVideo._wblockPlaybackReady = true;
                 scan(handshakeVideo, false);

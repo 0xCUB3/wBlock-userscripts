@@ -2942,8 +2942,20 @@ for (const config of [
       !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
     const pass = !!(video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
       video.disableRemotePlayback && video.hasAttribute('disableremoteplayback') &&
-      video.getAttribute('x-webkit-airplay') !== 'allow' && visible(play));
+      video.getAttribute('x-webkit-airplay') === 'deny' && visible(play));
     return { pass, detail: `controls=${video && video.controls} done=${video && video.getAttribute('data-wblock-player-cleaner')} drp=${video && video.disableRemotePlayback}/${video && video.hasAttribute('disableremoteplayback')} airplay=${video && video.getAttribute('x-webkit-airplay')} play=${play && getComputedStyle(play).display}` };
+  });
+
+  await page.evaluate(() => window.__startEmptyHandshake());
+  await page.waitForTimeout(250);
+  await check(page, S, 'does not nativeize a sourceless playing handshake', () => {
+    const video = document.getElementById('content-video');
+    const play = document.getElementById('play-button');
+    const visible = el => el && getComputedStyle(el).display !== 'none' &&
+      !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    const pass = !!(video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
+      !video.srcObject && video.getAttribute('x-webkit-airplay') === 'deny' && visible(play));
+    return { pass, detail: `controls=${video && video.controls} done=${video && video.getAttribute('data-wblock-player-cleaner')} srcObject=${video && !!video.srcObject} airplay=${video && video.getAttribute('x-webkit-airplay')} play=${play && getComputedStyle(play).display}` };
   });
 
   await page.evaluate(() => window.__attachManagedSource());
@@ -2954,7 +2966,7 @@ for (const config of [
     const pass = !!(video && video.controls && video.getAttribute('data-wblock-player-cleaner') === '1' &&
       !video._wblockCleaned && video.srcObject &&
       video.disableRemotePlayback && video.hasAttribute('disableremoteplayback') &&
-      video.getAttribute('x-webkit-airplay') !== 'allow' &&
+      video.getAttribute('x-webkit-airplay') === 'deny' &&
       wrapper && getComputedStyle(wrapper).display === 'none');
     return { pass, detail: video ? `controls=${video.controls} cleaned=${!!video._wblockCleaned} srcObject=${!!video.srcObject} drp=${video.disableRemotePlayback}/${video.hasAttribute('disableremoteplayback')} airplay=${video.getAttribute('x-webkit-airplay')} chrome=${wrapper && getComputedStyle(wrapper).display}` : 'no video' };
   });
