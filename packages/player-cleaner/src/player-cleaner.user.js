@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.10
+// @version      0.1.11
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -66,6 +66,20 @@
         try {
             return !!(video && ((video.currentSrc || '').indexOf('blob:') === 0 ||
                 (video.src || '').indexOf('blob:') === 0));
+        } catch (e) { return false; }
+    }
+
+    // Bolt/FAVE (cnn) primes pooled <video> elements inside the play gesture
+    // with a ~1s data: clip so later programmatic playback is unlocked on iOS.
+    // A data: source is that unlock primer, never the content. Treating it as
+    // a real source let the primer's playing event enhance the pooled element
+    // and hide the shared player chrome (play button, slate), wedging CNN's
+    // vertical video pages in an endless loading state.
+    function isPrimerMedia(video) {
+        try {
+            if (!video || video.srcObject) { return false; }
+            var src = video.currentSrc || video.src || '';
+            return src.indexOf('data:') === 0;
         } catch (e) { return false; }
     }
 
@@ -1369,7 +1383,13 @@
         if (faveShell && faveShell.children) {
             var faveKids = faveShell.children;
             for (var f = 0; f < faveKids.length; f++) {
-                if (!composedRelated(faveKids[f], video)) { hideElement(faveKids[f]); }
+                if (composedRelated(faveKids[f], video)) { continue; }
+                // Never hide pooled media elements: Bolt reuses sibling
+                // <video>s as unlock primers and for the next feed item on
+                // vertical video pages.
+                if (faveKids[f].tagName === 'VIDEO' ||
+                    (faveKids[f].querySelector && faveKids[f].querySelector('video'))) { continue; }
+                hideElement(faveKids[f]);
             }
             var faveChrome = faveShell.querySelectorAll(
                 '.pui-wrapper,.pui,#overlay-root,.fave-controls,[class*="pui_"]'
@@ -1418,6 +1438,9 @@
 
     function hideIfDetachedOverlay(el, video, vr) {
         if (!el || el === video || el === document.documentElement || el === document.body) { return; }
+        // Chrome is never a media element; pooled sibling <video>s (Bolt feed
+        // primers) must stay usable for the site.
+        if (el.tagName === 'VIDEO') { return; }
         if (isPlayableMediaIframe(el)) { return; }
         if (composedRelated(el, video) || isFacebookProtected(el, video)) { return; }
         // A hit often lands on a control (slider/button) nested in a static bar;
@@ -1824,6 +1847,9 @@
         for (var i = 0; i < videos.length; i++) {
             var candidate = videos[i];
             var score = hasElementSourceSignal(candidate) ? 100 : 0;
+            // Pooled autoplay-unlock primers must never outrank the element
+            // that will carry (or already carries) the real source.
+            if (isPrimerMedia(candidate)) { score -= 100; }
             try {
                 if (candidate.currentSrc) { score += 20; }
                 if (candidate.srcObject) { score += 20; }
@@ -1856,6 +1882,10 @@
         // element-owned source mutation so Player Cleaner cannot race setup.
         if (!hasElementSourceSignal(video)) {
             log('player initializing; waiting for media element source');
+            return;
+        }
+        if (isPrimerMedia(video)) {
+            log('autoplay-unlock primer; waiting for the real source');
             return;
         }
         if (isDeclaredAudioOnly(video)) {
@@ -1970,6 +2000,8 @@
         var hasSrcObject = false;
         try { hasSrcObject = !!video.srcObject; } catch (e) { /* opaque media source */ }
         if (!src && !hasSrcObject && !(video.querySelector && video.querySelector('source'))) { return false; }
+        // A pooled autoplay-unlock primer is not a player.
+        if (isPrimerMedia(video)) { return false; }
         // Skip ambient/background/hero video: autoplay + muted is the dominant
         // decorative pattern that should keep no native controls. Facebook Reels
         // are the exception: their accessible audio control is the player UI.

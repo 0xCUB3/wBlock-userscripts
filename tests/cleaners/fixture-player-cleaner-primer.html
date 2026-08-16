@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bolt autoplay-unlock primer pool (Player Cleaner test)</title>
+<style>
+  body { margin: 0; background: #111; }
+  .fave-player-container { position: relative; width: 360px; height: 600px; margin: 10px; background: #000; }
+  .fave-player-container video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .pui-wrapper { position: absolute; inset: 0; z-index: 2; }
+  .pui_vertical-play-button { position: absolute; top: 45%; left: 40%; }
+  .pui_vertical-control-container { position: absolute; bottom: 0; left: 0; right: 0; height: 48px; }
+</style>
+</head>
+<body>
+  <div id="fave-shell" class="fave-player-container fave-bolt-player fave-mobile">
+    <video id="content-video" data-testid="VideoElement"></video>
+    <video id="primer-video" data-testid="VideoElement"></video>
+    <div class="pui-wrapper">
+      <button id="play-button" class="pui_vertical-play-button" aria-label="Play">Play</button>
+      <div class="pui_vertical-control-container">Controls</div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      // Bolt primes pooled <video> elements inside the play gesture with a
+      // tiny data: clip and plays them muted, unlocking later programmatic
+      // playback on iOS. The primer is never the content.
+      window.__primeUnlockPool = function () {
+        var primer = document.getElementById('primer-video');
+        primer.muted = true;
+        primer.setAttribute('playsinline', '');
+        primer.src = 'data:video/mp4;base64,AAAAHGZ0eXBNNFYgAAACAGlzb21pc28yYXZjMQ==';
+        Object.defineProperty(primer, 'paused', { configurable: true, get: function () { return false; } });
+        primer.dispatchEvent(new Event('playing'));
+      };
+      // The active element then disables remote playback and attaches its
+      // ManagedMediaSource blob, exactly like CNN's vertical video pages.
+      window.__attachContentSource = function () {
+        var content = document.getElementById('content-video');
+        content.setAttribute('disableremoteplayback', '');
+        content.src = URL.createObjectURL(new MediaSource());
+        window.__wblockPrimerContentSource = content.src;
+        Object.defineProperty(content, 'paused', { configurable: true, get: function () { return false; } });
+        content.dispatchEvent(new Event('playing'));
+      };
+    })();
+  </script>
+</body>
+</html>

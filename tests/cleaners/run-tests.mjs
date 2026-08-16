@@ -2921,6 +2921,56 @@ for (const config of [
   await browser.close();
 }
 
+// ---- Scenario: Bolt autoplay-unlock primer pool (cnn vertical video) -------
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Bolt unlock primer pool)', {
+    device: iphone,
+    hasTouch: true,
+    gotoURL: 'https://www.cnn.com/2026/08/14/politics/video/fixture-digvid-vrtc',
+    responseBody: readFileSync(join(__dirname, 'fixture-player-cleaner-primer.html'), 'utf8'),
+    scriptSource: playerUserscript,
+    readySignal: '#fave-shell',
+  });
+  const S = 'player-cleaner-bolt-primer';
+
+  await page.evaluate(() => window.__primeUnlockPool());
+  await page.waitForTimeout(250);
+  await check(page, S, 'ignores the data: unlock primer and keeps the play UI usable', () => {
+    const primer = document.getElementById('primer-video');
+    const play = document.getElementById('play-button');
+    const wrapper = document.querySelector('.pui-wrapper');
+    const visible = el => el && getComputedStyle(el).display !== 'none' &&
+      !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    const pass = !!(primer && !primer.controls && !primer.hasAttribute('data-wblock-player-cleaner') &&
+      !primer._wblockEnhanced && visible(play) && visible(wrapper));
+    return { pass, detail: `primer=${primer && primer.controls}/${primer && primer.getAttribute('data-wblock-player-cleaner')} play=${play && getComputedStyle(play).display} wrapper=${wrapper && getComputedStyle(wrapper).display}` };
+  });
+
+  await page.evaluate(() => window.__attachContentSource());
+  await page.waitForTimeout(250);
+  await check(page, S, 'nativeizes the content video in place once its blob attaches', () => {
+    const content = document.getElementById('content-video');
+    const source = window.__wblockPrimerContentSource;
+    const pass = !!(content && content.controls && content.getAttribute('data-wblock-player-cleaner') === '1' &&
+      !content._wblockEnhanced && !content._wblockCleaned && content.src === source &&
+      content.hasAttribute('disableremoteplayback') && content.disableRemotePlayback);
+    return { pass, detail: content ? `controls=${content.controls} enhanced=${!!content._wblockEnhanced} sourceKept=${content.src === source} drp=${content.disableRemotePlayback}` : 'no video' };
+  });
+
+  await check(page, S, 'hides Bolt chrome but never the pooled sibling video', () => {
+    const wrapper = document.querySelector('.pui-wrapper');
+    const primer = document.getElementById('primer-video');
+    const chromeHidden = !!(wrapper && getComputedStyle(wrapper).display === 'none');
+    const primerUsable = !!(primer && !primer.hasAttribute('data-wblock-pc-hidden') &&
+      getComputedStyle(primer).display !== 'none');
+    return { pass: chromeHidden && primerUsable, detail: `chrome=${wrapper && getComputedStyle(wrapper).display} primer=${primer && getComputedStyle(primer).display} marked=${!!(primer && primer.hasAttribute('data-wblock-pc-hidden'))}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario: Twitch persistent-player shell boundary -------------------
 {
   const { browser, page, pageErrors } = await runScenario('Player Cleaner (Twitch shell boundary)', {
