@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dark Reader
 // @namespace    com.skula.wblock
-// @version      4.9.128-wblock.5
+// @version      4.9.128-wblock.6
 // @description  Dark Reader's MIT-licensed API engine for wBlock (beta; without the full site-fix database).
 // @author       Dark Reader Ltd. and wBlock
 // @match        http://*/*
@@ -41,6 +41,25 @@
         });
     }
 
+    /* Anti-flash guard: when the dark theme is about to be applied, paint the
+       root dark before the page's own styles arrive so slow-loading pages do
+       not flash bright first. The guard is excluded from the detector's
+       page-has-style probe and removed as soon as detection settles, before
+       the page background is measured, so it can never bias detection. */
+    var antiflashStyle = null;
+    function injectAntiflash() {
+        if (!document.documentElement || typeof document.createElement !== 'function') return;
+        var style = document.createElement('style');
+        style.id = 'wblock-antiflash';
+        style.textContent = 'html { background-color: #181a1b !important; color-scheme: dark !important; }';
+        document.documentElement.appendChild(style);
+        antiflashStyle = style;
+    }
+    function removeAntiflash() {
+        if (antiflashStyle && antiflashStyle.parentNode) antiflashStyle.parentNode.removeChild(antiflashStyle);
+        antiflashStyle = null;
+    }
+
     /* Built-in dark theme detection, ported from Dark Reader's MIT-licensed
        src/inject/detector.ts: a page counts as natively dark when its first
        opaque background (root, else body) has HSL lightness below 0.4. The
@@ -77,7 +96,8 @@
         var sheets = document.styleSheets;
         for (var index = 0; index < sheets.length; index++) {
             var ownerNode = sheets[index] && sheets[index].ownerNode;
-            if (ownerNode && !(ownerNode.classList && ownerNode.classList.contains('darkreader'))) return true;
+            if (ownerNode && ownerNode !== antiflashStyle
+                && !(ownerNode.classList && ownerNode.classList.contains('darkreader'))) return true;
         }
         return false;
     }
@@ -96,6 +116,7 @@
             if (done) return;
             done = true;
             stop();
+            removeAntiflash();
             if (pageHasBuiltInDarkTheme()) onDetected();
         }
         if (document.body && pageHasSomeStyle()) {
@@ -128,6 +149,10 @@
     }
     if (typeof document === 'undefined' || typeof MutationObserver !== 'function'
         || typeof getComputedStyle !== 'function') return;
+    if (!followsSystemAppearance
+        || (typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+        injectAntiflash();
+    }
     detectBuiltInDarkTheme(function () {
         if (followsSystemAppearance && typeof api.auto === 'function') api.auto(false);
         if (typeof api.disable === 'function') api.disable();

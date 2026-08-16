@@ -12,7 +12,10 @@ class StubMutationObserver {
 StubMutationObserver.instances = [];
 
 function makeElement(backgroundColor, inlineBackground = '') {
-  return {backgroundColor, style: {backgroundColor: inlineBackground}, classList: {contains: () => false}};
+  const element = {backgroundColor, style: {backgroundColor: inlineBackground}, classList: {contains: () => false}, children: []};
+  element.appendChild = child => { child.parentNode = element; element.children.push(child); };
+  element.removeChild = child => { element.children = element.children.filter(other => other !== child); child.parentNode = null; };
+  return element;
 }
 
 function makeDocument({rootBg = 'rgba(0, 0, 0, 0)', bodyBg = 'rgb(255, 255, 255)', hasBody = true, sheets = 1, readyState = 'complete'} = {}) {
@@ -23,6 +26,12 @@ function makeDocument({rootBg = 'rgba(0, 0, 0, 0)', bodyBg = 'rgb(255, 255, 255)
     styleSheets: Array.from({length: sheets}, () => ({ownerNode: {classList: {contains: () => false}}})),
     readyState,
     querySelectorAll: () => [],
+    created: [],
+    createElement(tag) {
+      const element = {tagName: tag, id: '', textContent: '', disabled: false, parentNode: null, classList: {contains: () => false}};
+      doc.created.push(element);
+      return element;
+    },
     addEventListener: (type, fn) => { (listeners[type] ||= []).push(fn); },
     removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter(f => f !== fn); },
     dispatch(type) { for (const fn of [...(listeners[type] || [])]) fn(); },
@@ -31,7 +40,7 @@ function makeDocument({rootBg = 'rgba(0, 0, 0, 0)', bodyBg = 'rgb(255, 255, 255)
   return doc;
 }
 
-function runAdapter(configuration = '', document = undefined) {
+function runAdapter(configuration = '', document = undefined, extraContext = {}) {
   StubMutationObserver.instances = [];
   let autoCalls = 0, autoDisableCalls = 0, enableCalls = 0, disableCalls = 0, fetchMethod;
   const window = {DarkReader: {
@@ -48,6 +57,7 @@ function runAdapter(configuration = '', document = undefined) {
     context.MutationObserver = StubMutationObserver;
     context.getComputedStyle = element => ({backgroundColor: element.backgroundColor});
   }
+  Object.assign(context, extraContext);
   vm.createContext(context); vm.runInContext(configuration + adapter, context);
   return {get autoCalls() { return autoCalls; }, get autoDisableCalls() { return autoDisableCalls; },
           get enableCalls() { return enableCalls; }, get disableCalls() { return disableCalls; },
@@ -71,6 +81,19 @@ for (const configuration of ['', forcedFlag]) {
   const light = runAdapter(configuration, makeDocument({bodyBg: 'rgb(255, 255, 255)'}));
   if (light.disableCalls !== 0 || light.autoDisableCalls !== 0) throw new Error('light page was wrongly detected as dark');
 }
+
+// 2b. Anti-flash guard: injected only when the theme will be applied, and
+// removed as soon as detection settles.
+const antiflashForced = runAdapter(forcedFlag, makeDocument());
+{
+  const created = antiflashForced.document.created;
+  if (created.length !== 1 || created[0].id !== 'wblock-antiflash') throw new Error('forced mode did not inject the anti-flash guard');
+  if (created[0].parentNode !== null || antiflashForced.document.documentElement.children.length !== 0) throw new Error('anti-flash guard not removed after detection settled');
+}
+const antiflashAutoDark = runAdapter('', makeDocument(), {matchMedia: () => ({matches: true})});
+if (antiflashAutoDark.document.created.length !== 1) throw new Error('auto mode on a dark system did not inject the anti-flash guard');
+const antiflashAutoLight = runAdapter('', makeDocument(), {matchMedia: () => ({matches: false})});
+if (antiflashAutoLight.document.created.length !== 0) throw new Error('auto mode on a light system injected the anti-flash guard');
 
 // 3. Natively dark page (opaque dark root): theme is withdrawn.
 const darkRootAuto = runAdapter('', makeDocument({rootBg: 'rgb(17, 17, 17)'}));
@@ -96,10 +119,15 @@ const deferred = runAdapter(forcedFlag, pending);
 if (deferred.disableCalls !== 0) throw new Error('detection ran before the page had body and styles');
 if (StubMutationObserver.instances.length !== 1 || !StubMutationObserver.instances[0].observing) throw new Error('mutation observer not installed');
 if ((pending.listeners.readystatechange || []).length !== 1) throw new Error('readystatechange listener not installed');
+if (pending.created.length !== 1 || pending.documentElement.children[0] !== pending.created[0]) throw new Error('anti-flash guard missing while detection is pending');
 pending.body = makeElement('rgb(17, 17, 17)');
-pending.styleSheets = [{ownerNode: {classList: {contains: () => false}}}];
+pending.styleSheets = [{ownerNode: pending.created[0]}];
+StubMutationObserver.instances[0].callback();
+if (deferred.disableCalls !== 0) throw new Error('anti-flash stylesheet wrongly counted as page style');
+pending.styleSheets = [{ownerNode: pending.created[0]}, {ownerNode: {classList: {contains: () => false}}}];
 StubMutationObserver.instances[0].callback();
 if (deferred.disableCalls !== 1) throw new Error('deferred detection did not withdraw the theme');
+if (pending.created[0].parentNode !== null) throw new Error('anti-flash guard not removed by deferred detection');
 if (StubMutationObserver.instances[0].observing) throw new Error('mutation observer not disconnected after detection');
 if ((pending.listeners.readystatechange || []).length !== 0) throw new Error('readystatechange listener not removed after detection');
 StubMutationObserver.instances[0].callback();

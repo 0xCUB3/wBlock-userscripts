@@ -33,47 +33,55 @@ const atDocumentStart = source => `(() => {
 })();`;
 const filter = (process.argv.find(argument => argument.startsWith('--filter=')) || '').split('=')[1] || '';
 
+// Records whether the anti-flash guard was ever attached, even though it is
+// removed again within milliseconds once detection settles.
+const antiflashRecorder = `new MutationObserver(records => {
+  for (const record of records) for (const node of record.addedNodes) {
+    if (node.id === 'wblock-antiflash') window.__wblockSawAntiflash = true;
+  }
+}).observe(document, {childList: true, subtree: true});`;
+
 const SETTLE_MS = 400;
 const scenarios = [
   {
     name: 'forced dark keeps theming a light page',
     follows: false, colorScheme: 'light', page: 'light',
-    expectEnabled: true
+    expectEnabled: true, expectAntiflash: true
   },
   {
     name: 'forced dark withdraws on a natively dark root',
     follows: false, colorScheme: 'light', page: 'dark-root',
-    expectEnabled: false
+    expectEnabled: false, expectAntiflash: true
   },
   {
     name: 'forced dark withdraws on a dark body behind a transparent root',
     follows: false, colorScheme: 'light', page: 'dark-body',
-    expectEnabled: false
+    expectEnabled: false, expectAntiflash: true
   },
   {
     name: 'forced dark withdraws when the page themes itself during parsing',
     follows: false, colorScheme: 'light', page: 'late-dark',
-    expectEnabled: false
+    expectEnabled: false, expectAntiflash: true
   },
   {
     name: 'system-appearance mode themes a light page when the system is dark',
     follows: true, colorScheme: 'dark', page: 'light',
-    expectEnabled: true
+    expectEnabled: true, expectAntiflash: true
   },
   {
     name: 'system-appearance mode withdraws on a natively dark page',
     follows: true, colorScheme: 'dark', page: 'dark-root',
-    expectEnabled: false
+    expectEnabled: false, expectAntiflash: true
   },
   {
     name: 'system-appearance mode stays off on a light system',
     follows: true, colorScheme: 'light', page: 'light',
-    expectEnabled: false
+    expectEnabled: false, expectAntiflash: false
   },
   {
     name: 'after native-dark detection a system flip to dark must not re-theme',
     follows: true, colorScheme: 'light', page: 'dark-root',
-    expectEnabled: false,
+    expectEnabled: false, expectAntiflash: false,
     async after(page) {
       await page.emulateMedia({colorScheme: 'dark'});
       await page.waitForTimeout(SETTLE_MS);
@@ -93,6 +101,7 @@ for (const scenario of scenarios) {
   page.on('pageerror', error => pageErrors.push(error.message));
   try {
     await page.emulateMedia({colorScheme: scenario.colorScheme});
+    await context.addInitScript(antiflashRecorder);
     await context.addInitScript(atDocumentStart(flagPrefix(scenario.follows) + dist));
     await page.goto(fixture(scenario.page), {waitUntil: 'load'});
     await page.waitForFunction(() => window.DarkReader !== undefined);
@@ -115,6 +124,14 @@ for (const scenario of scenarios) {
       }));
       if (state.enabled) throw new Error('Dark Reader re-enabled itself');
       if (state.themedRoot) throw new Error('root element still carries Dark Reader theming');
+    }
+    const antiflash = await page.evaluate(() => ({
+      present: !!document.getElementById('wblock-antiflash'),
+      seen: !!window.__wblockSawAntiflash
+    }));
+    if (antiflash.present) throw new Error('anti-flash guard was left in the document');
+    if (antiflash.seen !== scenario.expectAntiflash) {
+      throw new Error(antiflash.seen ? 'anti-flash guard injected unexpectedly' : 'anti-flash guard was never injected');
     }
     if (scenario.after) await scenario.after(page);
     if (pageErrors.length > 0) throw new Error(`page errors: ${pageErrors.join('; ')}`);
