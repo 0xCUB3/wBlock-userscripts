@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.14
+// @version      0.1.15
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1343,11 +1343,13 @@
     }
 
     // Real iOS WebKit rejects ManagedMediaSource after we flip native
-    // controls, even with AirPlay denied. Leave the site player in charge
-    // and only keep the remote-playback lock so the decoder can attach.
+    // controls, even with AirPlay denied. Leave any non-file iOS player
+    // to the site and only keep the remote-playback lock so the decoder
+    // can attach. Handshake / blob / empty srcObject pipelines all
+    // count; a direct http(s) file can still be nativeized.
     function preserveIOSManagedPlayer(video) {
         if (!isIOSLikeDevice() || !video) { return false; }
-        if (!isHandshakePlayer(video) && !hasOpaqueMediaSource(video)) { return false; }
+        if (sourceFromVideoElement(video)) { return false; }
         lockIOSManagedMediaSource(video);
         return true;
     }
