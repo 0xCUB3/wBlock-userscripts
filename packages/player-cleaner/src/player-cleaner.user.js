@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.9
+// @version      0.1.10
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -926,10 +926,36 @@
 
     // Custom players set disableRemotePlayback to hide the route picker they
     // cannot style (cineby). With that flag WebKit omits AirPlay from the
-    // native controls, so nativeizing must restore remote playback too.
-    function enableRemotePlayback(video) {
-        try { video.removeAttribute('disableremoteplayback'); } catch (e) { /* ignore */ }
-        try { video.disableRemotePlayback = false; } catch (e) { /* ignore */ }
+    // native controls, so nativeizing restores remote playback for direct
+    // http(s) sources. Opaque blob/MSE sources are the opposite case: iOS
+    // WebKit only loads a ManagedMediaSource attachment while remote playback
+    // stays disabled (or an AirPlay alternative source exists), so stripping
+    // the attribute there wedges every MSE player (CNN, Fox, ...) in an
+    // endless loading state. macOS uses plain MediaSource and does not care,
+    // which is why the breakage was iOS-only.
+    function applyRemotePlaybackPolicy(video) {
+        if (!video) { return; }
+        try {
+            var opaque = hasOpaqueMediaSource(video);
+            if (isIOSLikeDevice()) {
+                // Never lift the site's restriction on iOS: the element may be
+                // feeding from — or about to attach — a ManagedMediaSource.
+                if (opaque) {
+                    if (!video.disableRemotePlayback) { video.disableRemotePlayback = true; }
+                    if (!video.hasAttribute('disableremoteplayback')) {
+                        video.setAttribute('disableremoteplayback', '');
+                    }
+                    if (video.getAttribute('x-webkit-airplay') === 'allow') {
+                        video.removeAttribute('x-webkit-airplay');
+                    }
+                }
+                return;
+            }
+            if (!opaque) {
+                video.removeAttribute('disableremoteplayback');
+                video.disableRemotePlayback = false;
+            }
+        } catch (e) { /* ignore */ }
     }
 
     // The UA services native-control clicks below the JS event layer, but stopping
@@ -957,7 +983,10 @@
     // doing that before WebKit initializes its native media controls can break
     // the controls implementation itself. Observe the content attributes
     // instead; MutationObserver restores them at the pre-paint microtask
-    // checkpoint whenever a custom player removes or re-asserts them.
+    // checkpoint whenever a custom player removes or re-asserts them. Remote
+    // playback follows applyRemotePlaybackPolicy: on iOS the disable flag must
+    // survive (ManagedMediaSource refuses to load without it), while elsewhere
+    // direct-source players get AirPlay back.
     function guardNativeControls(video) {
         if (!video || video._wblockControlsGuarded) return;
         video._wblockControlsGuarded = true;
@@ -967,16 +996,13 @@
             if (!video.hasAttribute('controls')) {
                 video.setAttribute('controls', '');
             }
-            if (video.hasAttribute('disableremoteplayback')) {
-                video.removeAttribute('disableremoteplayback');
-            }
-            try { video.disableRemotePlayback = false; } catch (e) { /* ignore */ }
+            applyRemotePlaybackPolicy(video);
         }
 
         var observer = null;
         try {
             observer = new MutationObserver(restore);
-            observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback'] });
+            observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay'] });
         } catch (e) { /* ignore */ }
 
         restore();
@@ -1556,7 +1582,7 @@
         // obvious custom control overlays.
         try {
             forceNativeControls(video);
-            enableRemotePlayback(video);
+            applyRemotePlaybackPolicy(video);
             video.playsInline = true;
             video.setAttribute('playsinline', '');
             video.removeAttribute('disablepictureinpicture');
@@ -1776,7 +1802,7 @@
         } catch (e) { /* ignore */ }
         applyCleanSizing(container, video);
         forceNativeControls(video);
-        enableRemotePlayback(video);
+        applyRemotePlaybackPolicy(video);
         recoverSidecarTracks(container, video);
         setupAutoPiP(video);
         setupPlaybackPreferences(video);

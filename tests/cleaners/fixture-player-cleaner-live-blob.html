@@ -13,7 +13,7 @@
 <body>
   <!-- A: source on the video element itself (sourceFromVideoElement -> src) -->
   <div class="video-js player" id="p-src">
-    <video src="https://example.com/a.mp4"></video>
+    <video src="https://example.com/a.mp4" disableremoteplayback></video>
   </div>
 
   <!-- B: source in a <source> child (sourceFromVideoElement -> source child) -->
@@ -54,6 +54,9 @@
       // returns null and the intended discovery path is exercised.
       ['p-dom', 'p-videojs', 'p-jwplayer', 'p-poster', 'p-dash'].forEach(function (id) {
         var v = document.getElementById(id).querySelector('video');
+        // Real MSE sites must keep remote playback disabled for iOS
+        // ManagedMediaSource to load at all; mirror that here.
+        try { v.setAttribute('disableremoteplayback', ''); } catch (e) {}
         try { v.src = 'blob:https://example.com/00000000-0000-0000-0000-000000000000'; } catch (e) {}
       });
 

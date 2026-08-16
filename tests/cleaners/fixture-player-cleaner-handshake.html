@@ -31,7 +31,11 @@
       ['amp-video', 'fave-video'].forEach(function (id) {
         var url = URL.createObjectURL(new MediaSource());
         urls.push(url);
-        document.getElementById(id).src = url;
+        var v = document.getElementById(id);
+        // Real MSE sites must keep remote playback disabled for iOS
+        // ManagedMediaSource to load at all; mirror that here.
+        v.setAttribute('disableremoteplayback', '');
+        v.src = url;
       });
       window.__wblockHandshakeSources = urls;
       window.__startHandshakePlayers = function () {

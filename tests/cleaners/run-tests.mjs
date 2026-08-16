@@ -2756,6 +2756,44 @@ for (const config of [
       return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 cleaned' };
     }, { arg: cleanCases });
 
+    // iOS WebKit only loads ManagedMediaSource attachments while remote
+    // playback stays disabled, so the cleaner must never strip the site's
+    // disableremoteplayback from blob/MSE players (the CNN/Fox iOS infinite
+    // load). Direct http(s) sources still get AirPlay restored, desktop only.
+    await check(page, S, 'preserves disableremoteplayback on blob/MSE players', (blobCases) => {
+      const stripped = blobCases.filter((id) => {
+        const v = document.getElementById(id).querySelector('video');
+        return !(v && v.hasAttribute('disableremoteplayback'));
+      });
+      return { pass: stripped.length === 0, detail: stripped.length ? `stripped: ${stripped.join(',')}` : 'attribute kept on 3/3' };
+    }, { arg: blobCases });
+
+    await check(page, S, label === 'mobile'
+      ? 'leaves the direct-source remote-playback flag alone on iOS'
+      : 'restores AirPlay for direct-source players on desktop', (mobile) => {
+      const v = document.getElementById('p-src').querySelector('video');
+      const has = !!(v && v.hasAttribute('disableremoteplayback'));
+      return { pass: mobile ? has : !has, detail: `disableremoteplayback=${has}` };
+    }, { arg: label === 'mobile' });
+
+    // A player re-initializing for its next clip re-asserts the attribute just
+    // before reloading; the controls guard must not strip it back off.
+    await page.evaluate((blobCases) => {
+      blobCases.forEach((id) => {
+        const v = document.getElementById(id).querySelector('video');
+        v.removeAttribute('disableremoteplayback');
+        v.setAttribute('disableremoteplayback', '');
+      });
+    }, blobCases);
+    await page.waitForTimeout(250);
+    await check(page, S, 'keeps a re-asserted disableremoteplayback through the controls guard', (blobCases) => {
+      const stripped = blobCases.filter((id) => {
+        const v = document.getElementById(id).querySelector('video');
+        return !(v && v.hasAttribute('disableremoteplayback'));
+      });
+      return { pass: stripped.length === 0, detail: stripped.length ? `stripped: ${stripped.join(',')}` : 'guard left the attribute alone' };
+    }, { arg: blobCases });
+
     record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
     await browser.close();
   }
@@ -2869,6 +2907,14 @@ for (const config of [
     const pass = !!(amp && amp.controls && amp.getAttribute('data-wblock-player-cleaner') === '1' &&
       !amp._wblockEnhanced && amp.src === source);
     return { pass, detail: `controls=${amp && amp.controls} enhanced=${!!(amp && amp._wblockEnhanced)} sourceKept=${amp && amp.src === source}` };
+  });
+
+  await check(page, S, 'keeps the ManagedMediaSource remote-playback restriction on iOS', () => {
+    const amp = document.getElementById('amp-video');
+    const fave = document.getElementById('fave-video');
+    const pass = !!(amp && amp.hasAttribute('disableremoteplayback') && amp.disableRemotePlayback &&
+      fave && fave.hasAttribute('disableremoteplayback') && fave.disableRemotePlayback);
+    return { pass, detail: `amp=${!!(amp && amp.hasAttribute('disableremoteplayback'))} fave=${!!(fave && fave.hasAttribute('disableremoteplayback'))}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
