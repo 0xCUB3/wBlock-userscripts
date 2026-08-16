@@ -2872,18 +2872,19 @@ for (const config of [
     fave.dispatchEvent(new Event('playing'));
   });
   await page.waitForTimeout(250);
-  await check(page, S, 'adds native controls and hides FAVE chrome without replacing the source', () => {
+  await check(page, S, 'locks FAVE remote playback without nativeizing the MSE player', () => {
     const video = document.getElementById('fave-video');
     const wrapper = document.querySelector('.fave-player-container');
     const siteControls = document.querySelector('.fave-controls');
     const source = (window.__wblockHandshakeSources || [])[1];
-    const chromeHidden = !!(siteControls && (siteControls.hasAttribute('data-wblock-pc-hidden') ||
-      siteControls.closest('[data-wblock-pc-hidden]') || getComputedStyle(siteControls).display === 'none'));
-    const pass = video && video.controls && video.hasAttribute('data-wblock-player-cleaner') &&
-      !video._wblockEnhanced && video.src === source && wrapper && wrapper.contains(video) && chromeHidden;
+    const chromeVisible = !!(siteControls && getComputedStyle(siteControls).display !== 'none' &&
+      !siteControls.hasAttribute('data-wblock-pc-hidden') && !siteControls.closest('[data-wblock-pc-hidden]'));
+    const pass = video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
+      !video._wblockEnhanced && video.src === source && wrapper && wrapper.contains(video) && chromeVisible &&
+      video.disableRemotePlayback && video.getAttribute('x-webkit-airplay') === 'deny';
     return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced +
       ' sourceKept=' + (video.src === source) + ' wrapperKept=' + !!(wrapper && wrapper.contains(video)) +
-      ' chromeHidden=' + chromeHidden : 'no video' };
+      ' chromeVisible=' + chromeVisible + ' airplay=' + video.getAttribute('x-webkit-airplay') : 'no video' };
   });
 
   await page.evaluate(() => window.__startHandshakePlayers());
@@ -2901,12 +2902,13 @@ for (const config of [
     window.__finishAMPAd();
   });
   await page.waitForTimeout(250);
-  await check(page, S, 'nativeizes AMP after preroll without replacing its MSE source', () => {
+  await check(page, S, 'leaves AMP in charge after preroll without replacing its MSE source', () => {
     const amp = document.getElementById('amp-video');
     const source = (window.__wblockHandshakeSources || [])[0];
-    const pass = !!(amp && amp.controls && amp.getAttribute('data-wblock-player-cleaner') === '1' &&
-      !amp._wblockEnhanced && amp.src === source);
-    return { pass, detail: `controls=${amp && amp.controls} enhanced=${!!(amp && amp._wblockEnhanced)} sourceKept=${amp && amp.src === source}` };
+    const pass = !!(amp && !amp.controls && !amp.hasAttribute('data-wblock-player-cleaner') &&
+      !amp._wblockEnhanced && amp.src === source &&
+      amp.disableRemotePlayback && amp.getAttribute('x-webkit-airplay') === 'deny');
+    return { pass, detail: `controls=${amp && amp.controls} enhanced=${!!(amp && amp._wblockEnhanced)} sourceKept=${amp && amp.src === source} airplay=${amp && amp.getAttribute('x-webkit-airplay')}` };
   });
 
   await check(page, S, 'keeps the ManagedMediaSource remote-playback restriction on iOS', () => {
@@ -2960,14 +2962,17 @@ for (const config of [
 
   await page.evaluate(() => window.__attachManagedSource());
   await page.waitForTimeout(250);
-  await check(page, S, 'nativeizes in place after srcObject attaches without lifting the MMS lock', () => {
+  await check(page, S, 'keeps the site player after srcObject attaches without lifting the MMS lock', () => {
     const video = document.getElementById('content-video');
     const wrapper = document.querySelector('.pui-wrapper');
-    const pass = !!(video && video.controls && video.getAttribute('data-wblock-player-cleaner') === '1' &&
+    const play = document.getElementById('play-button');
+    const visible = el => el && getComputedStyle(el).display !== 'none' &&
+      !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    const pass = !!(video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
       !video._wblockCleaned && video.srcObject &&
       video.disableRemotePlayback && video.hasAttribute('disableremoteplayback') &&
       video.getAttribute('x-webkit-airplay') === 'deny' &&
-      wrapper && getComputedStyle(wrapper).display === 'none');
+      visible(wrapper) && visible(play));
     return { pass, detail: video ? `controls=${video.controls} cleaned=${!!video._wblockCleaned} srcObject=${!!video.srcObject} drp=${video.disableRemotePlayback}/${video.hasAttribute('disableremoteplayback')} airplay=${video.getAttribute('x-webkit-airplay')} chrome=${wrapper && getComputedStyle(wrapper).display}` : 'no video' };
   });
 
@@ -3003,22 +3008,25 @@ for (const config of [
 
   await page.evaluate(() => window.__attachContentSource());
   await page.waitForTimeout(250);
-  await check(page, S, 'nativeizes the content video in place once its blob attaches', () => {
+  await check(page, S, 'leaves the content video to the site player once its blob attaches', () => {
     const content = document.getElementById('content-video');
     const source = window.__wblockPrimerContentSource;
-    const pass = !!(content && content.controls && content.getAttribute('data-wblock-player-cleaner') === '1' &&
+    const pass = !!(content && !content.controls && !content.hasAttribute('data-wblock-player-cleaner') &&
       !content._wblockEnhanced && !content._wblockCleaned && content.src === source &&
-      content.hasAttribute('disableremoteplayback') && content.disableRemotePlayback);
-    return { pass, detail: content ? `controls=${content.controls} enhanced=${!!content._wblockEnhanced} sourceKept=${content.src === source} drp=${content.disableRemotePlayback}` : 'no video' };
+      content.hasAttribute('disableremoteplayback') && content.disableRemotePlayback &&
+      content.getAttribute('x-webkit-airplay') === 'deny');
+    return { pass, detail: content ? `controls=${content.controls} enhanced=${!!content._wblockEnhanced} sourceKept=${content.src === source} drp=${content.disableRemotePlayback} airplay=${content.getAttribute('x-webkit-airplay')}` : 'no video' };
   });
 
-  await check(page, S, 'hides Bolt chrome but never the pooled sibling video', () => {
+  await check(page, S, 'keeps Bolt chrome and the pooled sibling video usable', () => {
     const wrapper = document.querySelector('.pui-wrapper');
     const primer = document.getElementById('primer-video');
-    const chromeHidden = !!(wrapper && getComputedStyle(wrapper).display === 'none');
+    const play = document.getElementById('play-button');
+    const visible = el => el && getComputedStyle(el).display !== 'none' &&
+      !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
     const primerUsable = !!(primer && !primer.hasAttribute('data-wblock-pc-hidden') &&
       getComputedStyle(primer).display !== 'none');
-    return { pass: chromeHidden && primerUsable, detail: `chrome=${wrapper && getComputedStyle(wrapper).display} primer=${primer && getComputedStyle(primer).display} marked=${!!(primer && primer.hasAttribute('data-wblock-pc-hidden'))}` };
+    return { pass: visible(wrapper) && visible(play) && primerUsable, detail: `chrome=${wrapper && getComputedStyle(wrapper).display} play=${play && getComputedStyle(play).display} primer=${primer && getComputedStyle(primer).display} marked=${!!(primer && primer.hasAttribute('data-wblock-pc-hidden'))}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));

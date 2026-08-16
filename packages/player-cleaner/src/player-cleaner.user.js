@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.13
+// @version      0.1.14
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1342,18 +1342,18 @@
         return !(video._wblockPlaybackReady || isAlreadyPlaying(video));
     }
 
-    function enableIOSPreservedControls(container, video) {
-        // Lock before the play gesture completes so ManagedMediaSource can
-        // attach. Native controls wait until handshake playback is ready.
+    // Real iOS WebKit rejects ManagedMediaSource after we flip native
+    // controls, even with AirPlay denied. Leave the site player in charge
+    // and only keep the remote-playback lock so the decoder can attach.
+    function preserveIOSManagedPlayer(video) {
+        if (!isIOSLikeDevice() || !video) { return false; }
+        if (!isHandshakePlayer(video) && !hasOpaqueMediaSource(video)) { return false; }
         lockIOSManagedMediaSource(video);
-        if (shouldDeferHandshake(video)) { return; }
-        video.setAttribute(ATTR_DONE, '1');
-        if (container && container.setAttribute) { container.setAttribute(ATTR_DONE, '1'); }
-        forceNativeControls(video);
-        guardNativeControls(video);
-        suppressChrome(container, video);
-        armChromeWatch(video);
-        log('enabled native controls without replacing iOS MSE player');
+        return true;
+    }
+
+    function enableIOSPreservedControls(container, video) {
+        lockIOSManagedMediaSource(video);
     }
 
     function isHandshakePlayer(video) {
@@ -1927,9 +1927,7 @@
         // CNN/Fox attach ManagedMediaSource only after tap. On iOS the
         // restriction has to be in place before that attachment, not after
         // native controls have already advertised AirPlay.
-        if (isIOSLikeDevice() && isHandshakePlayer(video)) {
-            lockIOSManagedMediaSource(video);
-        }
+        if (preserveIOSManagedPlayer(video)) { return; }
         if (!hasElementSourceSignal(video)) {
             log('player initializing; waiting for media element source');
             return;
@@ -1942,11 +1940,7 @@
             log('declared audio-only media; leaving video untouched');
             return;
         }
-        if (isIOSPreservedPlayer(video)) {
-            if (shouldDeferHandshake(video)) { return; }
-            enableIOSPreservedControls(container, video);
-            return;
-        }
+        if (isIOSPreservedPlayer(video)) { return; }
         // FAVE/AMP attach media during their own play-event dispatch. Wait
         // for that handshake even on desktop so we do not nativeize (or hide
         // Skip Ad) in the middle of startup.
@@ -2017,6 +2011,7 @@
                 setTimeout(function () {
                     if (!video.isConnected || video._wblockEnhanced) { return; }
                     if (handshake) { video._wblockHandshakeStarted = true; }
+                    if (preserveIOSManagedPlayer(video)) { return; }
                     if (handshake && ampAdActive(video)) { return; }
                     video._wblockPlaybackReady = true;
                     scan(video, false);
@@ -2116,15 +2111,8 @@
             // CNN/Fox attach ManagedMediaSource after tap. Lock remote
             // playback on the handshake element even before it has a source
             // so WebKit will accept the later attachment.
-            if (isIOSLikeDevice() && isHandshakePlayer(video)) {
-                lockIOSManagedMediaSource(video);
-            }
-            if (isIOSPreservedPlayer(video)) {
-                if (!shouldDeferHandshake(video)) {
-                    enableIOSPreservedControls(containerForVideo(video), video);
-                }
-                continue;
-            }
+            if (preserveIOSManagedPlayer(video)) { continue; }
+            if (isIOSPreservedPlayer(video)) { continue; }
             if (!needsBareEnhancement(video)) { continue; }
             var bareContainer = containerForVideo(video);
             log('bare player detected', bareContainer.className || '(no class)', 'enhancing in place');
@@ -2239,6 +2227,7 @@
                 var handshakeVideo = handshakeVideos[hi];
                 if (handshakeVideo._wblockEnhanced || handshakeVideo.getAttribute(ATTR_DONE)) { continue; }
                 if (!isHandshakePlayer(handshakeVideo) && !isIOSPreservedPlayer(handshakeVideo)) { continue; }
+                if (preserveIOSManagedPlayer(handshakeVideo)) { continue; }
                 if (ampAdActive(handshakeVideo)) { continue; }
                 if (!hasAttachedMediaPipeline(handshakeVideo)) { continue; }
                 if (!handshakeVideo._wblockHandshakeStarted && !isAlreadyPlaying(handshakeVideo)) { continue; }
