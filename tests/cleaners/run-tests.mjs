@@ -2921,6 +2921,48 @@ for (const config of [
   await browser.close();
 }
 
+// ---- Scenario: iOS FAVE srcObject ManagedMediaSource (cnn) -----------------
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (iOS srcObject MMS)', {
+    device: iphone,
+    hasTouch: true,
+    gotoURL: 'https://www.cnn.com/2026/08/14/politics/video/fixture-srcobject-mms',
+    responseBody: readFileSync(join(__dirname, 'fixture-player-cleaner-srcobject.html'), 'utf8'),
+    scriptSource: playerUserscript,
+    readySignal: '#fave-shell',
+  });
+  const S = 'player-cleaner-ios-srcobject-mms';
+
+  await page.waitForTimeout(250);
+  await check(page, S, 'locks remote playback on the handshake video before any source attaches', () => {
+    const video = document.getElementById('content-video');
+    const play = document.getElementById('play-button');
+    const visible = el => el && getComputedStyle(el).display !== 'none' &&
+      !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    const pass = !!(video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
+      video.disableRemotePlayback && video.hasAttribute('disableremoteplayback') &&
+      video.getAttribute('x-webkit-airplay') !== 'allow' && visible(play));
+    return { pass, detail: `controls=${video && video.controls} done=${video && video.getAttribute('data-wblock-player-cleaner')} drp=${video && video.disableRemotePlayback}/${video && video.hasAttribute('disableremoteplayback')} airplay=${video && video.getAttribute('x-webkit-airplay')} play=${play && getComputedStyle(play).display}` };
+  });
+
+  await page.evaluate(() => window.__attachManagedSource());
+  await page.waitForTimeout(250);
+  await check(page, S, 'nativeizes in place after srcObject attaches without lifting the MMS lock', () => {
+    const video = document.getElementById('content-video');
+    const wrapper = document.querySelector('.pui-wrapper');
+    const pass = !!(video && video.controls && video.getAttribute('data-wblock-player-cleaner') === '1' &&
+      !video._wblockCleaned && video.srcObject &&
+      video.disableRemotePlayback && video.hasAttribute('disableremoteplayback') &&
+      video.getAttribute('x-webkit-airplay') !== 'allow' &&
+      wrapper && getComputedStyle(wrapper).display === 'none');
+    return { pass, detail: video ? `controls=${video.controls} cleaned=${!!video._wblockCleaned} srcObject=${!!video.srcObject} drp=${video.disableRemotePlayback}/${video.hasAttribute('disableremoteplayback')} airplay=${video.getAttribute('x-webkit-airplay')} chrome=${wrapper && getComputedStyle(wrapper).display}` : 'no video' };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario: Bolt autoplay-unlock primer pool (cnn vertical video) -------
 {
   const iphone = devices['iPhone 13'];

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FAVE srcObject ManagedMediaSource (Player Cleaner test)</title>
+<style>
+  body { margin: 0; background: #111; }
+  .fave-player-container { position: relative; width: 360px; height: 600px; margin: 10px; background: #000; }
+  .fave-player-container video { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .pui-wrapper { position: absolute; inset: 0; z-index: 2; }
+  .pui_vertical-play-button { position: absolute; top: 45%; left: 40%; }
+</style>
+</head>
+<body>
+  <div id="fave-shell" class="fave-player-container fave-bolt-player fave-mobile">
+    <video id="content-video" data-testid="VideoElement"></video>
+    <div class="pui-wrapper">
+      <button id="play-button" class="pui_vertical-play-button" aria-label="Play">Play</button>
+    </div>
+  </div>
+  <script>
+    (function () {
+      // Real Bolt/FAVE attaches ManagedMediaSource through srcObject and
+      // never writes a blob: URL. It also does not pre-set
+      // disableremoteplayback on the element we first see.
+      window.__attachManagedSource = function () {
+        var video = document.getElementById('content-video');
+        video.srcObject = new MediaSource();
+        Object.defineProperty(video, 'paused', { configurable: true, get: function () { return false; } });
+        video.dispatchEvent(new Event('playing'));
+      };
+    })();
+  </script>
+</body>
+</html>

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.11
+// @version      0.1.12
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -64,8 +64,14 @@
     // ManagedMediaSource (Player Cleaner never assigns blob urls itself).
     function hasOpaqueMediaSource(video) {
         try {
-            return !!(video && ((video.currentSrc || '').indexOf('blob:') === 0 ||
-                (video.src || '').indexOf('blob:') === 0));
+            if (!video) { return false; }
+            // ManagedMediaSource / MediaSource attachments show up as srcObject
+            // or a blob: URL. Either one is an opaque pipeline we must not
+            // tear down, and on iOS it will not load unless remote playback
+            // stays disabled.
+            if (video.srcObject) { return true; }
+            return (video.currentSrc || '').indexOf('blob:') === 0 ||
+                (video.src || '').indexOf('blob:') === 0;
         } catch (e) { return false; }
     }
 
@@ -296,7 +302,9 @@
         '.WebPlayerContainer',       // ESPN / Disney BAM player
         '.mw-tmh-player',            // MediaWiki TimedMediaHandler
         '[data-mw-tmh]',             // MediaWiki TimedMediaHandler
-        '[data-a-target="video-player"]' // Twitch player wrapper
+        '[data-a-target="video-player"]', // Twitch player wrapper
+        '.amp-player',               // Fox / Akamai AMP
+        '.fave-player-container'     // CNN FAVE / Bolt
     ];
     var PLAYER_SELECTOR = PLAYER_SELECTORS.join(',');
 
@@ -886,6 +894,11 @@
 
     function forceNativeControls(video) {
         if (video._wblockControlsPatched) return;
+        // iOS WebKit materializes native controls (and the AirPlay picker)
+        // from this attribute write. If remote playback is still allowed,
+        // a later ManagedMediaSource attachment is rejected and the video
+        // sits on an endless spinner. Lock first, then show controls.
+        applyRemotePlaybackPolicy(video);
         video._wblockControlsPatched = true;
         video.controls = true;
         video.setAttribute('controls', '');
@@ -947,21 +960,31 @@
     // the attribute there wedges every MSE player (CNN, Fox, ...) in an
     // endless loading state. macOS uses plain MediaSource and does not care,
     // which is why the breakage was iOS-only.
+    function lockIOSManagedMediaSource(video) {
+        if (!video) { return; }
+        try {
+            if (!video.disableRemotePlayback) { video.disableRemotePlayback = true; }
+            if (!video.hasAttribute('disableremoteplayback')) {
+                video.setAttribute('disableremoteplayback', '');
+            }
+            if (video.getAttribute('x-webkit-airplay') === 'allow') {
+                video.removeAttribute('x-webkit-airplay');
+            }
+        } catch (e) { /* ignore */ }
+    }
+
     function applyRemotePlaybackPolicy(video) {
         if (!video) { return; }
         try {
             var opaque = hasOpaqueMediaSource(video);
             if (isIOSLikeDevice()) {
-                // Never lift the site's restriction on iOS: the element may be
-                // feeding from — or about to attach — a ManagedMediaSource.
-                if (opaque) {
-                    if (!video.disableRemotePlayback) { video.disableRemotePlayback = true; }
-                    if (!video.hasAttribute('disableremoteplayback')) {
-                        video.setAttribute('disableremoteplayback', '');
-                    }
-                    if (video.getAttribute('x-webkit-airplay') === 'allow') {
-                        video.removeAttribute('x-webkit-airplay');
-                    }
+                // Never lift the site's restriction on iOS. Also force the
+                // lock for handshake players (CNN FAVE / Fox AMP) and any
+                // video that does not yet own a direct http(s) file: those
+                // attach ManagedMediaSource after the play gesture, and
+                // WebKit will not load it if AirPlay is still enabled.
+                if (opaque || isHandshakePlayer(video) || !sourceFromVideoElement(video)) {
+                    lockIOSManagedMediaSource(video);
                 }
                 return;
             }
@@ -1302,6 +1325,9 @@
     }
 
     function enableIOSPreservedControls(container, video) {
+        // Lock before the play gesture completes so ManagedMediaSource can
+        // attach. Native controls wait until handshake playback is ready.
+        lockIOSManagedMediaSource(video);
         if (shouldDeferHandshake(video)) { return; }
         video.setAttribute(ATTR_DONE, '1');
         if (container && container.setAttribute) { container.setAttribute(ATTR_DONE, '1'); }
@@ -1880,6 +1906,12 @@
         // delete the wrapper: on a warm/cached load JW Player can still be
         // building controls and will later attach its MSE blob. Wait for an
         // element-owned source mutation so Player Cleaner cannot race setup.
+        // CNN/Fox attach ManagedMediaSource only after tap. On iOS the
+        // restriction has to be in place before that attachment, not after
+        // native controls have already advertised AirPlay.
+        if (isIOSLikeDevice() && isHandshakePlayer(video)) {
+            lockIOSManagedMediaSource(video);
+        }
         if (!hasElementSourceSignal(video)) {
             log('player initializing; waiting for media element source');
             return;
@@ -1897,6 +1929,10 @@
             enableIOSPreservedControls(container, video);
             return;
         }
+        // FAVE/AMP attach media during their own play-event dispatch. Wait
+        // for that handshake even on desktop so we do not nativeize (or hide
+        // Skip Ad) in the middle of startup.
+        if (shouldDeferHandshake(video)) { return; }
 
         // Native controls are the critical path once the media element owns a
         // source. Apply them in this mutation microtask before the next paint.
@@ -2059,6 +2095,12 @@
         for (var k = 0; k < descendants.length; k++) { bareVideos.push(descendants[k]); }
         for (var v = 0; v < bareVideos.length; v++) {
             var video = bareVideos[v];
+            // CNN/Fox attach ManagedMediaSource after tap. Lock remote
+            // playback on the handshake element even before it has a source
+            // so WebKit will accept the later attachment.
+            if (isIOSLikeDevice() && isHandshakePlayer(video)) {
+                lockIOSManagedMediaSource(video);
+            }
             if (isIOSPreservedPlayer(video)) {
                 if (!shouldDeferHandshake(video)) {
                     enableIOSPreservedControls(containerForVideo(video), video);
