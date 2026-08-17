@@ -44,6 +44,7 @@ const FIXTURE_PLAYER_ARTDECO_URL = pathToFileURL(join(__dirname, 'fixture-player
 const FIXTURE_PLAYER_ESPN_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-espn.html')).href;
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
 const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
+const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
 
 const userscript = readFileSync(SCRIPT_PATH, 'utf8');
 const playerUserscript = readFileSync(PLAYER_SCRIPT_PATH, 'utf8');
@@ -2730,13 +2731,16 @@ for (const config of [
     );
     const S = 'player-cleaner-live-blob-' + label;
 
-    await check(page, S, 'enhances live blob-source players in place (controls on, blob kept)', (blobCases) => {
-      const bad = blobCases.filter((id) => {
+    await check(page, S, label === 'mobile'
+      ? 'leaves live blob-source players to the site on iOS'
+      : 'enhances live blob-source players in place (controls on, blob kept)', ({ mobile, ids }) => {
+      const bad = ids.filter((id) => {
         const v = document.getElementById(id).querySelector('video');
-        return !(v && v.controls === true && (v.src || '').indexOf('blob:') === 0);
+        if (!v || (v.src || '').indexOf('blob:') !== 0 || v._wblockCleaned) return true;
+        return mobile ? !!v.controls || !!v._wblockEnhanced : !v.controls;
       });
-      return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.join(',')}` : '3/3 blob retained + controls' };
-    }, { arg: blobCases });
+      return { pass: bad.length === 0, detail: bad.length ? 'bad: ' + bad.join(',') : (mobile ? '3/3 blobs left to the site' : '3/3 blob retained + controls') };
+    }, { arg: { mobile: label === 'mobile', ids: blobCases } });
 
     await check(page, S, 'does not structurally clean live blob-source players', (blobCases) => {
       const cleaned = blobCases.filter((id) => {
@@ -3027,6 +3031,69 @@ for (const config of [
     const primerUsable = !!(primer && !primer.hasAttribute('data-wblock-pc-hidden') &&
       getComputedStyle(primer).display !== 'none');
     return { pass: visible(wrapper) && visible(play) && primerUsable, detail: `chrome=${wrapper && getComputedStyle(wrapper).display} play=${play && getComputedStyle(play).display} primer=${primer && getComputedStyle(primer).display} marked=${!!(primer && primer.hasAttribute('data-wblock-pc-hidden'))}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: iOS video.js / Media Chrome native URL promotion ----------
+// videojs.org feeds an MSE blob while React/video.js still know the HLS or
+// MP4 URL. iOS cannot nativeize that blob, but Safari can play the URL
+// directly. Handshake players and blobs with no discoverable URL stay put.
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (iOS video.js native promote)', {
+    device: iphone,
+    hasTouch: true,
+    fixture: FIXTURE_PLAYER_VIDEOJS_IOS_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#hero-video[data-wblock-player-cleaner]',
+  });
+  const S = 'player-cleaner-ios-videojs';
+
+  await check(page, S, 'promotes the Media Chrome HLS URL and nativeizes on iOS', () => {
+    const video = document.getElementById('hero-video');
+    const controls = document.getElementById('hero-controls');
+    const src = video && (video.currentSrc || video.src);
+    const chromeHidden = !!(controls && (getComputedStyle(controls).display === 'none' ||
+      controls.hasAttribute('data-wblock-pc-hidden') || controls.closest('[data-wblock-pc-hidden]')));
+    const pass = !!(video && video.controls && video.hasAttribute('data-wblock-player-cleaner') &&
+      video._wblockEnhanced && !video._wblockCleaned &&
+      src === 'https://stream.mux.com/demo.m3u8' && chromeHidden);
+    return { pass, detail: video ? 'src=' + src + ' controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced + ' cleaned=' + !!video._wblockCleaned + ' chrome=' + (controls && getComputedStyle(controls).display) : 'no video' };
+  });
+
+  await check(page, S, 'leaves an iOS blob without a native URL to the site', () => {
+    const video = document.getElementById('opaque-video');
+    const controls = document.getElementById('opaque-controls');
+    const chromeVisible = !!(controls && getComputedStyle(controls).display !== 'none' &&
+      !controls.hasAttribute('data-wblock-pc-hidden') && !controls.closest('[data-wblock-pc-hidden]'));
+    const pass = !!(video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
+      !video._wblockEnhanced && (video.currentSrc || video.src || '').indexOf('blob:') === 0 &&
+      video.disableRemotePlayback && video.getAttribute('x-webkit-airplay') === 'deny' && chromeVisible);
+    return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced + ' src=' + (video.currentSrc || video.src) + ' airplay=' + video.getAttribute('x-webkit-airplay') + ' chrome=' + (controls && getComputedStyle(controls).display) : 'no video' };
+  });
+
+  await check(page, S, 'does not promote a handshake player even when React exposes HLS', () => {
+    const video = document.getElementById('fave-video');
+    const controls = document.getElementById('fave-controls');
+    const chromeVisible = !!(controls && getComputedStyle(controls).display !== 'none' &&
+      !controls.hasAttribute('data-wblock-pc-hidden') && !controls.closest('[data-wblock-pc-hidden]'));
+    const pass = !!(video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
+      !video._wblockEnhanced && (video.currentSrc || video.src || '').indexOf('blob:') === 0 &&
+      video.disableRemotePlayback && chromeVisible);
+    return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced + ' src=' + (video.currentSrc || video.src) + ' chrome=' + (controls && getComputedStyle(controls).display) : 'no video' };
+  });
+
+  await check(page, S, 'does not replace a blob with a classic video.js API fallback', () => {
+    const video = document.getElementById('classic-video');
+    const controls = document.getElementById('classic-controls');
+    const chromeVisible = !!(controls && getComputedStyle(controls).display !== 'none' &&
+      !controls.hasAttribute('data-wblock-pc-hidden') && !controls.closest('[data-wblock-pc-hidden]'));
+    const pass = !!(video && !video.controls && !video.hasAttribute('data-wblock-player-cleaner') &&
+      !video._wblockEnhanced && (video.currentSrc || video.src || '').indexOf('blob:') === 0 && chromeVisible);
+    return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced + ' src=' + (video.currentSrc || video.src) : 'no video' };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));

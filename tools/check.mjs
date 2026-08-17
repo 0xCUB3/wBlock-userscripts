@@ -6,7 +6,7 @@ import {execFileSync} from 'node:child_process';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const raw = 'https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main';
 const specs = [
-  ['tube-cleaner', '0.1.1'], ['player-cleaner', '0.1.15'], ['dark-reader', '4.9.128-wblock.6']
+  ['tube-cleaner', '0.1.1'], ['player-cleaner', '0.1.16'], ['dark-reader', '4.9.128-wblock.6']
 ];
 const fail = message => { throw new Error(message); };
 const metadata = text => {

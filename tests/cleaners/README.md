@@ -52,6 +52,11 @@ Player Cleaner scenarios:
   full cleanup path: the original `<video>` is retained (avoiding a second media
   load and preserving buffered state, poster, and caption tracks), the custom
   chrome is dropped, and controls survive an adversarial player.
+- `fixture-player-cleaner-videojs-ios.html` — videojs.org-style Media Chrome
+  player: React still owns the HLS URL while the element only has an MSE
+  blob. On iOS the script promotes that URL and nativeizes; a blob with no
+  React src, a classic video.js API fallback, and a FAVE handshake with a
+  tempting React src stay with the site player.
 - `fixture-player-cleaner-discovery.html` — five players exposing the media URL
   through different mechanisms (video.src, `<source>` child, descendant
   `data-src`, a mocked video.js `currentSource()`, a mocked JW Player playlist

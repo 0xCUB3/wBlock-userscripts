@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.15
+// @version      0.1.16
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -65,6 +65,12 @@
     function hasOpaqueMediaSource(video) {
         try {
             if (!video) { return false; }
+            // After an iOS HLS/MP4 promotion the element src is native even
+            // if currentSrc still briefly reports the old blob.
+            if (video._wblockIOSNativeSrc && isPlayableUrl(video.src) &&
+                video.src === video._wblockIOSNativeSrc) {
+                return false;
+            }
             // ManagedMediaSource / MediaSource attachments show up as srcObject
             // or a blob: URL. Either one is an opaque pipeline we must not
             // tear down, and on iOS it will not load unless remote playback
@@ -840,6 +846,99 @@
         return null;
     }
 
+    function firstPlayableUrl(values) {
+        if (!values) { return null; }
+        for (var i = 0; i < values.length; i++) {
+            var value = values[i];
+            if (!value) { continue; }
+            if (Array.isArray(value)) {
+                var nested = firstPlayableUrl(value);
+                if (nested) { return nested; }
+                continue;
+            }
+            if (typeof value === 'object') {
+                value = value.src || value.href || value.url || value.file || '';
+            }
+            if (typeof value !== 'string') { continue; }
+            var url = toAbsoluteUrl(value);
+            if (isPlayableUrl(url)) { return url; }
+        }
+        return null;
+    }
+
+    // video.js v10 / Media Chrome keep the real HLS or MP4 on React props
+    // while the <video> only has the MSE blob. Walk a few fiber parents so
+    // iOS can promote that URL to native playback.
+    function sourceFromReactProps(el) {
+        if (!el) { return null; }
+        try {
+            var keys = Object.keys(el);
+            var fiber = null;
+            for (var i = 0; i < keys.length; i++) {
+                if (keys[i].indexOf('__reactProps') === 0) {
+                    var direct = firstPlayableUrl([el[keys[i]] && el[keys[i]].src, el[keys[i]]]);
+                    if (direct) { return direct; }
+                }
+                if (!fiber && (keys[i].indexOf('__reactFiber') === 0 ||
+                    keys[i].indexOf('__reactInternalInstance') === 0)) {
+                    fiber = el[keys[i]];
+                }
+            }
+            var depth = 0;
+            while (fiber && depth < 40) {
+                var found = firstPlayableUrl([fiber.memoizedProps, fiber.pendingProps]);
+                if (!found) {
+                    var props = fiber.memoizedProps || fiber.pendingProps;
+                    if (props) { found = firstPlayableUrl([props.src, props.source, props.hls, props.file, props.sources]); }
+                }
+                if (found) { return found; }
+                fiber = fiber.return;
+                depth++;
+            }
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    function discoverNativeSource(video, container) {
+        // Player API fallbacks sit beside a working MSE blob (JW / classic
+        // video.js). Those must not replace the pipeline. React props are
+        // the URL the component actually mounted, which iOS can play natively.
+        return sourceFromVideoElement(video) ||
+            sourceFromReactProps(video) ||
+            sourceFromReactProps(container);
+    }
+
+    function detachOpaqueSource(video) {
+        try { video.pause(); } catch (e) { /* ignore */ }
+        try { if (video.srcObject) { video.srcObject = null; } } catch (e) { /* ignore */ }
+        try {
+            var sources = video.getElementsByTagName('source');
+            while (sources.length) { sources[0].parentNode.removeChild(sources[0]); }
+        } catch (e) { /* ignore */ }
+        try { video.removeAttribute('src'); } catch (e) { /* ignore */ }
+        try { video.src = ''; } catch (e) { /* ignore */ }
+        try { video.load(); } catch (e) { /* ignore */ }
+    }
+
+    // iOS cannot nativeize an MSE blob, but it can play the site's HLS/MP4
+    // URL directly. Swap only after the element already owns a pipeline so
+    // we do not race player setup, and never on handshake/primer videos.
+    function promoteIOSNativeSource(video, container) {
+        if (!isIOSLikeDevice() || !video) { return false; }
+        if (isHandshakePlayer(video) || isPrimerMedia(video)) { return false; }
+        if (sourceFromVideoElement(video)) { return false; }
+        if (!hasOpaqueMediaSource(video) && !hasElementSourceSignal(video)) { return false; }
+        var src = discoverNativeSource(video, container || containerForVideo(video));
+        if (!src) { return false; }
+        try {
+            detachOpaqueSource(video);
+            video.src = src;
+            video._wblockIOSNativeSrc = src;
+            try { video.load(); } catch (e) { /* ignore */ }
+        } catch (e) { return false; }
+        return sourceFromVideoElement(video) === src;
+    }
+
     function hasElementSourceSignal(video) {
         try {
             if (video.srcObject) { return true; }
@@ -1344,12 +1443,13 @@
 
     // Real iOS WebKit rejects ManagedMediaSource after we flip native
     // controls, even with AirPlay denied. Leave any non-file iOS player
-    // to the site and only keep the remote-playback lock so the decoder
-    // can attach. Handshake / blob / empty srcObject pipelines all
-    // count; a direct http(s) file can still be nativeized.
+    // to the site unless we can promote a native-playable http(s) URL
+    // (HLS/MP4 from React or video.js). Handshake / blob / empty
+    // srcObject pipelines without that URL stay locked for AirPlay only.
     function preserveIOSManagedPlayer(video) {
         if (!isIOSLikeDevice() || !video) { return false; }
         if (sourceFromVideoElement(video)) { return false; }
+        if (promoteIOSNativeSource(video, containerForVideo(video))) { return false; }
         lockIOSManagedMediaSource(video);
         return true;
     }
@@ -1942,7 +2042,7 @@
             log('declared audio-only media; leaving video untouched');
             return;
         }
-        if (isIOSPreservedPlayer(video)) { return; }
+        if (isIOSPreservedPlayer(video) && !video._wblockIOSNativeSrc) { return; }
         // FAVE/AMP attach media during their own play-event dispatch. Wait
         // for that handshake even on desktop so we do not nativeize (or hide
         // Skip Ad) in the middle of startup.
@@ -1992,7 +2092,9 @@
             log('multiple videos; preserving player structure');
             return;
         }
-        if (src) { cleanPlayer(container, video, src); }
+        // iOS promotions keep the site wrapper: emptying a React Media
+        // Chrome tree just makes the framework rebuild the custom player.
+        if (src && !video._wblockIOSNativeSrc) { cleanPlayer(container, video, src); }
     }
 
     // A clean source is often not discoverable at first scan because the player
@@ -2114,7 +2216,7 @@
             // playback on the handshake element even before it has a source
             // so WebKit will accept the later attachment.
             if (preserveIOSManagedPlayer(video)) { continue; }
-            if (isIOSPreservedPlayer(video)) { continue; }
+            if (isIOSPreservedPlayer(video) && !video._wblockIOSNativeSrc) { continue; }
             if (!needsBareEnhancement(video)) { continue; }
             var bareContainer = containerForVideo(video);
             log('bare player detected', bareContainer.className || '(no class)', 'enhancing in place');

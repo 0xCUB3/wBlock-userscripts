@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>video.js v10 / Media Chrome iOS promotion</title>
+<style>
+  body { margin: 0; background: #111; }
+  .media-default-skin, .fave-player-container, .video-js {
+    position: relative; width: 320px; aspect-ratio: 16 / 9; margin: 12px auto; background: #000;
+  }
+  video { width: 100%; height: 100%; background: #222; }
+  .media-controls, .fave-controls, .vjs-control-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: rgba(0,0,0,.7);
+  }
+</style>
+</head>
+<body>
+  <!-- videojs.org: Media Chrome skin, MSE blob on the element, real HLS on React props. -->
+  <div id="hero" class="media-default-skin media-default-skin--video" role="group" aria-label="Media player">
+    <video id="hero-video" playsinline crossorigin="anonymous"></video>
+    <div class="media-controls" id="hero-controls">Play</div>
+  </div>
+
+  <!-- Same blob pipeline, but no discoverable native URL. iOS must leave it alone. -->
+  <div id="opaque-only" class="media-default-skin">
+    <video id="opaque-video" playsinline></video>
+    <div class="media-controls" id="opaque-controls">Play</div>
+  </div>
+
+  <!-- CNN-style handshake plus a tempting React HLS URL. Must stay preserved. -->
+  <div id="fave-shell" class="fave-player-container">
+    <video id="fave-video" playsinline></video>
+    <div class="fave-controls" id="fave-controls">Play</div>
+  </div>
+
+  <!-- Classic video.js API fallback beside a working blob. Must stay put. -->
+  <div id="classic" class="video-js">
+    <video id="classic-video" playsinline></video>
+    <div class="vjs-control-bar" id="classic-controls">Play</div>
+  </div>
+
+  <script>
+    (function () {
+      var blob = 'blob:https://videojs.org/00000000-0000-0000-0000-000000000000';
+      function attachBlob(id) {
+        var video = document.getElementById(id);
+        var source = document.createElement('source');
+        source.type = 'video/mp4';
+        source.src = blob;
+        video.appendChild(source);
+        try { video.src = blob; } catch (e) {}
+      }
+      function plantFiber(id, src) {
+        document.getElementById(id).__reactFiber$fixture = {
+          memoizedProps: { src: src },
+          pendingProps: { src: src },
+          return: null
+        };
+      }
+
+      attachBlob('hero-video');
+      attachBlob('opaque-video');
+      attachBlob('fave-video');
+      attachBlob('classic-video');
+      plantFiber('hero-video', 'https://stream.mux.com/demo.m3u8');
+      plantFiber('fave-video', 'https://stream.mux.com/should-not-promote.m3u8');
+
+      window.videojs = {
+        getPlayers: function () {
+          return {
+            classic: {
+              el: function () { return document.getElementById('classic-video'); },
+              currentSource: function () {
+                return { src: 'https://example.com/classic.mp4', type: 'video/mp4' };
+              }
+            }
+          };
+        }
+      };
+    })();
+  </script>
+</body>
+</html>
