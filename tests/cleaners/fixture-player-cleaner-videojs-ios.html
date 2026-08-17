@@ -34,6 +34,13 @@
     <div class="fave-controls" id="fave-controls">Play</div>
   </div>
 
+  <!-- Cached reload: video.js is still initializing when the promotion
+       lands and re-attaches its MSE blob over the native URL. -->
+  <div id="reload" class="media-default-skin">
+    <video id="reload-video" playsinline></video>
+    <div class="media-controls" id="reload-controls">Play</div>
+  </div>
+
   <!-- Classic video.js API fallback beside a working blob. Must stay put. -->
   <div id="classic" class="video-js">
     <video id="classic-video" playsinline></video>
@@ -60,11 +67,30 @@
       }
 
       attachBlob('hero-video');
+      attachBlob('reload-video');
       attachBlob('opaque-video');
       attachBlob('fave-video');
       attachBlob('classic-video');
       plantFiber('hero-video', 'https://stream.mux.com/demo.m3u8');
       plantFiber('fave-video', 'https://stream.mux.com/should-not-promote.m3u8');
+      plantFiber('reload-video', 'https://stream.mux.com/reload.m3u8');
+
+      // Simulate cached-reload video.js: the first time the cleaner swaps
+      // the element to a native URL mid-setup, the player re-attaches its
+      // MSE blob over it a beat later.
+      (function () {
+        var video = document.getElementById('reload-video');
+        var fought = false;
+        video.addEventListener('loadstart', function () {
+          var src = video.src || '';
+          if (fought || !src || src.indexOf('blob:') === 0) { return; }
+          fought = true;
+          setTimeout(function () {
+            try { video.src = blob; } catch (e) {}
+            try { video.load(); } catch (e) {}
+          }, 30);
+        });
+      })();
 
       window.videojs = {
         getPlayers: function () {

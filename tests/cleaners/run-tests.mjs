@@ -3096,6 +3096,19 @@ for (const config of [
     return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced + ' src=' + (video.currentSrc || video.src) : 'no video' };
   });
 
+  await page.waitForFunction(() => {
+    const video = document.getElementById('reload-video');
+    return !!(video && (video._wblockIOSNativeRetries || 0) >= 1 &&
+      (video.currentSrc || video.src) === 'https://stream.mux.com/reload.m3u8');
+  }, { timeout: 5000 }).catch(() => {});
+  await check(page, S, 'reasserts the native URL when a cached-reload player re-attaches its blob', () => {
+    const video = document.getElementById('reload-video');
+    const src = video && (video.currentSrc || video.src);
+    const pass = !!(video && src === 'https://stream.mux.com/reload.m3u8' &&
+      video._wblockIOSNativeSrc === src && (video._wblockIOSNativeRetries || 0) >= 1);
+    return { pass, detail: video ? 'src=' + src + ' retries=' + (video._wblockIOSNativeRetries || 0) : 'no video' };
+  });
+
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }

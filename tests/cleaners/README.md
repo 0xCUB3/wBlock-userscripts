@@ -56,7 +56,9 @@ Player Cleaner scenarios:
   player: React still owns the HLS URL while the element only has an MSE
   blob. On iOS the script promotes that URL and nativeizes; a blob with no
   React src, a classic video.js API fallback, and a FAVE handshake with a
-  tempting React src stay with the site player.
+  tempting React src stay with the site player. A cached-reload player that
+  re-attaches its MSE blob over the promoted URL is fought back off the
+  element (bounded re-assertion).
 - `fixture-player-cleaner-discovery.html` — five players exposing the media URL
   through different mechanisms (video.src, `<source>` child, descendant
   `data-src`, a mocked video.js `currentSource()`, a mocked JW Player playlist

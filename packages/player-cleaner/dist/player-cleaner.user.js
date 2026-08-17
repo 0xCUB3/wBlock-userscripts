@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.16
+// @version      0.1.17
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -908,16 +908,57 @@
             sourceFromReactProps(container);
     }
 
-    function detachOpaqueSource(video) {
-        try { video.pause(); } catch (e) { /* ignore */ }
-        try { if (video.srcObject) { video.srcObject = null; } } catch (e) { /* ignore */ }
+    // Swap in one src assignment, without the empty-src + load() detach:
+    // that intermediate load fires 'emptied'/'error' into the site player,
+    // and video.js answers by tearing down or rebuilding its pipeline.
+    function applyIOSNativeSource(video, src) {
         try {
-            var sources = video.getElementsByTagName('source');
-            while (sources.length) { sources[0].parentNode.removeChild(sources[0]); }
-        } catch (e) { /* ignore */ }
-        try { video.removeAttribute('src'); } catch (e) { /* ignore */ }
-        try { video.src = ''; } catch (e) { /* ignore */ }
-        try { video.load(); } catch (e) { /* ignore */ }
+            try { video.pause(); } catch (e) { /* ignore */ }
+            try { if (video.srcObject) { video.srcObject = null; } } catch (e) { /* ignore */ }
+            try {
+                var sources = video.getElementsByTagName('source');
+                while (sources.length) { sources[0].parentNode.removeChild(sources[0]); }
+            } catch (e) { /* ignore */ }
+            video.src = src;
+            video._wblockIOSNativeSrc = src;
+            try { video.load(); } catch (e) { /* ignore */ }
+        } catch (e) { return false; }
+        return sourceFromVideoElement(video) === src;
+    }
+
+    // On a cached reload the site player is still initializing when the swap
+    // lands, and video.js re-attaches its MSE pipeline over the native URL.
+    // No later scan recovers that element, so the hero ends up sourceless
+    // (a fresh load spaces things out, which is why only reloads broke).
+    // Re-assert the promoted URL whenever an opaque source lands on top of
+    // it, with a retry cap so a persistent player can win the element back.
+    function guardIOSNativeSource(video) {
+        if (video._wblockIOSNativeGuard) { return; }
+        video._wblockIOSNativeGuard = true;
+        video._wblockIOSNativeRetries = 0;
+        function reassert() {
+            setTimeout(function () {
+                try {
+                    if (!video.isConnected || !video._wblockIOSNativeSrc) { return; }
+                    if (video._wblockIOSNativeRetries >= 4) { return; }
+                    // currentSrc keeps reporting the previous source until
+                    // resource selection finishes, so read the live values:
+                    // srcObject and the src reflected from the last assignment.
+                    if (!video.srcObject) {
+                        var current = video.src || '';
+                        if (current === video._wblockIOSNativeSrc) { return; }
+                        // Only fight opaque re-attachments. A direct http(s)
+                        // source means the site intentionally changed media.
+                        if (current && current.indexOf('blob:') !== 0) { return; }
+                    }
+                    video._wblockIOSNativeRetries++;
+                    log('reasserting iOS native source', video._wblockIOSNativeSrc);
+                    applyIOSNativeSource(video, video._wblockIOSNativeSrc);
+                } catch (e) { /* ignore */ }
+            }, 0);
+        }
+        video.addEventListener('emptied', reassert);
+        video.addEventListener('loadstart', reassert);
     }
 
     // iOS cannot nativeize an MSE blob, but it can play the site's HLS/MP4
@@ -930,13 +971,9 @@
         if (!hasOpaqueMediaSource(video) && !hasElementSourceSignal(video)) { return false; }
         var src = discoverNativeSource(video, container || containerForVideo(video));
         if (!src) { return false; }
-        try {
-            detachOpaqueSource(video);
-            video.src = src;
-            video._wblockIOSNativeSrc = src;
-            try { video.load(); } catch (e) { /* ignore */ }
-        } catch (e) { return false; }
-        return sourceFromVideoElement(video) === src;
+        if (!applyIOSNativeSource(video, src)) { return false; }
+        guardIOSNativeSource(video);
+        return true;
     }
 
     function hasElementSourceSignal(video) {
