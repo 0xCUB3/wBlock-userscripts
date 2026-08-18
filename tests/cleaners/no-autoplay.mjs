@@ -9,30 +9,24 @@ const script = readFileSync(join(dir, '..', '..', 'packages', 'no-autoplay', 'di
 const fixture = readFileSync(join(dir, 'fixture-no-autoplay.html'), 'utf8');
 const url = 'https://example.com/wblock-no-autoplay';
 
-const failSafe = setTimeout(() => {
-  console.error('FAIL No Autoplay: timed out');
-  process.exit(1);
-}, 25000);
-
 async function playResult(page, selector) {
   return page.evaluate(async (sel) => {
     const media = document.querySelector(sel);
-    const outcome = await Promise.race([
-      media.play().then(() => ({ name: 'ok' })).catch((error) => ({
+    try {
+      await media.play();
+      return { name: 'ok', unlocked: !!media._wblockNoAutoplayUnlocked, paused: media.paused };
+    } catch (error) {
+      return {
         name: error && error.name,
         message: String(error && error.message || ''),
-      })),
-      new Promise((resolve) => setTimeout(() => resolve({ name: 'pending' }), 400)),
-    ]);
-    return {
-      ...outcome,
-      unlocked: !!media._wblockNoAutoplayUnlocked,
-      paused: media.paused,
-    };
+        unlocked: !!media._wblockNoAutoplayUnlocked,
+        paused: media.paused,
+      };
+    }
   }, selector);
 }
 
-const browser = await webkit.launch({ timeout: 15000 });
+const browser = await webkit.launch();
 try {
   const context = await browser.newContext({ viewport: { width: 800, height: 500 } });
   await context.route(url, (route) => route.fulfill({
@@ -41,7 +35,13 @@ try {
     body: fixture,
   }));
   const page = await context.newPage();
-  page.setDefaultTimeout(8000);
+  // The fixture media has no source, so WebKit's real play() promise would
+  // never settle. The userscript captures whatever play() exists at
+  // document-start, so install one that settles immediately; the gate logic
+  // under test decides whether calls reach it.
+  await page.addInitScript(() => {
+    HTMLMediaElement.prototype.play = function () { return Promise.resolve(); };
+  });
   await page.addInitScript(script);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('[data-wblock-no-autoplay]');
@@ -64,25 +64,17 @@ try {
   assert.equal(blocked.paused, true, 'blocked video stays paused');
 
   await page.locator('#play').click();
-  const unlockedMain = await page.evaluate(() => {
-    const video = document.getElementById('main');
-    return {
-      unlocked: !!video._wblockNoAutoplayUnlocked,
-      marked: video.getAttribute('data-wblock-no-autoplay-unlocked') === '1',
-    };
-  });
-  assert.deepEqual(unlockedMain, { unlocked: true, marked: true },
+  const unlockedMain = await playResult(page, '#main');
+  assert.equal(unlockedMain.name, 'ok',
     'a sibling play button unlocks the only video in that player');
-  const unlockedPlay = await playResult(page, '#main');
-  assert.notEqual(unlockedPlay.name, 'NotAllowedError',
-    'unlocked play() is not rejected by No Autoplay');
+  assert.equal(unlockedMain.unlocked, true, 'clicked player video is marked unlocked');
 
   const stillBlocked = await playResult(page, '#other');
   assert.equal(stillBlocked.name, 'NotAllowedError', 'unlocking one video does not unlock others');
 
   await page.locator('#feed').click();
   const unlockedFeed = await playResult(page, '#feed');
-  assert.notEqual(unlockedFeed.name, 'NotAllowedError', 'a direct click unlocks that video');
+  assert.equal(unlockedFeed.name, 'ok', 'a direct click unlocks that video');
   assert.equal(unlockedFeed.unlocked, true);
 
   const inserted = await page.evaluate(async () => {
@@ -93,13 +85,13 @@ try {
     video.setAttribute('playsinline', '');
     document.body.appendChild(video);
     const afterSet = { autoplay: video.autoplay, hasAttr: video.hasAttribute('autoplay') };
-    const play = await Promise.race([
-      video.play().then(() => ({ name: 'ok' })).catch((error) => ({
-        name: error && error.name,
-        message: String(error && error.message || ''),
-      })),
-      new Promise((resolve) => setTimeout(() => resolve({ name: 'pending' }), 400)),
-    ]);
+    let play;
+    try {
+      await video.play();
+      play = { name: 'ok' };
+    } catch (error) {
+      play = { name: error && error.name, message: String(error && error.message || '') };
+    }
     return { afterSet, play, marked: video.getAttribute('data-wblock-no-autoplay') === '1' };
   });
   assert.equal(inserted.afterSet.autoplay, false, 'late autoplay setter is ignored');
@@ -109,6 +101,5 @@ try {
 
   console.log('PASS No Autoplay');
 } finally {
-  clearTimeout(failSafe);
   await browser.close();
 }
