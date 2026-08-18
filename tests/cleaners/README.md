@@ -1,7 +1,7 @@
-# Tube Cleaner & Player Cleaner test harness
+# Tube Cleaner, Player Cleaner, and No Autoplay test harness
 
-Autonomous tests for the Tube Cleaner and Player Cleaner distributions in
-`packages/tube-cleaner/dist` and `packages/player-cleaner/dist`. They run in Playwright **WebKit** — the same engine
+Autonomous tests for the Tube Cleaner, Player Cleaner, and No Autoplay distributions in
+`packages/tube-cleaner/dist`, `packages/player-cleaner/dist`, and `packages/no-autoplay/dist`. They run in Playwright **WebKit** — the same engine
 Safari uses — so results approximate real macOS/iOS Safari behavior without
 needing a device or a human to report.
 
