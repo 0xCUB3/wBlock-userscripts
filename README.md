@@ -6,14 +6,12 @@ Standalone userscripts maintained for wBlock. The raw `main` branch is the updat
 
 - `packages/tube-cleaner`: native YouTube controls and playback features.
 - `packages/player-cleaner`: native controls for custom web players.
-- `packages/no-autoplay`: blocks muted feed/scroll autoplay until you tap or click the media.
 - `packages/dark-reader`: Dark Reader's MIT-licensed API engine for wBlock, without the full site-fix database.
 
 Each package has editable `src/`, tracked generated `dist/`, and stable install metadata. Install from:
 
 - `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/tube-cleaner/dist/tube-cleaner.user.js`
 - `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/player-cleaner/dist/player-cleaner.user.js`
-- `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/no-autoplay/dist/no-autoplay.user.js`
 - `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/dark-reader/dist/dark-reader.user.js`
 
 ## Development and release

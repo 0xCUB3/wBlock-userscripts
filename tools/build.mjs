@@ -3,7 +3,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const packages = ['tube-cleaner', 'player-cleaner', 'no-autoplay'];
+const packages = ['tube-cleaner', 'player-cleaner'];
 const metadata = source => {
   const match = source.match(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/);
   if (!match) throw new Error('missing userscript metadata');
@@ -12,7 +12,6 @@ const metadata = source => {
 await mkdir(join(root, 'packages/dark-reader/dist'), {recursive: true});
 for (const slug of packages) {
   const source = await readFile(join(root, `packages/${slug}/src/${slug}.user.js`), 'utf8');
-  await mkdir(join(root, `packages/${slug}/dist`), {recursive: true});
   await writeFile(join(root, `packages/${slug}/dist/${slug}.user.js`), source);
   await writeFile(join(root, `packages/${slug}/dist/${slug}.meta.js`), metadata(source));
 }
