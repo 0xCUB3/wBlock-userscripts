@@ -43,6 +43,7 @@ const FIXTURE_PLAYER_EARLY_URL = pathToFileURL(join(__dirname, 'fixture-player-c
 const FIXTURE_PLAYER_ARTDECO_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-artdeco.html')).href;
 const FIXTURE_PLAYER_ESPN_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-espn.html')).href;
 const FIXTURE_PLAYER_PBS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-pbs.html')).href;
+const FIXTURE_PLAYER_PBS_HOST = join(__dirname, 'fixture-player-cleaner-pbs-host.html');
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
 const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
 const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
@@ -2123,8 +2124,9 @@ async function qualityUISelectionCheck(page, scenario) {
 }
 
 // ---- Scenario: Player Cleaner PBS/GPB leftover chrome ----------------------
-// player.pbs.org keeps expand/kebab chrome beside a blob MSE <video>, and host
-// pages (video.gpb.org / video.pbs.org) paint a sibling overlay over the iframe.
+// player.pbs.org keeps expand/kebab chrome beside a blob MSE <video>. Host-page
+// overlay cleanup is gated to PBS/GPB hosts, so the sibling overlay in this
+// file-URL fixture must stay visible.
 {
   const { browser, page, pageErrors } = await runScenario('Player Cleaner (PBS/GPB player)', {
     fixture: FIXTURE_PLAYER_PBS_URL,
@@ -2152,32 +2154,212 @@ async function qualityUISelectionCheck(page, scenario) {
       const el = document.querySelector(sel);
       if (!el) return `${sel}=missing`;
       const style = getComputedStyle(el);
-      const ok = style.display === 'none' || el.getAttribute('data-wblock-pc-hidden') === '1';
-      return ok ? null : `${sel}=${style.display}/${el.getAttribute('data-wblock-pc-hidden')}`;
+      const ok = style.display === 'none' || style.visibility === 'hidden';
+      return ok ? null : `${sel}=${style.display}/${style.visibility}/marked=${el.getAttribute('data-wblock-pc-hidden')}`;
     }).filter(Boolean);
     return { pass: hidden.length === 0, detail: hidden.join(' ') || 'all hidden' };
   });
 
-  await check(page, S, 'hides the host-page PBS overlay', () => {
+  await check(page, S, 'leaves the host-page PBS overlay visible off PBS/GPB page hosts', () => {
+    const iframe = document.getElementById('pbs-iframe');
     const overlay = document.querySelector('[class*="video_player_overlay"]');
-    if (!overlay) return { pass: false, detail: 'no overlay' };
+    if (!iframe || !overlay) return { pass: false, detail: 'missing iframe or overlay' };
+    const src = iframe.getAttribute('src') || '';
     const style = getComputedStyle(overlay);
-    const pass = style.display === 'none' || overlay.getAttribute('data-wblock-pc-hidden') === '1';
-    return { pass, detail: `display=${style.display} marked=${overlay.getAttribute('data-wblock-pc-hidden')}` };
+    const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
+      !overlay.hasAttribute('data-wblock-pc-hidden');
+    const pass = src === 'https://player.pbs.org/viralplayer/fixture/' && visible;
+    return { pass, detail: `host=${location.hostname} src=${src} display=${style.display} marked=${overlay.getAttribute('data-wblock-pc-hidden')}` };
   });
 
-  await check(page, S, 'keeps the site header, title, and Passport screen', () => {
-    const header = document.querySelector('header');
-    const title = document.getElementById('pbs-title');
-    const passport = document.querySelector('[class*="passport_benefit"]');
+  await check(page, S, 'keeps More/Share inside a protected in-player PBS wrapper', () => {
     const visible = (el) => {
       if (!el) return false;
       const style = getComputedStyle(el);
       return style.display !== 'none' && style.visibility !== 'hidden' &&
         !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
     };
-    const pass = !!(visible(header) && visible(title) && visible(passport));
-    return { pass, detail: `header=${header && getComputedStyle(header).display} title=${title && getComputedStyle(title).display} passport=${passport && getComputedStyle(passport).display}` };
+    const wrap = document.getElementById('pbs-protected-wrap');
+    const more = document.getElementById('pbs-protected-more');
+    const share = document.getElementById('pbs-protected-share');
+    const pass = !!(visible(wrap) && visible(more) && visible(share));
+    return { pass, detail: `wrap=${wrap && getComputedStyle(wrap).display} more=${more && getComputedStyle(more).display} share=${share && getComputedStyle(share).display} marked=${more && more.getAttribute('data-wblock-pc-hidden')}` };
+  });
+
+  await check(page, S, 'keeps the site header, title, Passport, error, ad, and wrap copy', () => {
+    const header = document.querySelector('header');
+    const title = document.getElementById('pbs-title');
+    const passport = document.querySelector('[class*="passport_benefit"]');
+    const error = document.getElementById('pbs-error');
+    const preroll = document.getElementById('pbs-preroll');
+    const copy = document.getElementById('pbs-wrap-copy');
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const pass = !!(visible(header) && visible(title) && visible(passport) &&
+      visible(error) && visible(preroll) && visible(copy));
+    return { pass, detail: `header=${header && getComputedStyle(header).display} title=${title && getComputedStyle(title).display} passport=${passport && getComputedStyle(passport).display} error=${error && getComputedStyle(error).display} preroll=${preroll && getComputedStyle(preroll).display} copy=${copy && getComputedStyle(copy).display}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: Player Cleaner PBS host iframe only -------------------------
+// video.gpb.org has no <video>; hidePbsHostChrome must still match the absolute
+// and protocol-relative player.pbs.org viralplayer URLs and ignore lookalike,
+// relative, and malformed hosts. Host cleanup is gated to PBS/GPB page hosts.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (PBS host iframe)', {
+    fixture: pathToFileURL(FIXTURE_PLAYER_PBS_HOST).href,
+    gotoURL: 'https://video.gpb.org/video/fixture/',
+    responseBody: readFileSync(FIXTURE_PLAYER_PBS_HOST, 'utf8'),
+    scriptSource: playerUserscript,
+    readySignal: '#pbs-real-overlay[data-wblock-pc-hidden]',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-pbs-host';
+
+  await check(page, S, 'hides the absolute https://player.pbs.org host overlay', () => {
+    const style = document.getElementById('pbs-real-overlay') &&
+      getComputedStyle(document.getElementById('pbs-real-overlay'));
+    const real = document.getElementById('pbs-real-overlay');
+    const iframe = document.getElementById('pbs-real-iframe');
+    const hidden = !!(style && (style.display === 'none' || style.visibility === 'hidden'));
+    const pass = hidden &&
+      iframe && iframe.getAttribute('src') === 'https://player.pbs.org/viralplayer/fixture/';
+    return { pass, detail: `host=${location.hostname} real=${style && style.display} marked=${real && real.getAttribute('data-wblock-pc-hidden')} src=${iframe && iframe.getAttribute('src')}` };
+  });
+
+  await check(page, S, 'hides the protocol-relative //player.pbs.org host overlay', () => {
+    const overlay = document.getElementById('pbs-protocol-overlay');
+    const iframe = document.getElementById('pbs-protocol-iframe');
+    const style = overlay && getComputedStyle(overlay);
+    const hidden = !!(style && (style.display === 'none' || style.visibility === 'hidden'));
+    const pass = hidden &&
+      iframe && iframe.getAttribute('src') === '//player.pbs.org/viralplayer/fixture/';
+    return { pass, detail: `overlay=${style && style.display} marked=${overlay && overlay.getAttribute('data-wblock-pc-hidden')} src=${iframe && iframe.getAttribute('src')}` };
+  });
+
+  await check(page, S, 'leaves the path-relative /viralplayer overlay visible on video.gpb.org', () => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const overlay = document.getElementById('pbs-path-overlay');
+    const iframe = document.getElementById('pbs-path-iframe');
+    const pass = visible(overlay) &&
+      iframe && iframe.getAttribute('src') === '/viralplayer/fixture/';
+    return { pass, detail: `overlay=${overlay && getComputedStyle(overlay).display} src=${iframe && iframe.getAttribute('src')}` };
+  });
+
+  await check(page, S, 'leaves the suffix lookalike host overlay visible', () => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const fake = document.getElementById('pbs-lookalike-overlay');
+    const lookalike = document.getElementById('pbs-lookalike-iframe');
+    const pass = visible(fake) &&
+      lookalike && lookalike.getAttribute('src') === 'https://player.pbs.org.evil.example/viralplayer/fixture/';
+    return { pass, detail: `fake=${fake && getComputedStyle(fake).display} src=${lookalike && lookalike.getAttribute('src')}` };
+  });
+
+  await check(page, S, 'leaves the malformed prefixed player.pbs.org overlay visible', () => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const overlay = document.getElementById('pbs-malformed-overlay');
+    const iframe = document.getElementById('pbs-malformed-iframe');
+    const pass = visible(overlay) &&
+      iframe && iframe.getAttribute('src') === 'https://%zz//player.pbs.org/viralplayer/fixture/';
+    return { pass, detail: `overlay=${overlay && getComputedStyle(overlay).display} src=${iframe && iframe.getAttribute('src')}` };
+  });
+
+  await check(page, S, 'keeps a host overlay visible when protected Passport UI is nested inside', () => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const overlay = document.getElementById('pbs-protected-overlay');
+    const passport = document.getElementById('pbs-overlay-passport');
+    const more = document.getElementById('pbs-protected-more');
+    const share = document.getElementById('pbs-protected-share');
+    const pass = visible(overlay) && visible(passport) && visible(more) && visible(share);
+    return { pass, detail: `overlay=${overlay && getComputedStyle(overlay).display} passport=${passport && getComputedStyle(passport).display} more=${more && getComputedStyle(more).display} share=${share && getComputedStyle(share).display} marked=${more && more.getAttribute('data-wblock-pc-hidden')}` };
+  });
+
+  await check(page, S, 'leaves the malformed player.pbs.org:evil.example port overlay visible', () => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const overlay = document.getElementById('pbs-badport-overlay');
+    const iframe = document.getElementById('pbs-badport-iframe');
+    const pass = visible(overlay) &&
+      iframe && iframe.getAttribute('src') === 'https://player.pbs.org:evil.example/viralplayer/fixture/';
+    return { pass, detail: `overlay=${overlay && getComputedStyle(overlay).display} src=${iframe && iframe.getAttribute('src')}` };
+  });
+
+  await check(page, S, 'does not mark host-only pages as player-cleaned', () => {
+    const pass = !document.querySelector('[data-wblock-player-cleaner]');
+    return { pass, detail: `cleaned=${!!document.querySelector('[data-wblock-player-cleaner]')}` };
+  });
+
+  await check(page, S, 'keeps the host header and page Passport screen', () => {
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const header = document.querySelector('header');
+    const passport = document.querySelector('body > .PassportBenefitScreen-module__fake__passport_benefit');
+    const pass = !!(visible(header) && visible(passport));
+    return { pass, detail: `header=${header && getComputedStyle(header).display} passport=${passport && getComputedStyle(passport).display}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: Player Cleaner third-party player.pbs.org embed --------------
+// A generic site that only embeds player.pbs.org must not lose its overlay.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (third-party PBS embed)', {
+    fixture: pathToFileURL(FIXTURE_PLAYER_PBS_HOST).href,
+    gotoURL: 'https://www.example.com/videos/fixture/',
+    responseBody: readFileSync(FIXTURE_PLAYER_PBS_HOST, 'utf8'),
+    scriptSource: playerUserscript,
+    readySignal: '#pbs-real-overlay',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-pbs-third-party';
+
+  await check(page, S, 'leaves the player.pbs.org overlay visible on a third-party host', () => {
+    const overlay = document.getElementById('pbs-real-overlay');
+    const iframe = document.getElementById('pbs-real-iframe');
+    if (!overlay || !iframe) return { pass: false, detail: 'missing overlay or iframe' };
+    const style = getComputedStyle(overlay);
+    const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
+      !overlay.hasAttribute('data-wblock-pc-hidden');
+    const pass = location.hostname === 'www.example.com' &&
+      iframe.getAttribute('src') === 'https://player.pbs.org/viralplayer/fixture/' && visible;
+    return { pass, detail: `host=${location.hostname} display=${style.display} marked=${overlay.getAttribute('data-wblock-pc-hidden')}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));

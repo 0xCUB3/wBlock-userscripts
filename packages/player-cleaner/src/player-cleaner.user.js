@@ -1260,6 +1260,7 @@
             if (composedContains(video, el)) continue;   // <source>, <track>
             if (composedContains(el, video)) continue;   // ancestor wrappers/hosts
             if (isFacebookProtected(el, video)) continue;
+            if (isPbsProtectedChrome(el)) continue;
             if (aggressive) {
                 hideElement(el);
             } else {
@@ -1395,7 +1396,7 @@
     // walked only for positioned descendants so post text/reactions stay.
     function hideOverlappingSubtree(root, video, vr) {
         if (root === video || composedRelated(root, video) ||
-            isFacebookProtected(root, video)) { return; }
+            isFacebookProtected(root, video) || isPbsProtectedChrome(root)) { return; }
         var rr;
         try { rr = root.getBoundingClientRect(); } catch (e) { return; }
         var pos;
@@ -1417,7 +1418,7 @@
         for (var i = 0; i < els.length; i++) {
             var el = els[i];
             if (el === video || composedRelated(el, video) ||
-                isFacebookProtected(el, video)) { continue; }
+                isFacebookProtected(el, video) || isPbsProtectedChrome(el)) { continue; }
             try {
                 var p = getComputedStyle(el).position;
                 if (p === 'absolute' || p === 'sticky' || p === 'fixed') {
@@ -1599,43 +1600,47 @@
                 }
             } catch (e2) { /* not a PBS video.js shell */ }
         }
-        if (pbsShell && pbsShell.children) {
-            var pbsKids = pbsShell.children;
-            for (var p = 0; p < pbsKids.length; p++) {
-                if (composedRelated(pbsKids[p], video)) { continue; }
-                if (pbsKids[p].tagName === 'VIDEO' ||
-                    (pbsKids[p].querySelector && pbsKids[p].querySelector('video'))) { continue; }
-                hideElement(pbsKids[p]);
-            }
+        if (pbsShell && pbsShell.querySelectorAll) {
             var pbsChrome = pbsShell.querySelectorAll(
                 '.vjs-control-bar,.vjs-big-play-button,.vjs-poster,.vjs-title-bar,' +
                 '.vjs-loading-spinner,[class*="vjs-pbs-"]'
             );
             for (var pc = 0; pc < pbsChrome.length; pc++) {
-                if (!composedRelated(pbsChrome[pc], video)) { hideElement(pbsChrome[pc]); }
+                if (composedRelated(pbsChrome[pc], video)) { continue; }
+                if (isPbsProtectedChrome(pbsChrome[pc])) { continue; }
+                hideElement(pbsChrome[pc]);
             }
             var pbsMenus = pbsShell.querySelectorAll('button,[role="button"],[aria-haspopup]');
             for (var pm = 0; pm < pbsMenus.length; pm++) {
                 if (composedRelated(pbsMenus[pm], video)) { continue; }
                 if (pbsMenus[pm].tagName === 'VIDEO') { continue; }
+                if (isPbsProtectedChrome(pbsMenus[pm])) { continue; }
                 if (isPbsMenuChrome(pbsMenus[pm])) { hideElement(pbsMenus[pm]); }
             }
-            var pbsWrap = null;
-            try { pbsWrap = pbsShell.closest && pbsShell.closest('.player-wrap'); }
-            catch (e3) { /* no wrap */ }
-            if (pbsWrap && pbsWrap.children && pbsWrap.querySelector &&
-                pbsWrap.querySelector('.vjs-pbs, #player-videojs')) {
-                var wrapKids = pbsWrap.children;
-                for (var pw = 0; pw < wrapKids.length; pw++) {
-                    if (composedRelated(wrapKids[pw], video)) { continue; }
-                    if (wrapKids[pw].tagName === 'VIDEO' ||
-                        (wrapKids[pw].querySelector && wrapKids[pw].querySelector('video'))) {
-                        continue;
-                    }
-                    hideElement(wrapKids[pw]);
-                }
-            }
         }
+    }
+
+    function normalizePbsHost(host) {
+        if (!host) { return ''; }
+        try { host = String(host).toLowerCase(); }
+        catch (e) { return ''; }
+        if (host.charAt(host.length - 1) === '.') {
+            host = host.slice(0, -1);
+        }
+        return host;
+    }
+
+    function isPbsPlayerHost(host) {
+        return normalizePbsHost(host) === 'player.pbs.org';
+    }
+
+    // Host-page overlay cleanup is only for PBS/GPB documents. Third-party
+    // pages that merely embed player.pbs.org must keep their own chrome.
+    function isPbsOrGpbPageHost(host) {
+        host = normalizePbsHost(host);
+        if (!host) { return false; }
+        return host === 'pbs.org' || host.slice(-8) === '.pbs.org' ||
+            host === 'gpb.org' || host.slice(-8) === '.gpb.org';
     }
 
     function isPbsPlayerIframe(el) {
@@ -1643,21 +1648,87 @@
         var src = '';
         try { src = el.getAttribute('src') || el.src || ''; }
         catch (e) { src = ''; }
-        return /(?:^|\.)player\.pbs\.org(?:[:/]|$)/i.test(src);
+        if (!src) { return false; }
+        try {
+            var base = '';
+            try { base = document.baseURI || location.href || ''; }
+            catch (e2) { base = ''; }
+            var parsed = base ? new URL(src, base) : new URL(src);
+            return isPbsPlayerHost(parsed.hostname);
+        } catch (e3) {
+            return isPbsPlayerIframeSrcFallback(src);
+        }
     }
 
-    function isPbsProtectedHostChrome(el) {
+    function isPbsPlayerIframeSrcFallback(src) {
+        if (!src) { return false; }
+        try { src = String(src).trim(); }
+        catch (e) { return false; }
+        // Authority must follow optional http(s): immediately. A port, if
+        // present, has to be numeric so https://player.pbs.org:evil.example/
+        // cannot sneak through the lookahead.
+        return /^(?:https?:)?\/\/player\.pbs\.org(?::\d+)?(?=[/?#]|$)/i.test(src);
+    }
+
+    var PBS_HOST_PROTECTED_UI_SELECTOR = (
+        '[class*="passport_benefit"],[class*="PassportBenefit"],' +
+        '.vjs-error-display,[class*="vjs-error"],' +
+        '[class*="preroll"],[class*="ima-ad"],' +
+        '[class*="ad-container"],[class*="ads-container"]'
+    );
+
+    function pbsHostOverlayContainsProtectedUI(overlay) {
+        if (!overlay || !overlay.querySelector) { return false; }
+        try {
+            return !!overlay.querySelector(PBS_HOST_PROTECTED_UI_SELECTOR);
+        } catch (e) { return false; }
+    }
+
+    function isPbsProtectedChrome(el) {
         if (!el || el === document.documentElement || el === document.body) { return true; }
         try {
             if (el.closest && el.closest(
                 'header,nav,[role="banner"],[role="navigation"],[class*="MobileMenu"],' +
-                '[class*="passport_benefit"],[class*="PassportBenefit"]'
+                '[class*="passport_benefit"],[class*="PassportBenefit"],' +
+                '.vjs-error-display,[class*="vjs-error"],' +
+                '[class*="preroll"],[class*="ima-ad"],[class*="ad-container"],[class*="ads-container"]'
             )) { return true; }
         } catch (e) { /* ignore */ }
         var tag = el.tagName || '';
         if (tag === 'HEADER' || tag === 'NAV' || tag === 'IFRAME') { return true; }
         if (isPlayableMediaIframe(el)) { return true; }
+        if (isPbsCandidateWrapper(el) && pbsHostOverlayContainsProtectedUI(el)) {
+            return true;
+        }
+        if (isInsidePreservedPbsWrapper(el)) { return true; }
         return false;
+    }
+
+    function isPbsCandidateWrapper(el) {
+        if (!el) { return false; }
+        var cls = '';
+        try { cls = el.getAttribute('class') || ''; }
+        catch (e) { return false; }
+        return /video_player_overlay|VideoPlayerOverlay|vjs-pbs-/.test(cls);
+    }
+
+    function isInsidePreservedPbsWrapper(el) {
+        if (!el) { return false; }
+        var current;
+        try { current = el.parentElement; }
+        catch (e) { return false; }
+        while (current && current !== document.documentElement && current !== document.body) {
+            if (isPbsCandidateWrapper(current) && pbsHostOverlayContainsProtectedUI(current)) {
+                return true;
+            }
+            try { current = current.parentElement; }
+            catch (e2) { break; }
+        }
+        return false;
+    }
+
+    function isPbsProtectedHostChrome(el) {
+        return isPbsProtectedChrome(el);
     }
 
     function isPbsMenuChrome(el) {
@@ -1675,6 +1746,9 @@
     }
 
     function hidePbsHostChrome() {
+        try {
+            if (!isPbsOrGpbPageHost(location.hostname)) { return; }
+        } catch (e) { return; }
         var iframes;
         try { iframes = document.querySelectorAll('iframe'); }
         catch (e) { return; }
@@ -1703,6 +1777,7 @@
             var overlay = overlays[o];
             if (!overlay || overlay === iframe) { continue; }
             if (isPbsProtectedHostChrome(overlay)) { continue; }
+            if (pbsHostOverlayContainsProtectedUI(overlay)) { continue; }
             if (overlay.querySelector && overlay.querySelector('iframe')) { continue; }
             hideElement(overlay);
         }
@@ -1775,7 +1850,8 @@
         // primers) must stay usable for the site.
         if (el.tagName === 'VIDEO') { return; }
         if (isPlayableMediaIframe(el)) { return; }
-        if (composedRelated(el, video) || isFacebookProtected(el, video)) { return; }
+        if (composedRelated(el, video) || isFacebookProtected(el, video) ||
+            isPbsProtectedChrome(el)) { return; }
         // A hit often lands on a control (slider/button) nested in a static bar;
         // hide the bar rather than the inner control, which the caller sees.
         var bar = el;
@@ -2358,9 +2434,9 @@
     function scan(root, allowStructuralCleanup) {
         var scope = root || document;
         if (!scope || !scope.querySelectorAll) { return; }
-        // Host pages (video.pbs.org / video.gpb.org) embed player.pbs.org in an
-        // iframe and paint a sibling overlay. There is no <video> in that
-        // document, so chrome hide has to run even when scan finds nothing.
+        // PBS/GPB host pages embed player.pbs.org in an iframe and paint a
+        // sibling overlay. There is no <video> in that document, so chrome hide
+        // has to run even when scan finds nothing. Off those hosts this is a no-op.
         hidePbsHostChrome();
         var seen = [];
 
