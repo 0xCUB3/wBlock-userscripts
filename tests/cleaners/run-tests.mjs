@@ -42,6 +42,7 @@ const FIXTURE_PLAYER_UPGRADE_URL = pathToFileURL(join(__dirname, 'fixture-player
 const FIXTURE_PLAYER_EARLY_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-early.html')).href;
 const FIXTURE_PLAYER_ARTDECO_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-artdeco.html')).href;
 const FIXTURE_PLAYER_ESPN_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-espn.html')).href;
+const FIXTURE_PLAYER_PBS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-pbs.html')).href;
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
 const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
 const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
@@ -2116,6 +2117,68 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: !!(video && video.controls && video.hasAttribute('controls')),
       detail: video ? `controls=${video.controls} attr=${video.hasAttribute('controls')}` : 'no video' };
   }, { timeout: 2500, interval: 200 });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: Player Cleaner PBS/GPB leftover chrome ----------------------
+// player.pbs.org keeps expand/kebab chrome beside a blob MSE <video>, and host
+// pages (video.gpb.org / video.pbs.org) paint a sibling overlay over the iframe.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (PBS/GPB player)', {
+    fixture: FIXTURE_PLAYER_PBS_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#pbs-video[data-wblock-player-cleaner]',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-pbs';
+
+  await check(page, S, 'forces native controls on the PBS video', () => {
+    const video = document.getElementById('pbs-video');
+    return { pass: !!(video && video.controls && video.getAttribute('data-wblock-player-cleaner') === '1'),
+      detail: video ? `controls=${video.controls} attr=${video.getAttribute('data-wblock-player-cleaner')}` : 'no video' };
+  });
+
+  await check(page, S, 'keeps the PBS blob pipeline in place', () => {
+    const video = document.getElementById('pbs-video');
+    const pass = !!(video && video.src.startsWith('blob:') && !video._wblockCleaned);
+    return { pass, detail: video ? `src=${video.src} cleaned=${!!video._wblockCleaned}` : 'no video' };
+  });
+
+  await check(page, S, 'hides leftover PBS video.js chrome', () => {
+    const ids = ['.vjs-control-bar', '.vjs-big-play-button', '.vjs-pbs-top-icons', '.vjs-pbs-more'];
+    const hidden = ids.map((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return `${sel}=missing`;
+      const style = getComputedStyle(el);
+      const ok = style.display === 'none' || el.getAttribute('data-wblock-pc-hidden') === '1';
+      return ok ? null : `${sel}=${style.display}/${el.getAttribute('data-wblock-pc-hidden')}`;
+    }).filter(Boolean);
+    return { pass: hidden.length === 0, detail: hidden.join(' ') || 'all hidden' };
+  });
+
+  await check(page, S, 'hides the host-page PBS overlay', () => {
+    const overlay = document.querySelector('[class*="video_player_overlay"]');
+    if (!overlay) return { pass: false, detail: 'no overlay' };
+    const style = getComputedStyle(overlay);
+    const pass = style.display === 'none' || overlay.getAttribute('data-wblock-pc-hidden') === '1';
+    return { pass, detail: `display=${style.display} marked=${overlay.getAttribute('data-wblock-pc-hidden')}` };
+  });
+
+  await check(page, S, 'keeps the site header, title, and Passport screen', () => {
+    const header = document.querySelector('header');
+    const title = document.getElementById('pbs-title');
+    const passport = document.querySelector('[class*="passport_benefit"]');
+    const visible = (el) => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' &&
+        !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    };
+    const pass = !!(visible(header) && visible(title) && visible(passport));
+    return { pass, detail: `header=${header && getComputedStyle(header).display} title=${title && getComputedStyle(title).display} passport=${passport && getComputedStyle(passport).display}` };
+  });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();

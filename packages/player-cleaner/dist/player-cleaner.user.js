@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.17
+// @version      0.1.18
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -310,7 +310,9 @@
         '[data-mw-tmh]',             // MediaWiki TimedMediaHandler
         '[data-a-target="video-player"]', // Twitch player wrapper
         '.amp-player',               // Fox / Akamai AMP
-        '.fave-player-container'     // CNN FAVE / Bolt
+        '.fave-player-container',    // CNN FAVE / Bolt
+        '.vjs-pbs',                  // PBS / GPB video.js
+        '#player-videojs'            // PBS portal / station / partner player
     ];
     var PLAYER_SELECTOR = PLAYER_SELECTORS.join(',');
 
@@ -1581,6 +1583,154 @@
                 if (!composedRelated(faveChrome[fc], video)) { hideElement(faveChrome[fc]); }
             }
         }
+
+        // PBS / GPB video.js keeps expand/kebab chrome as siblings of <video>
+        // inside .vjs-pbs / #player-videojs. Blob MSE stays in place, so this
+        // hide has to survive remounts the same way AMP/FAVE do.
+        var pbsShell = null;
+        try { pbsShell = video.closest && video.closest('.vjs-pbs, #player-videojs'); }
+        catch (e) { /* not a PBS player */ }
+        if (!pbsShell) {
+            try {
+                var vjsShell = video.closest && video.closest('.video-js');
+                if (vjsShell && (vjsShell.id === 'player-videojs' ||
+                    (vjsShell.classList && vjsShell.classList.contains('vjs-pbs')))) {
+                    pbsShell = vjsShell;
+                }
+            } catch (e2) { /* not a PBS video.js shell */ }
+        }
+        if (pbsShell && pbsShell.children) {
+            var pbsKids = pbsShell.children;
+            for (var p = 0; p < pbsKids.length; p++) {
+                if (composedRelated(pbsKids[p], video)) { continue; }
+                if (pbsKids[p].tagName === 'VIDEO' ||
+                    (pbsKids[p].querySelector && pbsKids[p].querySelector('video'))) { continue; }
+                hideElement(pbsKids[p]);
+            }
+            var pbsChrome = pbsShell.querySelectorAll(
+                '.vjs-control-bar,.vjs-big-play-button,.vjs-poster,.vjs-title-bar,' +
+                '.vjs-loading-spinner,[class*="vjs-pbs-"]'
+            );
+            for (var pc = 0; pc < pbsChrome.length; pc++) {
+                if (!composedRelated(pbsChrome[pc], video)) { hideElement(pbsChrome[pc]); }
+            }
+            var pbsMenus = pbsShell.querySelectorAll('button,[role="button"],[aria-haspopup]');
+            for (var pm = 0; pm < pbsMenus.length; pm++) {
+                if (composedRelated(pbsMenus[pm], video)) { continue; }
+                if (pbsMenus[pm].tagName === 'VIDEO') { continue; }
+                if (isPbsMenuChrome(pbsMenus[pm])) { hideElement(pbsMenus[pm]); }
+            }
+            var pbsWrap = null;
+            try { pbsWrap = pbsShell.closest && pbsShell.closest('.player-wrap'); }
+            catch (e3) { /* no wrap */ }
+            if (pbsWrap && pbsWrap.children && pbsWrap.querySelector &&
+                pbsWrap.querySelector('.vjs-pbs, #player-videojs')) {
+                var wrapKids = pbsWrap.children;
+                for (var pw = 0; pw < wrapKids.length; pw++) {
+                    if (composedRelated(wrapKids[pw], video)) { continue; }
+                    if (wrapKids[pw].tagName === 'VIDEO' ||
+                        (wrapKids[pw].querySelector && wrapKids[pw].querySelector('video'))) {
+                        continue;
+                    }
+                    hideElement(wrapKids[pw]);
+                }
+            }
+        }
+    }
+
+    function isPbsPlayerIframe(el) {
+        if (!el || el.tagName !== 'IFRAME') { return false; }
+        var src = '';
+        try { src = el.getAttribute('src') || el.src || ''; }
+        catch (e) { src = ''; }
+        return /(?:^|\.)player\.pbs\.org(?:[:/]|$)/i.test(src);
+    }
+
+    function isPbsProtectedHostChrome(el) {
+        if (!el || el === document.documentElement || el === document.body) { return true; }
+        try {
+            if (el.closest && el.closest(
+                'header,nav,[role="banner"],[role="navigation"],[class*="MobileMenu"],' +
+                '[class*="passport_benefit"],[class*="PassportBenefit"]'
+            )) { return true; }
+        } catch (e) { /* ignore */ }
+        var tag = el.tagName || '';
+        if (tag === 'HEADER' || tag === 'NAV' || tag === 'IFRAME') { return true; }
+        if (isPlayableMediaIframe(el)) { return true; }
+        return false;
+    }
+
+    function isPbsMenuChrome(el) {
+        if (!el) { return false; }
+        var label = '';
+        try {
+            label = ((el.getAttribute('aria-label') || '') + ' ' +
+                (el.getAttribute('title') || '') + ' ' +
+                (el.getAttribute('data-testid') || '') + ' ' +
+                (el.className || '') + ' ' +
+                (el.id || '') + ' ' +
+                (el.textContent || '')).toLowerCase();
+        } catch (e) { return false; }
+        return /more|kebab|share|overflow|ellipsis|menu/.test(label);
+    }
+
+    function hidePbsHostChrome() {
+        var iframes;
+        try { iframes = document.querySelectorAll('iframe'); }
+        catch (e) { return; }
+        for (var i = 0; i < iframes.length; i++) {
+            if (!isPbsPlayerIframe(iframes[i])) { continue; }
+            var iframe = iframes[i];
+            var container = null;
+            try {
+                container = iframe.closest && iframe.closest('[class*="video_player_container"]');
+            } catch (e2) { container = null; }
+            if (!container) { container = iframe.parentElement; }
+            if (!container) { continue; }
+            hidePbsHostOverlays(container, iframe);
+            hidePbsHostMenuButtons(container, iframe);
+        }
+    }
+
+    function hidePbsHostOverlays(container, iframe) {
+        var overlays;
+        try {
+            overlays = container.querySelectorAll(
+                '[class*="video_player_overlay"],[class*="VideoPlayerOverlay"]'
+            );
+        } catch (e) { return; }
+        for (var o = 0; o < overlays.length; o++) {
+            var overlay = overlays[o];
+            if (!overlay || overlay === iframe) { continue; }
+            if (isPbsProtectedHostChrome(overlay)) { continue; }
+            if (overlay.querySelector && overlay.querySelector('iframe')) { continue; }
+            hideElement(overlay);
+        }
+    }
+
+    function hidePbsHostMenuButtons(container, iframe) {
+        var buttons;
+        try {
+            buttons = container.querySelectorAll(
+                'button,[role="button"],[aria-haspopup],[class*="more"],[class*="kebab"],[class*="share"]'
+            );
+        } catch (e) { return; }
+        var ir = null;
+        try { ir = iframe.getBoundingClientRect(); } catch (e2) { ir = null; }
+        for (var b = 0; b < buttons.length; b++) {
+            var btn = buttons[b];
+            if (!btn || btn === iframe) { continue; }
+            if (isPbsProtectedHostChrome(btn)) { continue; }
+            if (!isPbsMenuChrome(btn)) { continue; }
+            if (ir) {
+                var br;
+                try { br = btn.getBoundingClientRect(); } catch (e3) { continue; }
+                var overlaps = !(br.right < ir.left || br.left > ir.right ||
+                    br.bottom < ir.top - 8 || br.top > ir.bottom + 72);
+                if (!overlaps) { continue; }
+            }
+            hideElement(btn);
+        }
     }
 
     function hideOverlappingChrome(video) {
@@ -1701,6 +1851,7 @@
         hideContainerChrome(container, video, isPlayerShell(container));
         hideOverlappingChrome(video);
         hideStackedChrome(video);
+        hidePbsHostChrome();
     }
 
     // Custom players (LinkedIn) paint or remount chrome on play/seek/end after
@@ -2207,6 +2358,10 @@
     function scan(root, allowStructuralCleanup) {
         var scope = root || document;
         if (!scope || !scope.querySelectorAll) { return; }
+        // Host pages (video.pbs.org / video.gpb.org) embed player.pbs.org in an
+        // iframe and paint a sibling overlay. There is no <video> in that
+        // document, so chrome hide has to run even when scan finds nothing.
+        hidePbsHostChrome();
         var seen = [];
 
         function addContainer(raw) {
