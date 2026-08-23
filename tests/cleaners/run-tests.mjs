@@ -2208,6 +2208,69 @@ async function qualityUISelectionCheck(page, scenario) {
   await browser.close();
 }
 
+// ---- Scenario: Player Cleaner PBS iPhone preserved MSE ---------------------
+// iOS must leave the PBS blob pipeline and site controls in charge, while still
+// collapsing the oversized mobile shell and removing PBS-only leftover chrome.
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (PBS iPhone preserved MSE)', {
+    device: iphone,
+    hasTouch: true,
+    fixture: FIXTURE_PLAYER_PBS_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#pbs-video',
+  });
+  const S = 'player-cleaner-pbs-iphone';
+
+  await check(page, S, 'keeps the PBS blob pipeline and site controls on iOS', () => {
+    const video = document.getElementById('pbs-video');
+    const shell = document.getElementById('player-videojs');
+    const pass = !!(video && shell && video.src.startsWith('blob:') && shell.contains(video) &&
+      !video.controls && !video._wblockEnhanced && video.disableRemotePlayback &&
+      video.getAttribute('x-webkit-airplay') === 'deny');
+    return { pass, detail: video ? 'blob=' + video.src.startsWith('blob:') +
+      ' controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced +
+      ' airplay=' + video.getAttribute('x-webkit-airplay') : 'no video' };
+  });
+
+  await check(page, S, 'collapses the oversized PBS mobile shell to the video', () => {
+    const video = document.getElementById('pbs-video');
+    const shell = document.getElementById('player-videojs');
+    if (!video || !shell) return { pass: false, detail: 'missing video or shell' };
+    const vr = video.getBoundingClientRect();
+    const sr = shell.getBoundingClientRect();
+    const bottomGap = Math.abs(sr.bottom - vr.bottom);
+    const pass = bottomGap <= 1 && Math.abs(sr.height - vr.height) <= 1 && sr.height < 300;
+    return { pass, detail: `shell=${sr.width.toFixed(1)}x${sr.height.toFixed(1)} video=${vr.width.toFixed(1)}x${vr.height.toFixed(1)} gap=${bottomGap.toFixed(1)}` };
+  });
+
+  await check(page, S, 'hides initial and remounted PBS chrome on iOS', () => {
+    const selectors = ['.vjs-control-bar', '.vjs-pbs-top-icons', '#pbs-late-more'];
+    const visible = selectors.filter((selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return true;
+      const style = getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden';
+    });
+    return { pass: visible.length === 0, detail: visible.join(' ') || 'all hidden' };
+  }, { timeout: 2500, interval: 100 });
+
+  await check(page, S, 'keeps protected PBS error and preroll UI visible', () => {
+    const ids = ['pbs-error', 'pbs-preroll', 'pbs-protected-wrap'];
+    const hidden = ids.filter((id) => {
+      const el = document.getElementById(id);
+      if (!el) return true;
+      const style = getComputedStyle(el);
+      return style.display === 'none' || style.visibility === 'hidden' || !!el.closest('[data-wblock-pc-hidden]');
+    });
+    return { pass: hidden.length === 0, detail: hidden.join(' ') || 'all visible' };
+  });
+
+  await page.screenshot({ path: join(__dirname, 'artifacts', 'player-cleaner-pbs-iphone.png'), fullPage: true });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario: Player Cleaner PBS host iframe only -------------------------
 // video.gpb.org has no <video>; hidePbsHostChrome must still match the absolute
 // and protocol-relative player.pbs.org viralplayer URLs and ignore lookalike,

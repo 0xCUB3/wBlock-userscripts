@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.19
+// @version      0.1.20
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1395,6 +1395,9 @@
     // roots whose box is off the video are pruned; remaining static roots are
     // walked only for positioned descendants so post text/reactions stay.
     function hideOverlappingSubtree(root, video, vr) {
+        // PBS host overlays have their own hostname and iframe-gated cleanup.
+        // Generic geometry must not hide them on unrelated pages.
+        if (isPbsCandidateWrapper(root) && !pbsPlayerShell(root)) { return; }
         if (root === video || composedRelated(root, video) ||
             isFacebookProtected(root, video) || isPbsProtectedChrome(root)) { return; }
         var rr;
@@ -1491,6 +1494,7 @@
         if (sourceFromVideoElement(video)) { return false; }
         if (promoteIOSNativeSource(video, containerForVideo(video))) { return false; }
         lockIOSManagedMediaSource(video);
+        preparePreservedPbsPlayer(video);
         return true;
     }
 
@@ -1541,7 +1545,57 @@
         return false;
     }
 
+    function pbsPlayerShell(video) {
+        if (!video || !video.closest) { return null; }
+        try { return video.closest('.vjs-pbs, #player-videojs'); }
+        catch (e) { return null; }
+    }
+
+    // PBS mobile leaves its micro-layout shell taller than the actual media.
+    // Once its chrome is hidden that reserved card area becomes a solid blue gap,
+    // and controls remain positioned against the wrong box. Collapse only the
+    // PBS shell to the media ratio; generic video.js layout remains untouched.
+    function normalizePbsGeometry(video) {
+        var shell = pbsPlayerShell(video);
+        if (!shell || !video) { return; }
+        var vw = video.videoWidth || parseFloat(video.getAttribute('width') || '0');
+        var vh = video.videoHeight || parseFloat(video.getAttribute('height') || '0');
+        if (!(vw > 0 && vh > 0)) {
+            try {
+                var rect = video.getBoundingClientRect();
+                if (rect.width > 1 && rect.height > 1) { vw = rect.width; vh = rect.height; }
+            } catch (e) { /* wait for layout or metadata */ }
+        }
+        try {
+            shell.style.setProperty('height', 'auto', 'important');
+            shell.style.setProperty('min-height', '0', 'important');
+            shell.style.setProperty('max-height', 'none', 'important');
+            shell.style.setProperty('padding-top', '0', 'important');
+            shell.style.setProperty('padding-bottom', '0', 'important');
+            video.style.setProperty('display', 'block', 'important');
+            video.style.setProperty('width', '100%', 'important');
+            video.style.setProperty('max-width', '100%', 'important');
+            video.style.setProperty('height', 'auto', 'important');
+            video.style.setProperty('object-fit', 'contain', 'important');
+            if (vw > 0 && vh > 0) {
+                shell.style.setProperty('aspect-ratio', vw + ' / ' + vh, 'important');
+                video.style.setProperty('aspect-ratio', vw + ' / ' + vh, 'important');
+            }
+        } catch (e2) { /* leave the site's geometry if styling is unavailable */ }
+    }
+
+    // iOS ManagedMediaSource must remain under site control, but PBS cleanup is
+    // still safe because it neither changes the source nor enables native controls.
+    function preparePreservedPbsPlayer(video) {
+        if (!pbsPlayerShell(video)) { return; }
+        normalizePbsGeometry(video);
+        hideKnownSiblingChrome(video);
+        if (enhancedVideos.indexOf(video) === -1) { enhancedVideos.push(video); }
+        armChromeWatch(video);
+    }
+
     function hideKnownSiblingChrome(video) {
+        normalizePbsGeometry(video);
         // Akamai AMP keeps all custom UI in siblings of .amp-video. Hide the
         // sibling roots themselves so late React class changes or remounts cannot
         // repaint an otherwise-empty layer over Safari's native controls.
@@ -1588,18 +1642,7 @@
         // PBS / GPB video.js keeps expand/kebab chrome as siblings of <video>
         // inside .vjs-pbs / #player-videojs. Blob MSE stays in place, so this
         // hide has to survive remounts the same way AMP/FAVE do.
-        var pbsShell = null;
-        try { pbsShell = video.closest && video.closest('.vjs-pbs, #player-videojs'); }
-        catch (e) { /* not a PBS player */ }
-        if (!pbsShell) {
-            try {
-                var vjsShell = video.closest && video.closest('.video-js');
-                if (vjsShell && (vjsShell.id === 'player-videojs' ||
-                    (vjsShell.classList && vjsShell.classList.contains('vjs-pbs')))) {
-                    pbsShell = vjsShell;
-                }
-            } catch (e2) { /* not a PBS video.js shell */ }
-        }
+        var pbsShell = pbsPlayerShell(video);
         if (pbsShell && pbsShell.querySelectorAll) {
             var pbsChrome = pbsShell.querySelectorAll(
                 '.vjs-control-bar,.vjs-big-play-button,.vjs-poster,.vjs-title-bar,' +
@@ -1846,6 +1889,7 @@
 
     function hideIfDetachedOverlay(el, video, vr) {
         if (!el || el === video || el === document.documentElement || el === document.body) { return; }
+        if (isPbsCandidateWrapper(el) && !pbsPlayerShell(el)) { return; }
         // Chrome is never a media element; pooled sibling <video>s (Bolt feed
         // primers) must stay usable for the site.
         if (el.tagName === 'VIDEO') { return; }
