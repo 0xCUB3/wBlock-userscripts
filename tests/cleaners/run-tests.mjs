@@ -2075,6 +2075,36 @@ async function qualityUISelectionCheck(page, scenario) {
   await browser.close();
 }
 
+// ---- Scenario: Player Cleaner Nat Geo iPhone passthrough -------------------
+// Nat Geo uses Disney's BAM ManagedMediaSource player. Player Cleaner must not
+// touch its media element on iOS before the site attaches the source.
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Nat Geo iPhone passthrough)', {
+    device: iphone,
+    hasTouch: true,
+    fixture: FIXTURE_PLAYER_ESPN_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#espn-active',
+    gotoURL: 'https://www.nationalgeographic.com/tv/episode/fixture/playlist/fixture',
+    responseBody: readFileSync(join(__dirname, 'fixture-player-cleaner-espn.html'), 'utf8'),
+  });
+  const S = 'player-cleaner-natgeo-iphone';
+
+  await check(page, S, 'leaves the Nat Geo BAM player untouched on iOS', () => {
+    const video = document.getElementById('espn-active');
+    const shell = document.querySelector('.WebPlayerContainer');
+    const pass = !!(video && shell && shell.contains(video) && video.src.startsWith('blob:') &&
+      !video.hasAttribute('data-wblock-player-cleaner') && !video._wblockEnhanced &&
+      !video.disableRemotePlayback && !video.hasAttribute('disableremoteplayback') &&
+      video.getAttribute('x-webkit-airplay') === null);
+    return { pass, detail: video ? `src=${video.src} enhanced=${!!video._wblockEnhanced} remote=${video.disableRemotePlayback} airplay=${video.getAttribute('x-webkit-airplay')}` : 'no video' };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario: Player Cleaner ESPN/BAM multi-video player ------------------
 // ESPN puts a hidden source-less <video> before its active MSE element and
 // renders pointer-action UI outside the active video's immediate parent. The
