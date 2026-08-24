@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.21
+// @version      0.1.22
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1586,33 +1586,10 @@
 
     // iOS ManagedMediaSource must remain under site control, but PBS cleanup is
     // still safe because it neither changes the source nor enables native controls.
-    // PBS video.js toggles playback when a tap bubbles from its tech element.
-    // After we remove that chrome, a harmless tap on the picture should not pause
-    // an already-playing stream. Paused taps still bubble so the site can start it.
-    function guardPreservedPbsPlaybackTaps(video) {
-        if (!video || video._wblockPbsTapGuard) { return; }
-        function stopWhilePlaying(event) {
-            try {
-                if (!video.paused && !video.ended) { event.stopPropagation(); }
-            } catch (e) { /* leave the site in charge */ }
-        }
-        try {
-            video.addEventListener('touchend', stopWhilePlaying);
-            video.addEventListener('click', stopWhilePlaying);
-            video._wblockPbsTapGuard = true;
-            registerVideoCleanup(video, function () {
-                video.removeEventListener('touchend', stopWhilePlaying);
-                video.removeEventListener('click', stopWhilePlaying);
-                video._wblockPbsTapGuard = false;
-            });
-        } catch (e) { /* ignore */ }
-    }
-
     function preparePreservedPbsPlayer(video) {
         if (!pbsPlayerShell(video)) { return; }
         normalizePbsGeometry(video);
         hideKnownSiblingChrome(video);
-        guardPreservedPbsPlaybackTaps(video);
         if (enhancedVideos.indexOf(video) === -1) { enhancedVideos.push(video); }
         armChromeWatch(video);
     }

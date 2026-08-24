@@ -2249,18 +2249,8 @@ async function qualityUISelectionCheck(page, scenario) {
     window.__pbsTapToggles = 0;
   });
   await page.locator('#pbs-video').tap({ position: { x: 195, y: 210 } });
-  await check(page, S, 'keeps a playing PBS stream running when the picture is tapped', () => ({
-    pass: !window.__pbsPaused && window.__pbsTapToggles === 0,
-    detail: `paused=${window.__pbsPaused} toggles=${window.__pbsTapToggles}`,
-  }));
-
-  await page.evaluate(() => {
-    window.__pbsPaused = true;
-    window.__pbsTapToggles = 0;
-  });
-  await page.locator('#pbs-video').tap({ position: { x: 195, y: 210 } });
-  await check(page, S, 'still lets a tap start a paused PBS stream', () => ({
-    pass: !window.__pbsPaused && window.__pbsTapToggles === 1,
+  await check(page, S, 'leaves both PBS touch events to the site', () => ({
+    pass: !window.__pbsPaused && window.__pbsTapToggles === 2,
     detail: `paused=${window.__pbsPaused} toggles=${window.__pbsTapToggles}`,
   }));
 
