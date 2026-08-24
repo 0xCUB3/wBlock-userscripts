@@ -2244,6 +2244,26 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass, detail: `shell=${sr.width.toFixed(1)}x${sr.height.toFixed(1)} video=${vr.width.toFixed(1)}x${vr.height.toFixed(1)} gap=${bottomGap.toFixed(1)}` };
   });
 
+  await page.evaluate(() => {
+    window.__pbsPaused = false;
+    window.__pbsTapToggles = 0;
+  });
+  await page.locator('#pbs-video').tap({ position: { x: 195, y: 210 } });
+  await check(page, S, 'keeps a playing PBS stream running when the picture is tapped', () => ({
+    pass: !window.__pbsPaused && window.__pbsTapToggles === 0,
+    detail: `paused=${window.__pbsPaused} toggles=${window.__pbsTapToggles}`,
+  }));
+
+  await page.evaluate(() => {
+    window.__pbsPaused = true;
+    window.__pbsTapToggles = 0;
+  });
+  await page.locator('#pbs-video').tap({ position: { x: 195, y: 210 } });
+  await check(page, S, 'still lets a tap start a paused PBS stream', () => ({
+    pass: !window.__pbsPaused && window.__pbsTapToggles === 1,
+    detail: `paused=${window.__pbsPaused} toggles=${window.__pbsTapToggles}`,
+  }));
+
   await check(page, S, 'hides initial and remounted PBS chrome on iOS', () => {
     const selectors = ['.vjs-control-bar', '.vjs-pbs-top-icons', '#pbs-late-more'];
     const visible = selectors.filter((selector) => {

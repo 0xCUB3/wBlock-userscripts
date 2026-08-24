@@ -108,6 +108,17 @@
     (function () {
       var video = document.getElementById('pbs-video');
       video.src = 'blob:https://player.pbs.org/00000000-0000-0000-0000-000000000000';
+      window.__pbsPaused = false;
+      window.__pbsTapToggles = 0;
+      Object.defineProperty(video, 'paused', { configurable: true, get: function () { return window.__pbsPaused; } });
+      Object.defineProperty(video, 'ended', { configurable: true, get: function () { return false; } });
+      function togglePlayback() {
+        window.__pbsPaused = !window.__pbsPaused;
+        window.__pbsTapToggles++;
+      }
+      var shell = document.getElementById('player-videojs');
+      shell.addEventListener('touchend', togglePlayback);
+      shell.addEventListener('click', togglePlayback);
       setTimeout(function () {
         var late = document.createElement('button');
         late.id = 'pbs-late-more';
