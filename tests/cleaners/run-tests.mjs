@@ -768,6 +768,20 @@ async function qualityUISelectionCheck(page, scenario) {
     pass: window.__uiSelectedQuality === 'hd1080' && window.__settingsClicks === 2,
     detail: `selected=${window.__uiSelectedQuality} settingsClicks=${window.__settingsClicks}`,
   }));
+  await page.evaluate(() => {
+    window.__settingsClicks = 0;
+    window.__qualityRangeCalls = [];
+    window.__uiSelectedQuality = null;
+    localStorage.setItem('wblock.tubeCleaner.quality', 'hd2160');
+    window.__wblockTubeDebug.applyPreferredQuality();
+  });
+  await check(page, scenario, 'caps preferred 4K instead of pinning a single SABR rendition', () => {
+    const range = JSON.stringify(window.__qualityRangeCalls);
+    return {
+      pass: range === JSON.stringify([['tiny', 'hd2160']]) && window.__settingsClicks === 0 && window.__uiSelectedQuality === null,
+      detail: `range=${range} settingsClicks=${window.__settingsClicks} ui=${window.__uiSelectedQuality}`,
+    };
+  });
 }
 
 // ---- Scenario 1: desktop -------------------------------------------------
@@ -1337,6 +1351,20 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, S, 'does not yank the playhead back after a later seek', () => ({
     pass: window.__wblockResumeCurrent === 41,
     detail: `afterSeek=${window.__wblockResumeCurrent}`,
+  }));
+  await page.evaluate(() => {
+    const container = document.querySelector('#movie_player .html5-video-container');
+    const next = document.createElement('video');
+    Object.defineProperty(next, 'currentTime', { configurable: true, get: () => window.__wblockResumeCurrent, set: value => { window.__wblockResumeCurrent = value; } });
+    Object.defineProperty(next, 'duration', { configurable: true, get: () => 120 });
+    Object.defineProperty(next, 'readyState', { configurable: true, get: () => 1 });
+    container.querySelector('video').replaceWith(next);
+  });
+  await page.waitForTimeout(80);
+  await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('loadedmetadata')));
+  await check(page, S, 'does not restore over a same-video SABR element that already has a playhead', () => ({
+    pass: window.__wblockResumeCurrent === 41,
+    detail: `afterSwap=${window.__wblockResumeCurrent}`,
   }));
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();

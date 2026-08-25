@@ -65,7 +65,10 @@
       player.getAvailableQualityLevels = function () { return available.slice(); };
       player.getPlaybackQuality = function () { return current; };
       player.setPlaybackQuality = function (q) { current = q; };
-      player.setPlaybackQualityRange = function (lo, hi) { /* SABR: no-op */ };
+      window.__qualityRangeCalls = [];
+      player.setPlaybackQualityRange = function (lo, hi) {
+        window.__qualityRangeCalls.push([lo, hi]);
+      };
       player.getVideoData = function () { return { video_id: 'TESTVID123' }; };
       player.getPlayerState = function () { return state; };
       window.__youtubeSubtitlesOn = false;

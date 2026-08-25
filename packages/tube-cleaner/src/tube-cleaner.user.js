@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.4
+// @version      0.1.5
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -263,7 +263,6 @@
 
     function setPreferredQuality(q) {
         try { localStorage.setItem(STORAGE_QUALITY, q); } catch (e) { /* ignore */ }
-        if (preferredQualityAttempt && preferredQualityAttempt.stop) preferredQualityAttempt.stop();
     }
 
     // ------------------------------------------------------------------
@@ -671,7 +670,8 @@
             if (saved !== null) {
                 if (saved >= video.duration - 0.5) {
                     writePlaybackPosition(videoId, 0, video.duration, true);
-                } else if (Math.abs(video.currentTime - saved) > 0.75) {
+                } else if (Math.abs(video.currentTime - saved) > 0.75 &&
+                    !(carried && previousIdentity === videoId && video.currentTime > 0.25)) {
                     try { video.currentTime = Math.min(saved, Math.max(0, video.duration - 0.1)); }
                     catch (e) { positionApplied = false; }
                 }
@@ -3071,16 +3071,7 @@
             if (getPreferredQuality() !== 'auto') { setPreferredQuality('auto'); }
             try { localStorage.removeItem('yt-player-quality'); } catch (e) { /* ignore */ }
         } else {
-            var qualityDelay = setTimeout(function () {
-                qualityDelay = null;
-                applyPreferredQuality();
-            }, 3000);
-            registerCleanup(function () {
-                if (qualityDelay !== null) {
-                    clearTimeout(qualityDelay);
-                    qualityDelay = null;
-                }
-            });
+            applyPreferredQuality();
         }
 
         // 7. Observe for video element recreation. The player element persists
@@ -3268,7 +3259,6 @@
 
     var qualityGeneration = 0;
     var qualityRequest = null;
-    var preferredQualityAttempt = null;
 
     function cancelQualityRequest() {
         var request = qualityRequest;
@@ -3350,11 +3340,12 @@
                     }
                     if (worked) localStorage.removeItem('yt-player-quality');
                 } else if (player.setPlaybackQualityRange) {
-                    player.setPlaybackQualityRange(target, target);
+                    // Cap the ladder at the chosen quality instead of pinning
+                    // a single rendition. Pinning 4K while SABR is still on a
+                    // lower startup stream forces a hard reload.
+                    player.setPlaybackQualityRange('tiny', target);
                     worked = true;
-                    if (getCurrentQuality() !== target && player.setPlaybackQuality) {
-                        player.setPlaybackQuality(target);
-                    }
+                    if (player.setPlaybackQuality) { player.setPlaybackQuality(target); }
                 } else if (player.setPlaybackQuality) {
                     player.setPlaybackQuality(target);
                     worked = true;
@@ -3393,30 +3384,14 @@
 
     function applyPreferredQuality() {
         var preferred = getPreferredQuality();
-        if (preferred === 'auto' || preferredQualityAttempt) return;
-        var attempt = { attempts: 0, timer: null, waiting: false };
-        preferredQualityAttempt = attempt;
-        function stop() {
-            if (attempt.timer !== null) clearInterval(attempt.timer);
-            attempt.timer = null;
-            if (preferredQualityAttempt === attempt) preferredQualityAttempt = null;
-        }
-        attempt.stop = stop;
-        function tryQuality() {
-            if (attempt.waiting || qualityRequest) return;
-            attempt.attempts++;
-            if (getCurrentQuality() === preferred || attempt.attempts > 10) {
-                stop();
-                return;
-            }
-            attempt.waiting = true;
-            setQuality(preferred, function (worked) {
-                attempt.waiting = false;
-                if (worked || getCurrentQuality() === preferred || attempt.attempts > 10) stop();
-            });
-        }
-        attempt.timer = setInterval(tryQuality, 500);
-        registerCleanup(stop);
+        if (preferred === 'auto') return;
+        var player = findPlayer();
+        if (!player || !player.setPlaybackQualityRange) return;
+        // Cap SABR at the saved quality. Do not click the settings menu or pin
+        // a single rendition: either one restarts the stream when 4K is still
+        // warming up from a lower startup ladder.
+        try { player.setPlaybackQualityRange('tiny', preferred); }
+        catch (e) { /* ignore */ }
     }
 
     // ------------------------------------------------------------------
@@ -4315,6 +4290,7 @@
             getAvailableQualities: getAvailableQualities,
             getCurrentQuality: getCurrentQuality,
             setQuality: setQuality,
+            applyPreferredQuality: applyPreferredQuality,
             getPreferredQuality: getPreferredQuality,
             setPreferredQuality: setPreferredQuality,
             QUALITY_LABELS: QUALITY_LABELS,
