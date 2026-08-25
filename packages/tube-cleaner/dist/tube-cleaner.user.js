@@ -328,15 +328,7 @@
         // Unplayable text
         '.ytp-error,',
         // Spoiler overlay
-        '.ytp-spoiler-overlay,',
-        // Hover-preview / inline card players. Nativeizing these kills YouTube's
-        // home/search hover-to-play and steals the active-player identity.
-        'ytd-video-preview,',
-        'ytd-thumbnail-overlay-hover-text-renderer,',
-        '#video-preview,',
-        '#preview-player,',
-        '.ytp-inline-preview-ui,',
-        '.ytp-inline-preview-scrim',
+        '.ytp-spoiler-overlay',
         '{ display: none !important; }',
 
         // Make the video container fully transparent so only the
@@ -453,8 +445,6 @@
         '.wblock-tc-native .ytp-autonav-endscreen-countdown-overlay,',
         '.wblock-tc-native .ytp-watermark,',
         '.wblock-tc-native .ytp-related-overlay,',
-        '.wblock-tc-native .ytp-inline-preview-ui,',
-        '.wblock-tc-native .ytp-inline-preview-scrim,',
         '.wblock-tc-native .ytp-inline-preview-ui,',
         '.wblock-tc-native .ytp-inline-preview-scrim,',
         // setQuality() drives YouTube's hidden menu for SABR reliability. Hide
@@ -4117,12 +4107,15 @@
             // cursor was already inside the player when the timer fired.
             function onDocumentMouseMove(e) {
                 var over = pointOverPlayer(e.clientX, e.clientY);
-                _isOverPlayer = over;
                 if (over) {
+                    _isOverPlayer = true;
                     showToolbar();
                     scheduleHideToolbar();
-                } else if (!desktopPanelOpen() && !_isOverToolbar) {
-                    scheduleHideToolbar();
+                    return;
+                }
+                if (_isOverPlayer || _isOverToolbar) {
+                    _isOverPlayer = false;
+                    if (!desktopPanelOpen() && !_isOverToolbar) { scheduleHideToolbar(); }
                 }
             }
             document.addEventListener('mousemove', onDocumentMouseMove);

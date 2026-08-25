@@ -1266,6 +1266,15 @@ async function qualityUISelectionCheck(page, scenario) {
     const pe = document.querySelector('.wblock-tc-toolbar')?.style.pointerEvents;
     return { pass: o === '1' && pe === 'auto', detail: `opacity=${o} pointerEvents=${pe}` };
   });
+  await page.mouse.move(20, 20);
+  await page.waitForTimeout(200);
+  await page.mouse.move(24, 80);
+  await page.mouse.move(80, 140);
+  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 4000 });
+  await check(page, 'desktop', 'desktop toolbar still hides after leaving the player even if the pointer keeps moving', () => {
+    const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
+    return { pass: o === '0', detail: `opacity=${o}` };
+  });
   record('desktop', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
@@ -2363,7 +2372,7 @@ async function qualityUISelectionCheck(page, scenario) {
     window.__pbsPaused = false;
     window.__pbsTapToggles = 0;
   });
-  await page.locator('#pbs-video').tap({ position: { x: 195, y: 210 } });
+  await page.locator('#pbs-video').tap({ position: { x: 40, y: 40 }, force: true });
   await check(page, S, 'leaves both PBS touch events to the site', () => ({
     pass: !window.__pbsPaused && window.__pbsTapToggles === 2,
     detail: `paused=${window.__pbsPaused} toggles=${window.__pbsTapToggles}`,
@@ -3139,6 +3148,17 @@ for (const config of [
         previewVideo && !previewVideo.controls &&
         watch && watch.classList.contains('wblock-tc-native')),
       detail: `previewNative=${!!(preview && preview.classList.contains('wblock-tc-native'))} previewControls=${!!(previewVideo && previewVideo.controls)} watchNative=${!!(watch && watch.classList.contains('wblock-tc-native'))}`,
+    };
+  });
+  await check(page, S, 'keeps hover-to-play preview hosts visible', () => {
+    const host = document.querySelector('ytd-video-preview');
+    const player = document.getElementById('preview-player');
+    if (!host || !player) return { pass: false, detail: 'missing preview' };
+    const hostStyle = getComputedStyle(host);
+    const playerStyle = getComputedStyle(player);
+    return {
+      pass: hostStyle.display !== 'none' && playerStyle.display !== 'none',
+      detail: `host=${hostStyle.display} player=${playerStyle.display}`,
     };
   });
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
