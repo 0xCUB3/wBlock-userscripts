@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.23
+// @version      0.1.24
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -16,9 +16,11 @@
 // @match        http://*/*
 // @match        https://*/*
 // @exclude      https://www.youtube.com/*
+// @exclude      https://youtube.com/*
 // @exclude      https://m.youtube.com/*
 // @exclude      https://music.youtube.com/*
 // @exclude      https://www.youtube-nocookie.com/*
+// @exclude      https://youtube-nocookie.com/*
 // @run-at       document-start
 // @inject-into  page
 // @grant        none
@@ -2008,6 +2010,20 @@
                 requestAnimationFrame(function () { requestAnimationFrame(kick); });
             }
         }
+        var hoverKickQueued = false;
+        function kickOnHover() {
+            if (hoverKickQueued) { return; }
+            hoverKickQueued = true;
+            if (typeof requestAnimationFrame === 'function') {
+                requestAnimationFrame(function () {
+                    hoverKickQueued = false;
+                    kickAfterPaint();
+                });
+            } else {
+                hoverKickQueued = false;
+                kickAfterPaint();
+            }
+        }
         function kickDeferred() {
             kickAfterPaint();
             if (typeof setTimeout !== 'function') { return; }
@@ -2027,6 +2043,8 @@
             video.addEventListener('ended', kickDeferred);
             video.addEventListener('seeking', kick);
             video.addEventListener('loadeddata', kick);
+            video.addEventListener('mouseenter', kickOnHover);
+            video.addEventListener('mousemove', kickOnHover);
             window.addEventListener('resize', kickDeferred);
         } catch (e) { /* ignore */ }
         registerVideoCleanup(video, function () {
@@ -2037,6 +2055,8 @@
                 video.removeEventListener('ended', kickDeferred);
                 video.removeEventListener('seeking', kick);
                 video.removeEventListener('loadeddata', kick);
+                video.removeEventListener('mouseenter', kickOnHover);
+                video.removeEventListener('mousemove', kickOnHover);
                 window.removeEventListener('resize', kickDeferred);
             } catch (e) { /* ignore */ }
             clearTimers();

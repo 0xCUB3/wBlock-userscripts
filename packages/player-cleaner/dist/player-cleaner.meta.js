@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.23
+// @version      0.1.24
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -16,9 +16,11 @@
 // @match        http://*/*
 // @match        https://*/*
 // @exclude      https://www.youtube.com/*
+// @exclude      https://youtube.com/*
 // @exclude      https://m.youtube.com/*
 // @exclude      https://music.youtube.com/*
 // @exclude      https://www.youtube-nocookie.com/*
+// @exclude      https://youtube-nocookie.com/*
 // @run-at       document-start
 // @inject-into  page
 // @grant        none

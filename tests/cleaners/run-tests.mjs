@@ -1181,6 +1181,28 @@ async function qualityUISelectionCheck(page, scenario) {
     const labels = track?.cues ? Array.from(track.cues).map(c => c.text) : [];
     return { pass: labels[0] === '0:00  Mutated in place' && track?.mode === 'hidden', detail: `labels=${labels.join(' | ')} mode=${track?.mode}` };
   });
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => false });
+    Object.defineProperty(video, 'ended', { configurable: true, get: () => false });
+    video.dispatchEvent(new Event('play'));
+  });
+  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 4000 });
+  await check(page, 'desktop', 'desktop toolbar auto-hides after playback while the pointer stays over the player', () => {
+    const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
+    return { pass: o === '0', detail: `opacity=${o}` };
+  });
+  const playerBox = await page.$eval('#movie_player', el => {
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  });
+  await page.mouse.move(playerBox.x, playerBox.y);
+  await page.mouse.move(playerBox.x + 12, playerBox.y + 8);
+  await check(page, 'desktop', 'desktop toolbar reappears on movement while already hovering the player', () => {
+    const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
+    const pe = document.querySelector('.wblock-tc-toolbar')?.style.pointerEvents;
+    return { pass: o === '1' && pe === 'auto', detail: `opacity=${o} pointerEvents=${pe}` };
+  });
   record('desktop', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
@@ -2598,6 +2620,24 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: !!(v.controls && barHidden), detail: `controls=${v.controls} barHidden=${barHidden}` };
   });
 
+  await page.evaluate(() => {
+    const video = document.getElementById('xq7-bar-video');
+    const shell = video.closest('[class],div') || video.parentElement;
+    const overlay = document.createElement('div');
+    overlay.id = 'xq7-hover-chrome';
+    overlay.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:36px;background:red;z-index:9';
+    (shell || document.body).appendChild(overlay);
+    video.dispatchEvent(new Event('mousemove'));
+  });
+  await page.waitForTimeout(50);
+  await check(page, S, 're-hides leftover overlay chrome on hover', () => {
+    const el = document.getElementById('xq7-hover-chrome');
+    if (!el) return { pass: false, detail: 'no hover chrome' };
+    const cs = getComputedStyle(el);
+    const pass = cs.display === 'none' || el.getAttribute('data-wblock-pc-hidden') === '1';
+    return { pass, detail: `display=${cs.display} attr=${el.getAttribute('data-wblock-pc-hidden')}` };
+  });
+
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
@@ -3005,6 +3045,123 @@ for (const config of [
   record(S, 'Player Cleaner runs in the top-level document', topPlayerRuns === 1, `runs=${topPlayerRuns}`);
   record(S, 'Player Cleaner runs in an embedded frame', embedPlayerRuns === 1, `runs=${embedPlayerRuns}`);
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: Tube Cleaner ignores YouTube hover-preview players ----------
+{
+  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (hover preview)', {
+    fixture: FIXTURE_URL,
+    viewport: { width: 1280, height: 800 },
+    scriptSource: userscript,
+  });
+  const S = 'tube-cleaner-hover-preview';
+  await page.evaluate(() => {
+    const preview = document.createElement('ytd-video-preview');
+    preview.id = 'video-preview';
+    preview.innerHTML = '<div id="preview-player" class="html5-video-player playing-mode"><video></video><div class="ytp-chrome-bottom"></div></div>';
+    document.body.appendChild(preview);
+    const video = preview.querySelector('video');
+    video.src = 'blob:https://www.youtube.com/preview';
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => false });
+    document.dispatchEvent(new Event('yt-page-data-updated'));
+  });
+  await page.waitForTimeout(200);
+  await check(page, S, 'leaves hover-preview players un-nativeized', () => {
+    const preview = document.querySelector('ytd-video-preview .html5-video-player');
+    const previewVideo = preview && preview.querySelector('video');
+    const watch = document.getElementById('movie_player');
+    return {
+      pass: !!(preview && !preview.classList.contains('wblock-tc-native') &&
+        previewVideo && !previewVideo.controls &&
+        watch && watch.classList.contains('wblock-tc-native')),
+      detail: `previewNative=${!!(preview && preview.classList.contains('wblock-tc-native'))} previewControls=${!!(previewVideo && previewVideo.controls)} watchNative=${!!(watch && watch.classList.contains('wblock-tc-native'))}`,
+    };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: Tube Cleaner YouTube embed iframe injection -----------------
+// Vinegar-style nativeization has to reach youtube.com/embed and
+// youtube-nocookie.com/embed frames. @noframes skipped those, so the README
+// embed demos never got Safari controls.
+{
+  console.log('\n=== Scenario: Tube Cleaner YouTube embed iframe ===');
+  const S = 'tube-cleaner-embed-iframe';
+  const browser = await webkit.launch();
+  const page = await browser.newPage();
+  const pageErrors = [];
+  page.on('pageerror', e => pageErrors.push(e.message));
+  const descriptors = [{
+    id: '00000000-0000-0000-0000-000000000012',
+    name: 'Tube Cleaner',
+    namespace: 'com.skula.wblock.tests',
+    version: '1.0.0',
+    description: '',
+    runAt: 'document-start',
+    noframes: false,
+    injectInto: 'page',
+    matches: [
+      'https://www.youtube.com/*',
+      'https://youtube.com/*',
+      'https://m.youtube.com/*',
+      'https://music.youtube.com/*',
+      'https://www.youtube-nocookie.com/*',
+      'https://youtube-nocookie.com/*',
+    ],
+    content: userscript,
+    resourceNames: [],
+    storageSnapshot: {},
+  }];
+  const mockBridge = `
+    globalThis.browser = {
+      runtime: {
+        onMessage: { addListener: function () {} },
+        sendMessage: function (message) {
+          if (message && message.action === 'getUserScripts') {
+            return Promise.resolve({ userScripts: ${JSON.stringify(descriptors)} });
+          }
+          return Promise.resolve({});
+        }
+      }
+    };
+  `;
+  await page.addInitScript(mockBridge + '\n' + injectorSource);
+  await page.route('https://www.youtube-nocookie.com/embed/**', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: readFileSync(join(__dirname, 'fixture.html'), 'utf8'),
+    });
+  });
+  await page.route('https://example.com/host-with-embed', async route => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><html><body><iframe src="https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ"></iframe></body></html>',
+    });
+  });
+  await page.goto('https://example.com/host-with-embed', { waitUntil: 'load' });
+  const embedFrame = page.frames().find(frame => /youtube-nocookie\.com/.test(frame.url()));
+  if (!embedFrame) {
+    record(S, 'found the YouTube embed frame', false, 'no youtube-nocookie frame');
+  } else {
+    await embedFrame.waitForSelector('.wblock-tc-toolbar', { timeout: 10000 }).catch(() => {});
+    const native = await embedFrame.evaluate(() => {
+      const player = document.getElementById('movie_player');
+      const video = player && player.querySelector('video');
+      return {
+        native: !!(player && player.classList.contains('wblock-tc-native')),
+        controls: !!(video && video.controls),
+        toolbar: !!document.querySelector('.wblock-tc-toolbar'),
+      };
+    });
+    record(S, 'nativeizes a youtube-nocookie embed iframe', !!(native.native && native.controls && native.toolbar),
+      `native=${native.native} controls=${native.controls} toolbar=${native.toolbar}`);
+  }
+  const unexpected = pageErrors.filter(message => !/getOption is not a function/.test(message));
+  record(S, 'no unexpected page errors', unexpected.length === 0, unexpected.join(' | '));
   await browser.close();
 }
 
