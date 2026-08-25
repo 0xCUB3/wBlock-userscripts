@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.24
+// @version      0.1.25
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -110,7 +110,6 @@
     // ------------------------------------------------------------------
 
     var _realHidden = false;
-    var _realVisibility = 'visible';
 
     function findDocumentGetter(name) {
         try {
@@ -130,13 +129,10 @@
     // properties on document. Reading document.hidden inside the later event
     // listener would otherwise always return our forced false value.
     var nativeHiddenGetter = findDocumentGetter('hidden');
-    var nativeVisibilityGetter = findDocumentGetter('visibilityState');
 
     function updateRealVisibility() {
         try {
             _realHidden = nativeHiddenGetter ? nativeHiddenGetter.call(document) : document.hidden;
-            _realVisibility = nativeVisibilityGetter ?
-                nativeVisibilityGetter.call(document) : document.visibilityState;
         } catch (e) { /* ignore */ }
     }
 
@@ -261,11 +257,19 @@
             if (document.hasFocus() && isPiPActive(video)) { exitPiP(video); }
         }
 
+        function onPageHide(e) {
+            if (e && e.persisted) return;
+            try { video.pause(); } catch (err) { /* ignore */ }
+            exitPiP(video);
+        }
+
         document.addEventListener('visibilitychange', onVisibilityChange);
         window.addEventListener('focus', onFocus);
+        window.addEventListener('pagehide', onPageHide);
         registerVideoCleanup(video, function () {
             document.removeEventListener('visibilitychange', onVisibilityChange);
             window.removeEventListener('focus', onFocus);
+            window.removeEventListener('pagehide', onPageHide);
         });
 
         if (typeof IntersectionObserver !== 'undefined') {

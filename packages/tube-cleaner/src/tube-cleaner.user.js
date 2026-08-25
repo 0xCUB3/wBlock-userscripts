@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.3
+// @version      0.1.4
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -190,8 +190,15 @@
             }
         }
 
+        function onPageHide(e) {
+            if (e && e.persisted) return;
+            try { video.pause(); } catch (err) { /* ignore */ }
+            exitPiP(video);
+        }
+
         document.addEventListener('visibilitychange', onVisibilityChange);
         window.addEventListener('focus', onFocus);
+        window.addEventListener('pagehide', onPageHide);
 
         // Scroll out of view: use IntersectionObserver.
         // On mobile YouTube the watch player is normally position:fixed (sticky).
@@ -231,6 +238,7 @@
         registerCleanup(function () {
             document.removeEventListener('visibilitychange', onVisibilityChange);
             window.removeEventListener('focus', onFocus);
+            window.removeEventListener('pagehide', onPageHide);
             try { if (scrollObserver) scrollObserver.disconnect(); } catch (e) { /* ignore */ }
             video.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
             video.removeEventListener('leavepictureinpicture', onLeavePictureInPicture);
@@ -528,7 +536,6 @@
 
     // Track real visibility state separately since we override document.hidden.
     var _realHidden = false;
-    var _realVisibility = 'visible';
 
     function findDocumentGetter(name) {
         try {
@@ -545,13 +552,10 @@
     }
 
     var nativeHiddenGetter = findDocumentGetter('hidden');
-    var nativeVisibilityGetter = findDocumentGetter('visibilityState');
 
     function updateRealVisibility() {
         try {
             _realHidden = nativeHiddenGetter ? nativeHiddenGetter.call(document) : document.hidden;
-            _realVisibility = nativeVisibilityGetter ?
-                nativeVisibilityGetter.call(document) : document.visibilityState;
         } catch (e) { /* ignore */ }
     }
 
@@ -667,7 +671,7 @@
             if (saved !== null) {
                 if (saved >= video.duration - 0.5) {
                     writePlaybackPosition(videoId, 0, video.duration, true);
-                } else {
+                } else if (Math.abs(video.currentTime - saved) > 0.75) {
                     try { video.currentTime = Math.min(saved, Math.max(0, video.duration - 0.1)); }
                     catch (e) { positionApplied = false; }
                 }
@@ -715,7 +719,6 @@
         video._wblockConfirmedVideoId = videoId;
         video.addEventListener('loadedmetadata', onMetadata);
         video.addEventListener('durationchange', onMetadata);
-        video.addEventListener('canplay', onMetadata);
         video.addEventListener('timeupdate', onTimeUpdate);
         video.addEventListener('pause', onPause);
         video.addEventListener('ended', onEnded);
@@ -728,7 +731,6 @@
             persist(true);
             video.removeEventListener('loadedmetadata', onMetadata);
             video.removeEventListener('durationchange', onMetadata);
-            video.removeEventListener('canplay', onMetadata);
             video.removeEventListener('timeupdate', onTimeUpdate);
             video.removeEventListener('pause', onPause);
             video.removeEventListener('ended', onEnded);
@@ -1035,7 +1037,7 @@
             var artwork = video.poster || (thumbnails && thumbnails.length && thumbnails[thumbnails.length - 1].url) || meta('og:image');
             var result = { title: String(title), artist: String(artist) };
             if (artwork) result.artwork = [{ src: String(artwork) }];
-            var chapters = extractChapters(chapterDataSource());
+            var chapters = video._wblockChapterData;
             if (chapters && chapters.length) {
                 result.chapterInfo = chapters.map(function (chapter) {
                     return { startTime: chapter.start, title: chapter.title };
@@ -2364,11 +2366,6 @@
         return normalized;
     }
 
-    function chapterPayloadFingerprint(data) {
-        var chapters = extractChapters(data);
-        return chapters ? JSON.stringify(chapters) : '[]';
-    }
-
     function currentChapterVideoId() {
         return youtubeUrlVideoId() || youtubePlayerVideoId(findPlayer()) ||
             location.pathname + location.search;
@@ -2397,7 +2394,7 @@
         var videoId = currentChapterVideoId();
         var source = chapterDataSource();
         var chapters = extractChapters(source);
-        var fingerprint = chapterPayloadFingerprint(source);
+        var fingerprint = chapters ? JSON.stringify(chapters) : '[]';
         var sourceIsFromPreviousVideo = !!(chapters && chapters.length &&
             ((video._wblockChapterVideoId && video._wblockChapterVideoId !== videoId &&
                 video._wblockChapterFingerprint === fingerprint) ||
@@ -2698,7 +2695,9 @@
             element.setAttribute('data-wblock-subtitle-renderer', 'youtube');
         }
 
-        function routeSafariCaptionSelection() {
+        var lastCaptionKey = null;
+
+        function routeSafariCaptionSelection(force) {
             var selected = null;
             for (var i = 0; i < elements.length; i++) {
                 if (elements[i].track && elements[i].track.mode === 'showing') {
@@ -2706,6 +2705,9 @@
                     break;
                 }
             }
+            var key = selected ? (selected.getAttribute('data-wblock-native-subtitle') || '') : '';
+            if (!force && key === lastCaptionKey) return;
+            lastCaptionKey = key;
             if (!selected) {
                 if (!nativeCaptionSelectionObserved) return;
                 for (var j = 0; j < elements.length; j++) resetSafariCaptionControl(elements[j]);
@@ -2722,7 +2724,7 @@
 
         function onSafariCaptionChange() {
             nativeCaptionSelectionObserved = true;
-            routeSafariCaptionSelection();
+            routeSafariCaptionSelection(true);
         }
 
         function stopRetry() {
@@ -2760,7 +2762,6 @@
             }
             if (elements.length) {
                 routeSafariCaptionSelection();
-                setTimeout(routeSafariCaptionSelection, 0);
                 log('applied', elements.length, 'Safari caption controls');
             }
         }
@@ -3032,7 +3033,6 @@
         var videoId = youtubeVideoIdentity(player) || '';
         if (player.getAttribute(ATTR_CLEANED) === videoId && activeVideo === video) {
             syncShortsReel(player);
-            applyChapters(video);
             return;
         }
         syncShortsReel(player);
@@ -4206,8 +4206,6 @@
 
         transformPlayer();
         refreshDeArrowBranding();
-        // Recovery only. The player/document observers are the primary path.
-        setTimeout(transformPlayer, 100);
         setTimeout(transformPlayer, 500);
     }
 
@@ -4218,10 +4216,6 @@
             document.addEventListener('yt-page-data-updated', onNavigate, true);
         } catch (e) { /* ignore */ }
         window.addEventListener('popstate', onNavigate, true);
-        // Poll for URL changes as a last-resort fallback only.
-        setInterval(function () {
-            if (location.href !== lastUrl) onNavigate();
-        }, 1000);
     }
 
     // ------------------------------------------------------------------
