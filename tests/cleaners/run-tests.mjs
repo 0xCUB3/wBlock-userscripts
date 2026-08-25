@@ -1182,6 +1182,69 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: labels[0] === '0:00  Mutated in place' && track?.mode === 'hidden', detail: `labels=${labels.join(' | ')} mode=${track?.mode}` };
   });
   await page.evaluate(() => {
+    window.ytInitialData = {
+      playerOverlays: {
+        playerOverlayRenderer: {
+          decoratedPlayerBarRenderer: {
+            decoratedPlayerBarRenderer: {
+              playerBar: {
+                multiMarkersPlayerBarRenderer: {
+                  markersMap: [{
+                    value: {
+                      chapters: [
+                        { chapterRenderer: { title: { simpleText: 'Introduction example' }, timeRangeStartMillis: 0 } },
+                        { chapterRenderer: { title: { simpleText: 'Series preview' }, timeRangeStartMillis: 67000 } }
+                      ]
+                    }
+                  }]
+                }
+              }
+            }
+          }
+        }
+      }
+    };
+    window.__wblockTubeDebug.applyChapters();
+  });
+  await check(page, 'desktop', 'mirrors player-bar chapterRenderer payloads', () => {
+    const video = document.querySelector('#movie_player video');
+    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'chapters');
+    const labels = track?.cues ? Array.from(track.cues).map(c => c.text) : [];
+    return {
+      pass: JSON.stringify(labels) === JSON.stringify(['0:00  Introduction example', '1:07  Series preview']),
+      detail: `labels=${labels.join(' | ')}`,
+    };
+  });
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    const track = Array.from(video.textTracks).find(t => t.kind === 'chapters');
+    while (track.cues.length) track.removeCue(track.cues[0]);
+    video._wblockChapterData = null;
+    video._wblockChapterVideoId = null;
+    window.ytInitialData = {};
+    window.ytInitialPlayerResponse = { videoDetails: { videoId: 'LATECHAP01X' } };
+    history.replaceState(null, '', location.pathname + '?v=LATECHAP01X');
+    document.dispatchEvent(new Event('yt-navigate-finish'));
+  });
+  await page.waitForTimeout(50);
+  await page.evaluate(() => {
+    window.ytInitialData = {
+      engagementPanels: [{
+        macroMarkersListItemRenderer: {
+          timeDescription: { simpleText: '0:00' },
+          title: { simpleText: 'Late chapter' }
+        }
+      }]
+    };
+    document.dispatchEvent(new Event('yt-page-data-updated'));
+  });
+  await check(page, 'desktop', 'applies chapters that land after the player is already nativeized', () => {
+    const video = document.querySelector('#movie_player video');
+    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'chapters');
+    const labels = track?.cues ? Array.from(track.cues).map(c => c.text) : [];
+    return { pass: labels[0] === '0:00  Late chapter', detail: `labels=${labels.join(' | ')}` };
+  });
+  await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
     Object.defineProperty(video, 'paused', { configurable: true, get: () => false });
     Object.defineProperty(video, 'ended', { configurable: true, get: () => false });
