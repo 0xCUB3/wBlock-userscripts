@@ -1328,6 +1328,16 @@ async function qualityUISelectionCheck(page, scenario) {
       detail: `afterMetadata=${window.__wblockResumeCurrent} saved=${localStorage.getItem('wblock.tubeCleaner.position.NEXTVIDEO01')} id=${player.getVideoData().video_id} ready=${video.readyState} duration=${video.duration} cleaned=${player.getAttribute('data-wblock-tc-cleaned')}`,
     };
   });
+  await page.evaluate(() => {
+    window.__wblockResumeCurrent = 41;
+    const video = document.querySelector('#movie_player video');
+    video.dispatchEvent(new Event('canplay'));
+    video.dispatchEvent(new Event('loadedmetadata'));
+  });
+  await check(page, S, 'does not yank the playhead back after a later seek', () => ({
+    pass: window.__wblockResumeCurrent === 41,
+    detail: `afterSeek=${window.__wblockResumeCurrent}`,
+  }));
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
@@ -2968,6 +2978,16 @@ for (const config of [
       detail: `pip=${window.__wblockPiPMode}`,
     }));
   }
+  await page.evaluate((selector) => {
+    const video = document.querySelector(selector);
+    window.__wblockPausedOnHide = false;
+    video.pause = function () { window.__wblockPausedOnHide = true; };
+    window.dispatchEvent(new Event('pagehide'));
+  }, config.selector);
+  await check(page, config.key, 'pauses the video when the tab is closing', () => ({
+    pass: window.__wblockPausedOnHide === true,
+    detail: `paused=${window.__wblockPausedOnHide}`,
+  }));
   record(config.key, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
