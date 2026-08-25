@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.1
+// @version      0.1.3
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -14,10 +14,11 @@
 // @description:zh-Hans  为 YouTube 添加 Safari 原生控件、章节、字幕、SponsorBlock、可选的 DeArrow 品牌替换、画中画、后台播放、画质选择和纯音频模式。
 // @author       wBlock
 // @match        https://www.youtube.com/*
+// @match        https://youtube.com/*
 // @match        https://m.youtube.com/*
 // @match        https://music.youtube.com/*
 // @match        https://www.youtube-nocookie.com/*
-// @noframes
+// @match        https://youtube-nocookie.com/*
 // @run-at       document-start
 // @inject-into  page
 // @grant        none
@@ -384,7 +385,8 @@
         '.wblock-tc-native .ytp-spinner,',
         '.wblock-tc-native .ytp-doubletap-ui-legacy,',
         '.wblock-tc-native .ytp-touch-response,',
-        '.wblock-tc-native .ytp-player-content',
+        '.wblock-tc-native .ytp-player-content,',
+        '.wblock-tc-native .html5-video-container',
         '{ pointer-events: none !important; }',
 
         // Mobile YouTube renders its new controls outside #movie_player in a
@@ -443,6 +445,8 @@
         '.wblock-tc-native .ytp-autonav-endscreen-countdown-overlay,',
         '.wblock-tc-native .ytp-watermark,',
         '.wblock-tc-native .ytp-related-overlay,',
+        '.wblock-tc-native .ytp-inline-preview-ui,',
+        '.wblock-tc-native .ytp-inline-preview-scrim,',
         // setQuality() drives YouTube's hidden menu for SABR reliability. Hide
         // its entire shell—not just menu items—so the panel cannot flash while
         // our quality picker changes the setting programmatically.
@@ -2227,6 +2231,24 @@
         if (node.macroMarkersListItemRenderer) {
             out.push(node.macroMarkersListItemRenderer);
         }
+        if (node.chapterRenderer) {
+            out.push(node.chapterRenderer);
+        }
+        var markersList = node.markersList;
+        var markerType = markersList && String(markersList.markerType || '');
+        if (markersList && markersList.markers &&
+            /CHAPTER|TIMESTAMP/i.test(markerType) && !/HEATMAP/i.test(markerType)) {
+            var entityId = node.externalVideoId || '';
+            var currentId = currentChapterVideoId();
+            var idMismatch = entityId && currentId &&
+                /^[A-Za-z0-9_-]{11}$/.test(currentId) && entityId !== currentId;
+            if (!idMismatch) {
+                var markers = markersList.markers;
+                for (var m = 0; m < markers.length; m++) {
+                    if (markers[m]) { out.push(markers[m]); }
+                }
+            }
+        }
         for (var key in node) {
             if (Object.prototype.hasOwnProperty.call(node, key)) {
                 collectChapterRenderers(node[key], out, seen);
@@ -2265,6 +2287,7 @@
         try {
             var t = renderer.title;
             if (!t) return '';
+            if (typeof t === 'string') return t;
             if (t.simpleText) return t.simpleText;
             if (t.runs && t.runs.length) {
                 var s = '';
@@ -2279,7 +2302,19 @@
     // identity lets applyChapters reject an old SPA payload while YouTube is
     // still swapping the persistent player to the next video.
     function chapterDataSource() {
-        return window.ytInitialData || window.ytInitialPlayerResponse || null;
+        var sources = [];
+        try { if (window.ytInitialData) sources.push(window.ytInitialData); } catch (e) { /* ignore */ }
+        try { if (window.ytInitialPlayerResponse) sources.push(window.ytInitialPlayerResponse); } catch (e) { /* ignore */ }
+        try {
+            var player = findPlayer();
+            if (player && typeof player.getPlayerResponse === 'function') {
+                var response = player.getPlayerResponse();
+                if (response) sources.push(response);
+            }
+        } catch (e) { /* ignore */ }
+        if (!sources.length) return null;
+        if (sources.length === 1) return sources[0];
+        return sources;
     }
 
     // Extract YouTube's chapters for the current video as a sorted list of
@@ -2299,6 +2334,9 @@
             var start = null;
             if (typeof r.timeRangeStartMillis === 'number') {
                 start = r.timeRangeStartMillis / 1000;
+            } else if (r.startMillis !== undefined && r.startMillis !== null && r.startMillis !== '') {
+                var millis = Number(r.startMillis);
+                if (isFinite(millis)) { start = millis / 1000; }
             } else {
                 try {
                     start = parseTimestamp(r.timeDescription && r.timeDescription.simpleText);
@@ -2360,15 +2398,19 @@
         var source = chapterDataSource();
         var chapters = extractChapters(source);
         var fingerprint = chapterPayloadFingerprint(source);
-        var sourceIsFromPreviousVideo = chapters &&
-            video._wblockChapterVideoId !== videoId &&
-            video._wblockChapterFingerprint === fingerprint;
+        var sourceIsFromPreviousVideo = !!(chapters && chapters.length &&
+            ((video._wblockChapterVideoId && video._wblockChapterVideoId !== videoId &&
+                video._wblockChapterFingerprint === fingerprint) ||
+             (video._wblockRejectedChapterFingerprint === fingerprint &&
+                video._wblockRejectedChapterVideoId === videoId)));
 
         if (chapters && chapters.length && !sourceIsFromPreviousVideo) {
             video._wblockChapterData = chapters;
             video._wblockChapterVideoId = videoId;
             video._wblockChapterDataSource = source;
             video._wblockChapterFingerprint = fingerprint;
+            video._wblockRejectedChapterFingerprint = null;
+            video._wblockRejectedChapterVideoId = null;
         } else if (video._wblockChapterVideoId === videoId &&
             video._wblockChapterData && video._wblockChapterData.length) {
             chapters = video._wblockChapterData;
@@ -2378,6 +2420,10 @@
             video._wblockChapterVideoId = videoId;
             video._wblockChapterDataSource = source;
             video._wblockChapterFingerprint = fingerprint;
+            if (sourceIsFromPreviousVideo) {
+                video._wblockRejectedChapterFingerprint = fingerprint;
+                video._wblockRejectedChapterVideoId = videoId;
+            }
             return false;
         }
 
@@ -2440,18 +2486,26 @@
         }
         video.addEventListener('loadedmetadata', onLoadedMetadata);
 
+        function onYouTubeData() {
+            if (applyChapters(video)) stopRetry();
+        }
+        document.addEventListener('yt-page-data-updated', onYouTubeData, true);
+        document.addEventListener('yt-navigate-finish', onYouTubeData, true);
+
         if (!applyChapters(video)) {
-            // On SPA navigation the chapter list can land a moment after the
-            // player transforms. Retry briefly until cues exist or the video is
-            // released.
+            // Watch/SPA chapter lists often land after the player is already
+            // nativeized. Keep retrying through the usual YouTube hydration
+            // window instead of giving up after a few seconds.
             timer = setInterval(function () {
                 attempts++;
-                if (applyChapters(video) || attempts >= 10) { stopRetry(); }
-            }, 500);
+                if (applyChapters(video) || attempts >= 40) { stopRetry(); }
+            }, 250);
         }
 
         registerCleanup(function () {
             video.removeEventListener('loadedmetadata', onLoadedMetadata);
+            document.removeEventListener('yt-page-data-updated', onYouTubeData, true);
+            document.removeEventListener('yt-navigate-finish', onYouTubeData, true);
             stopRetry();
         });
     }
@@ -2771,6 +2825,24 @@
         });
     }
 
+    // Home/search hover-to-play mounts a tiny html5 player over a thumbnail.
+    // Nativeizing it steals the active player, flashes Safari chrome on cards,
+    // and makes the real watch/Shorts player look like it never injected.
+    function isHoverPreviewPlayer(node) {
+        if (!node || node.nodeType !== 1) return false;
+        try {
+            if (node.closest && node.closest(
+                'ytd-video-preview, ytd-thumbnail, ytd-moving-thumbnail-renderer, ' +
+                '#video-preview, #preview, #preview-player, .ytp-inline-preview-ui'
+            )) {
+                return true;
+            }
+            var identity = String(node.id || '') + ' ' + String(node.className || '') +
+                ' ' + String(node.tagName || '');
+            return /(?:video-preview|inline-preview|hover-preview|moving-thumbnail)/i.test(identity);
+        } catch (e) { return false; }
+    }
+
     function findPlayer() {
         var candidates = [];
         function add(raw) {
@@ -2782,10 +2854,14 @@
         }
 
         var known = document.querySelectorAll('#movie_player, .html5-video-player');
-        for (var i = 0; i < known.length; i++) { add(known[i]); }
+        for (var i = 0; i < known.length; i++) {
+            if (!isHoverPreviewPlayer(known[i])) { add(known[i]); }
+        }
         if (!candidates.length) {
             var wrappers = document.querySelectorAll('ytd-player, ytm-player, #player-container');
-            for (var w = 0; w < wrappers.length; w++) { add(wrappers[w]); }
+            for (var w = 0; w < wrappers.length; w++) {
+                if (!isHoverPreviewPlayer(wrappers[w])) { add(wrappers[w]); }
+            }
         }
         if (!candidates.length) return null;
         if (candidates.length === 1) return candidates[0];
@@ -2947,11 +3023,16 @@
 
         var video = player.querySelector('video');
         if (!video) return;
+        if (isHoverPreviewPlayer(player) || isHoverPreviewPlayer(video)) {
+            syncShortsReel(null);
+            return;
+        }
 
         // Check if we already processed this video.
         var videoId = youtubeVideoIdentity(player) || '';
         if (player.getAttribute(ATTR_CLEANED) === videoId && activeVideo === video) {
             syncShortsReel(player);
+            applyChapters(video);
             return;
         }
         syncShortsReel(player);
@@ -3977,6 +4058,24 @@
 
             var toolbarTimer = null;
             var TOOLBAR_HIDE_DELAY = 3000;
+            var _isOverPlayer = false;
+            var _isOverToolbar = false;
+
+            function desktopPanelOpen() {
+                var panels = [qualityMenu, sponsorMenu, deArrowMenu];
+                return panels.some(function (p) {
+                    return p && p.style.display !== 'none' && p.style.display !== '';
+                });
+            }
+
+            function pointOverPlayer(x, y) {
+                var rect = player.getBoundingClientRect();
+                if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+                    return true;
+                }
+                var bar = toolbar.getBoundingClientRect();
+                return x >= bar.left && x <= bar.right && y >= bar.top && y <= bar.bottom;
+            }
 
             function showToolbar() {
                 toolbar.style.opacity = '1';
@@ -3985,70 +4084,74 @@
             }
 
             function hideToolbar() {
+                if (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended) {
+                    showToolbar();
+                    return;
+                }
                 toolbar.style.opacity = '0';
                 toolbar.style.pointerEvents = 'none';
             }
 
             function scheduleHideToolbar() {
+                if (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended) {
+                    showToolbar();
+                    return;
+                }
                 clearTimeout(toolbarTimer);
                 toolbarTimer = setTimeout(hideToolbar, TOOLBAR_HIDE_DELAY);
             }
 
-            // Listen for mouse movement anywhere on the player to show
-            // toolbar (same trigger as Safari's native controls)
-            //
-            // We use a document-level mousemove listener and check if
-            // the mouse is over the player area. This is more reliable
-            // than listening on the player element because YouTube's
-            // overlay divs (html5-video-container, etc.) sit on top and
-            // can intercept mouse events.
-            var _isOverPlayer = false;
+            // Safari's native controls stay up while the pointer is over the
+            // video and reappear on any movement after idle hide. The previous
+            // enter-edge-only listener never showed the toolbar again if the
+            // cursor was already inside the player when the timer fired.
             function onDocumentMouseMove(e) {
-                var rect = player.getBoundingClientRect();
-                var over = e.clientX >= rect.left && e.clientX <= rect.right &&
-                    e.clientY >= rect.top && e.clientY <= rect.bottom;
-                if (over && !_isOverPlayer) {
+                var over = pointOverPlayer(e.clientX, e.clientY);
+                if (over) {
                     _isOverPlayer = true;
                     showToolbar();
-                }
-                if (over) {
                     scheduleHideToolbar();
+                    return;
                 }
-                if (!over && _isOverPlayer) {
+                if (_isOverPlayer || _isOverToolbar) {
                     _isOverPlayer = false;
-                    scheduleHideToolbar();
+                    if (!desktopPanelOpen() && !_isOverToolbar) { scheduleHideToolbar(); }
                 }
             }
             document.addEventListener('mousemove', onDocumentMouseMove);
 
-            // Also show on mouse entering the player from outside
-            function onPlayerMouseEnter() { showToolbar(); }
-            player.addEventListener('mouseenter', onPlayerMouseEnter);
-
-            // Keep visible while hovering directly over toolbar
-            toolbar.addEventListener('mouseenter', function () {
+            function onPlayerMouseEnter() {
+                _isOverPlayer = true;
                 showToolbar();
-                clearTimeout(toolbarTimer);
+                scheduleHideToolbar();
+            }
+            function onPlayerMouseLeave() {
+                _isOverPlayer = false;
+                if (!_isOverToolbar) { scheduleHideToolbar(); }
+            }
+            player.addEventListener('mouseenter', onPlayerMouseEnter);
+            player.addEventListener('mouseleave', onPlayerMouseLeave);
+
+            toolbar.addEventListener('mouseenter', function () {
+                _isOverToolbar = true;
+                showToolbar();
             });
 
             toolbar.addEventListener('mouseleave', function () {
+                _isOverToolbar = false;
                 scheduleHideToolbar();
             });
 
-            // Show on keyboard focus (tab navigation)
             toolbar.addEventListener('focusin', function () {
                 showToolbar();
             });
 
-            // Hide when video starts playing (controls auto-hide)
             function onVideoPlay() { scheduleHideToolbar(); }
             video.addEventListener('play', onVideoPlay);
 
-            // Show when video is paused
             function onVideoPause() { showToolbar(); }
             video.addEventListener('pause', onVideoPause);
 
-            // Show toolbar briefly when entering PiP (user can interact)
             var presentationTimer = null;
             function onPresentationModeChange() {
                 if (video.webkitPresentationMode === 'picture-in-picture') {
@@ -4064,6 +4167,7 @@
                 clearTimeout(presentationTimer);
                 document.removeEventListener('mousemove', onDocumentMouseMove);
                 player.removeEventListener('mouseenter', onPlayerMouseEnter);
+                player.removeEventListener('mouseleave', onPlayerMouseLeave);
                 video.removeEventListener('play', onVideoPlay);
                 video.removeEventListener('pause', onVideoPause);
                 video.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
@@ -4129,6 +4233,7 @@
     function nodeMayContainPlayer(node) {
         if (!node || node.nodeType !== 1) { return false; }
         try {
+            if (isHoverPreviewPlayer(node)) { return false; }
             if (node.tagName === 'VIDEO' || node.id === 'movie_player' ||
                 node.id === 'player-container' ||
                 node.matches('.html5-video-player, ytd-player')) {
