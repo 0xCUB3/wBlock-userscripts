@@ -88,6 +88,21 @@ const scenarios = [
       const enabled = await page.evaluate(() => window.DarkReader.isEnabled());
       if (enabled) throw new Error('appearance listener survived detection; page got double-darkened');
     }
+  },
+  {
+    name: 'forced dark withdraws when color-scheme meta says dark',
+    follows: false, colorScheme: 'light', page: 'meta-dark',
+    expectEnabled: false, expectAntiflash: true
+  },
+  {
+    name: 'forced dark withdraws when html has class dark',
+    follows: false, colorScheme: 'light', page: 'class-dark',
+    expectEnabled: false, expectAntiflash: true
+  },
+  {
+    name: 'forced dark withdraws when CSS color-scheme is dark',
+    follows: false, colorScheme: 'light', page: 'color-scheme-css',
+    expectEnabled: false, expectAntiflash: true
   }
 ];
 
