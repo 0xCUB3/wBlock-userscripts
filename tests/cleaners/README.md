@@ -69,6 +69,10 @@ Player Cleaner scenarios:
   `attachShadow` capture, one-frame nativeization, in-place pipeline retention,
   custom-chrome hiding, controls defense, and flat resources after removing and
   reattaching the shadow host.
+- `fixture-player-cleaner-reddit.html` — Reddit's `<shreddit-player>`: the
+  `<video>` and `<shreddit-media-ui>` are direct children of the shadow root, so
+  `parentElement` is null and a light-DOM descendant sweep never sees the overlay.
+  Native controls must engage and the Reddit bar must hide, including after a remount.
 - `fixture-player-cleaner-bare.html` — modern/custom players whose wrapper is
   not a recognized library class (Mux-style or bespoke). Verifies the bare-video
   fallback: a controls-less `<video>` in an unknown wrapper is enhanced in place

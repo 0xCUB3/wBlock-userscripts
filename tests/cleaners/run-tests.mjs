@@ -36,6 +36,7 @@ const FIXTURE_PLAYER_JW_INIT_RACE_URL = pathToFileURL(join(__dirname, 'fixture-p
 const FIXTURE_PLAYER_LIVE_BLOB_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-live-blob.html')).href;
 const FIXTURE_PLAYER_HANDSHAKE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-handshake.html')).href;
 const FIXTURE_PLAYER_SHADOW_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-shadow.html')).href;
+const FIXTURE_PLAYER_REDDIT_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-reddit.html')).href;
 const FIXTURE_PLAYER_BARE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-bare.html')).href;
 const FIXTURE_PLAYER_RELATIVE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-relative.html')).href;
 const FIXTURE_PLAYER_UPGRADE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-upgrade.html')).href;
@@ -2169,6 +2170,58 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, S, 'reattached shadow video is native again', () => {
     const v = document.querySelector('test-play-av').shadowRoot.querySelector('video');
     return { pass: !!(v && v.controls && v.hasAttribute('data-wblock-player-cleaner')) };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Reddit shreddit-player)', {
+    fixture: FIXTURE_PLAYER_REDDIT_URL,
+    scriptSource: playerUserscript,
+    readySignal: 'shreddit-player',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-reddit';
+
+  await check(page, S, 'nativeizes the shadow video', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    return {
+      pass: !!(video && video.controls && video.hasAttribute('data-wblock-player-cleaner')),
+      detail: video ? `controls=${video.controls} done=${video.getAttribute('data-wblock-player-cleaner')}` : 'no video'
+    };
+  });
+
+  await check(page, S, 'hides shreddit-media-ui without hiding the host', () => {
+    const host = document.querySelector('shreddit-player');
+    const ui = host && host.shadowRoot && host.shadowRoot.querySelector('shreddit-media-ui');
+    const hostHidden = !!(host && (host.hasAttribute('data-wblock-pc-hidden') ||
+      getComputedStyle(host).display === 'none'));
+    const uiHidden = !!(ui && (ui.hasAttribute('data-wblock-pc-hidden') ||
+      getComputedStyle(ui).display === 'none'));
+    return {
+      pass: !!(host && ui && !hostHidden && uiHidden),
+      detail: `hostHidden=${hostHidden} uiHidden=${uiHidden}`
+    };
+  });
+
+  await page.evaluate(() => {
+    const host = document.querySelector('shreddit-player');
+    const root = host.shadowRoot;
+    const old = root.querySelector('shreddit-media-ui');
+    const next = old.cloneNode(true);
+    old.remove();
+    root.appendChild(next);
+  });
+
+  await check(page, S, 're-hides a remounted shreddit-media-ui', () => {
+    const host = document.querySelector('shreddit-player');
+    const ui = host && host.shadowRoot && host.shadowRoot.querySelector('shreddit-media-ui');
+    const uiHidden = !!(ui && (ui.hasAttribute('data-wblock-pc-hidden') ||
+      getComputedStyle(ui).display === 'none'));
+    return { pass: uiHidden, detail: ui ? `hidden=${uiHidden}` : 'no ui' };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));

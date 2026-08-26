@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.26
+// @version      0.1.27
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -323,6 +323,7 @@
         '.mw-tmh-player',            // MediaWiki TimedMediaHandler
         '[data-mw-tmh]',             // MediaWiki TimedMediaHandler
         '[data-a-target="video-player"]', // Twitch player wrapper
+        'shreddit-player',           // Reddit hosted video
         '.amp-player',               // Fox / Akamai AMP
         '.fave-player-container',    // CNN FAVE / Bolt
         '.vjs-pbs',                  // PBS / GPB video.js
@@ -1036,9 +1037,10 @@
             '[data-clappr-player]', '.fluid_video_wrapper', 'mux-player',
             'media-controller', 'media-theme', 'media-theme-youtube',
             '.media-player', '.media-default-skin', '.WebPlayerContainer',
-            '.mw-tmh-player', '[data-mw-tmh]', '[data-a-target="video-player"]'];
+            '.mw-tmh-player', '[data-mw-tmh]', '[data-a-target="video-player"]',
+            'shreddit-player'];
         for (var i = 0; i < wrapperSelectors.length; i++) {
-            var ancestor = container.closest ? container.closest(wrapperSelectors[i]) : null;
+            var ancestor = composedClosest(container, wrapperSelectors[i]);
             if (ancestor && ancestor.tagName !== 'VIDEO') { container = ancestor; }
         }
         return container;
@@ -1256,7 +1258,9 @@
 
     function hideElement(el) {
         if (!el || el === document.documentElement || el === document.body) return;
-        if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK') return;
+        if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK' ||
+            el.tagName === 'STYLE' || el.tagName === 'LINK' || el.tagName === 'SLOT' ||
+            el.tagName === 'META' || el.tagName === 'TEMPLATE') return;
         if (hostsYouTubeEmbed(el)) return;
         try {
             ensureHideStyle();
@@ -1290,6 +1294,15 @@
         return composedContains(a, b) || composedContains(b, a);
     }
 
+    function composedClosest(node, selector) {
+        for (var el = node; el; el = composedParent(el)) {
+            if (el.nodeType === 1 && el.matches) {
+                try { if (el.matches(selector)) { return el; } } catch (e) { /* invalid selector */ }
+            }
+        }
+        return null;
+    }
+
     // Generic chrome hiding. Instead of maintaining a per-library selector list
     // (which inevitably misses bespoke players), walk every element inside the
     // container and hide anything that is not the video, an ancestor of the
@@ -1303,6 +1316,7 @@
     // controls while leaving flow-layout page content intact.
     function hideContainerChrome(container, video, aggressive) {
         if (!container || !container.querySelectorAll) return;
+        if (container.nodeType === 1 && container.tagName === 'VIDEO') return;
         var elements = container.querySelectorAll('*');
         for (var i = 0; i < elements.length; i++) {
             var el = elements[i];
@@ -1321,6 +1335,15 @@
                     }
                 } catch (e) { /* ignore */ }
             }
+        }
+        // Open/observed shadow trees are not in querySelectorAll(). Reddit's
+        // shreddit-media-ui lives as a shadow sibling of <video>; without this
+        // pierce the native controls paint under that overlay and stay dead.
+        // Never walk a <video> UA shadow: that is Safari's own control tree.
+        if (container.shadowRoot) { hideContainerChrome(container.shadowRoot, video, aggressive); }
+        for (var s = 0; s < elements.length; s++) {
+            if (elements[s].tagName === 'VIDEO') continue;
+            if (elements[s].shadowRoot) { hideContainerChrome(elements[s].shadowRoot, video, aggressive); }
         }
     }
 
@@ -1343,14 +1366,16 @@
     // Falls back to the parent when nothing nearer than the page root is
     // positioned, so a positioned <body> can never trigger a whole-page hide.
     function containerForVideo(video) {
-        var known = video.closest && video.closest(PLAYER_SELECTOR);
+        var known = composedClosest(video, PLAYER_SELECTOR);
         if (known && known.tagName !== 'VIDEO') { return normalizeContainer(known); }
-        var el = video.parentElement;
-        while (el && el.parentElement && el.tagName !== 'BODY') {
-            try {
-                if (getComputedStyle(el).position !== 'static') { return el; }
-            } catch (e) { break; }
-            el = el.parentElement;
+        var el = composedParent(video);
+        while (el && el !== document && el.tagName !== 'BODY' && el.tagName !== 'HTML') {
+            if (el.nodeType === 1) {
+                try {
+                    if (getComputedStyle(el).position !== 'static') { return el; }
+                } catch (e) { break; }
+            }
+            el = composedParent(el);
         }
         return video.parentElement || video;
     }
@@ -1361,17 +1386,25 @@
     // container-descendant sweep never reaches it. The size bound stops the climb
     // before page content (post text, reactions) that sits in a taller ancestor.
     function playerShell(video) {
-        var shell = video.parentElement, el = video.parentElement;
+        var shell = video.parentNode || video, el = video.parentNode;
         var vr;
-        try { vr = video.getBoundingClientRect(); } catch (e) { return shell || video; }
-        if (vr.width < 2 || vr.height < 2) { return shell || video; }
+        try { vr = video.getBoundingClientRect(); } catch (e) { return video.parentElement || video; }
+        if (vr.width < 2 || vr.height < 2) { return video.parentElement || video; }
         var maxH = vr.height * 1.7 + 160, maxW = vr.width * 1.35 + 48;
-        while (el && el.tagName !== 'BODY' && el.tagName !== 'HTML') {
+        while (el && el !== document && el.nodeType !== 9) {
+            if (el.tagName === 'BODY' || el.tagName === 'HTML') { break; }
+            if (el.nodeType === 11) {
+                // ShadowRoot has no box; keep it so shadow siblings stay in scope.
+                shell = el;
+                el = composedParent(el);
+                continue;
+            }
+            if (el.nodeType !== 1) { break; }
             var r;
             try { r = el.getBoundingClientRect(); } catch (e) { break; }
             if (r.height > maxH || r.width > maxW) { break; }
             shell = el;
-            el = el.parentElement;
+            el = composedParent(el);
         }
         return shell || video.parentElement || video;
     }
@@ -1711,6 +1744,17 @@
                 if (isPbsMenuChrome(pbsMenus[pm])) { hideElement(pbsMenus[pm]); }
             }
         }
+
+        // Reddit paints shreddit-media-ui as a shadow-root sibling of <video>.
+        // parentElement is null there, so the generic ancestor walk used to
+        // miss it and leave Reddit's bar on top of Safari's controls.
+        var redditHost = composedClosest(video, 'shreddit-player');
+        if (redditHost && redditHost.shadowRoot && redditHost.shadowRoot.querySelectorAll) {
+            var redditChrome = redditHost.shadowRoot.querySelectorAll('shreddit-media-ui');
+            for (var rc = 0; rc < redditChrome.length; rc++) {
+                if (!composedRelated(redditChrome[rc], video)) { hideElement(redditChrome[rc]); }
+            }
+        }
     }
 
     function normalizePbsHost(host) {
@@ -1913,11 +1957,15 @@
         // (notably Twitch's persistent-player) sit inside a much larger layout
         // container; its siblings are page content, not player chrome.
         var shell = playerShell(video);
+        var shellParent = composedParent(shell);
         var child = video;
-        for (var anc = video.parentElement; anc && anc !== shell.parentElement &&
-             anc.tagName !== 'BODY' && anc.tagName !== 'HTML'; child = anc, anc = anc.parentElement) {
-            for (var c = 0; c < anc.children.length; c++) {
-                if (anc.children[c] !== child) { hideOverlappingSubtree(anc.children[c], video, vr); }
+        for (var anc = composedParent(video); anc && anc !== shellParent &&
+             anc !== document && anc.tagName !== 'BODY' && anc.tagName !== 'HTML';
+             child = anc, anc = composedParent(anc)) {
+            var kids = anc.children;
+            if (!kids) { continue; }
+            for (var c = 0; c < kids.length; c++) {
+                if (kids[c] !== child) { hideOverlappingSubtree(kids[c], video, vr); }
             }
         }
     }
@@ -1971,6 +2019,16 @@
     // parent is outside the player shell — the case an ancestor climb misses
     // (LinkedIn feed player). Also scans top-level body children geometrically
     // so off-viewport / zero-hit-test cases (and portal remounts) still get hid.
+    function hideShadowChildOverlays(host, video, vr) {
+        if (!host || !host.shadowRoot || !host.shadowRoot.children) { return; }
+        var kids = host.shadowRoot.children;
+        for (var i = 0; i < kids.length; i++) {
+            if (!composedRelated(kids[i], video)) {
+                hideOverlappingSubtree(kids[i], video, vr);
+            }
+        }
+    }
+
     function hideStackedChrome(video) {
         // Keep Twitch page content outside the recognized player wrapper out of
         // hit-test and detached-overlay scans.
@@ -1997,7 +2055,13 @@
                 if (!stack) { continue; }
                 for (var s = 0; s < stack.length; s++) {
                     var hit = stack[s];
-                    if (hit === video || composedRelated(hit, video)) { break; }
+                    if (hit === video) { break; }
+                    if (composedRelated(hit, video)) {
+                        // WebKit's elementsFromPoint often returns the shadow
+                        // host instead of the overlay inside it.
+                        hideShadowChildOverlays(hit, video, vr);
+                        break;
+                    }
                     hideIfDetachedOverlay(hit, video, vr);
                 }
             }
@@ -2442,6 +2506,7 @@
         // that). Nativeize shadow players in place and preserve their pipeline;
         // structural cleanup is only safe in the document's light DOM.
         try {
+            if (container.shadowRoot) { return; }
             if (container.getRootNode && container.getRootNode() !== document) { return; }
             // MediaElement keeps querying its generated wrapper after startup;
             // deleting that wrapper leaves playback alive but makes its own
@@ -2739,10 +2804,15 @@
             var shell = playerShell(ev);
             var touched = false;
             for (var mi = 0; mi < records.length && !touched; mi++) {
-                if (shell.contains(records[mi].target)) { touched = true; break; }
+                if (shell === records[mi].target || composedContains(shell, records[mi].target)) {
+                    touched = true; break;
+                }
                 var added = records[mi].addedNodes;
                 for (var ni = 0; ni < added.length; ni++) {
-                    if (added[ni].nodeType === 1 && shell.contains(added[ni])) { touched = true; break; }
+                    if (added[ni].nodeType === 1 &&
+                        (shell === added[ni] || composedContains(shell, added[ni]))) {
+                        touched = true; break;
+                    }
                 }
             }
             if (touched) {
