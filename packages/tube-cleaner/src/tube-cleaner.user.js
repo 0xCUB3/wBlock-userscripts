@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.5
+// @version      0.1.6
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2648,85 +2648,10 @@
         var elements = [];
         var blobUrls = [];
 
-        // Tube Cleaner hides YouTube's controls, so Safari's captions menu is
-        // the practical caption selector. The mirrored tracks are blank control
-        // tracks: selecting one selects the matching YouTube caption track,
-        // which preserves creator styling and movable caption windows. A valid
-        // downloaded WebVTT copy remains available as a fallback.
-        var nativeCaptionSelectionObserved = false;
-
-        function captionButton() {
-            try { return player.querySelector('.ytp-subtitles-button'); } catch (e) { return null; }
-        }
-
-        function youtubeCaptionsAreOn() {
-            try { return typeof player.isSubtitlesOn === 'function' && player.isSubtitlesOn(); }
-            catch (e) { return false; }
-        }
-
-        function setYouTubeCaptionsEnabled(enabled) {
-            if (youtubeCaptionsAreOn() === enabled) return youtubeCaptionsAreOn();
-            var button = captionButton();
-            if (!button || typeof button.click !== 'function') return false;
-            try { button.click(); } catch (e) { return false; }
-            return youtubeCaptionsAreOn() === enabled;
-        }
-
-        function selectYouTubeCaptionTrack(element) {
-            var definition = element._wblockNativeSubtitleDefinition || {};
-            var language = definition.languageCode || element.srclang || '';
-            if (!language || typeof player.setOption !== 'function') return false;
-            try {
-                if (typeof player.loadModule === 'function') player.loadModule('captions');
-                player.setOption('captions', 'track', { languageCode: language });
-                return setYouTubeCaptionsEnabled(true);
-            } catch (e) { return false; }
-        }
-
-        function enableSafariCaptionFallback(element) {
-            if (!element || !element._wblockNativeSubtitleFallbackURL) return;
-            element.src = element._wblockNativeSubtitleFallbackURL;
-            element.setAttribute('data-wblock-subtitle-renderer', 'safari');
-        }
-
-        function resetSafariCaptionControl(element) {
-            if (!element || !element._wblockNativeSubtitleControlURL) return;
-            element.src = element._wblockNativeSubtitleControlURL;
-            element.setAttribute('data-wblock-subtitle-renderer', 'youtube');
-        }
-
-        var lastCaptionKey = null;
-
-        function routeSafariCaptionSelection(force) {
-            var selected = null;
-            for (var i = 0; i < elements.length; i++) {
-                if (elements[i].track && elements[i].track.mode === 'showing') {
-                    selected = elements[i];
-                    break;
-                }
-            }
-            var key = selected ? (selected.getAttribute('data-wblock-native-subtitle') || '') : '';
-            if (!force && key === lastCaptionKey) return;
-            lastCaptionKey = key;
-            if (!selected) {
-                if (!nativeCaptionSelectionObserved) return;
-                for (var j = 0; j < elements.length; j++) resetSafariCaptionControl(elements[j]);
-                setYouTubeCaptionsEnabled(false);
-                return;
-            }
-            // Reset an old fallback before routing the newly selected language;
-            // otherwise Safari can keep rendering the old blob after a switch.
-            for (var j = 0; j < elements.length; j++) {
-                if (elements[j] !== selected) resetSafariCaptionControl(elements[j]);
-            }
-            if (!selectYouTubeCaptionTrack(selected)) enableSafariCaptionFallback(selected);
-        }
-
-        function onSafariCaptionChange() {
-            nativeCaptionSelectionObserved = true;
-            routeSafariCaptionSelection(true);
-        }
-
+        // Safari's CC menu only lists real subtitle tracks. YouTube's caption
+        // overlay sits under the native <video>, so clicking its hidden CC
+        // button cannot show text. Install downloaded WebVTT and let Safari
+        // toggle it. Videos with no usable captions get no tracks at all.
         function stopRetry() {
             if (retryTimer !== null) clearInterval(retryTimer);
             retryTimer = null;
@@ -2743,27 +2668,19 @@
                 if (seen[key]) continue;
                 seen[key] = true;
                 try {
-                    var fallbackBlobUrl = URL.createObjectURL(new Blob([downloads[i].vtt], { type: 'text/vtt' }));
-                    var controlBlobUrl = URL.createObjectURL(new Blob(['WEBVTT\\n\\n'], { type: 'text/vtt' }));
+                    var blobUrl = URL.createObjectURL(new Blob([downloads[i].vtt], { type: 'text/vtt' }));
                     var element = document.createElement('track');
                     element.kind = 'subtitles';
                     element.label = label;
                     element.srclang = language;
-                    element.src = controlBlobUrl;
-                    element._wblockNativeSubtitleDefinition = definition;
-                    element._wblockNativeSubtitleFallbackURL = fallbackBlobUrl;
-                    element._wblockNativeSubtitleControlURL = controlBlobUrl;
+                    element.src = blobUrl;
                     element.setAttribute('data-wblock-native-subtitle', key);
-                    element.setAttribute('data-wblock-subtitle-renderer', 'youtube');
                     video.appendChild(element);
                     elements.push(element);
-                    blobUrls.push(fallbackBlobUrl, controlBlobUrl);
+                    blobUrls.push(blobUrl);
                 } catch (e) { /* skip one malformed track */ }
             }
-            if (elements.length) {
-                routeSafariCaptionSelection();
-                log('applied', elements.length, 'Safari caption controls');
-            }
+            if (elements.length) log('applied', elements.length, 'Safari caption tracks');
         }
 
         function loadTracks(tracks) {
@@ -2795,11 +2712,6 @@
             loadTracks(tracks);
         }
 
-        if (video.textTracks && typeof video.textTracks.addEventListener === 'function') {
-            video.textTracks.addEventListener('change', onSafariCaptionChange);
-        }
-        video.addEventListener('timeupdate', routeSafariCaptionSelection);
-
         tryStart();
         if (!started) {
             retryTimer = setInterval(function () {
@@ -2812,10 +2724,6 @@
         registerCleanup(function () {
             cancelled = true;
             stopRetry();
-            if (video.textTracks && typeof video.textTracks.removeEventListener === 'function') {
-                video.textTracks.removeEventListener('change', onSafariCaptionChange);
-            }
-            video.removeEventListener('timeupdate', routeSafariCaptionSelection);
             if (controller) controller.abort();
             for (var i = 0; i < elements.length; i++) {
                 if (elements[i].parentNode) elements[i].remove();

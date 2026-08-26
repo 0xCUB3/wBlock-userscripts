@@ -496,6 +496,10 @@ async function controlsSurvivalCheck(page, scenario, { preserveIOSMMSRestriction
 }
 
 async function iosNativeControlsChecks(page, scenario) {
+  await check(page, scenario, 'does not add Safari caption tracks when YouTube has none', () => {
+    const tracks = document.querySelectorAll('track[data-wblock-native-subtitle], track[kind="subtitles"]');
+    return { pass: tracks.length === 0, detail: `tracks=${tracks.length}` };
+  });
   await check(page, scenario, 'clears persisted audio-only mode on iOS', () => {
     const video = document.querySelector('#movie_player video');
     const audioStyle = document.getElementById('wblock-tc-style-audio');
@@ -875,68 +879,32 @@ async function qualityUISelectionCheck(page, scenario) {
     };
   });
   await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length === 2);
-  await check(page, 'desktop', 'adds token-safe Safari caption controls with WebVTT fallback', () => {
+  await check(page, 'desktop', 'adds Safari caption tracks from usable WebVTT', () => {
     const video = document.querySelector('#movie_player video');
     const tracks = Array.from(video?.querySelectorAll('track[data-wblock-native-subtitle]') || []);
     const labels = tracks.map(track => `${track.srclang}:${track.label}`);
-    const renderers = tracks.map(track => track.getAttribute('data-wblock-subtitle-renderer'));
     return {
       pass: JSON.stringify(labels) === JSON.stringify(['en:English', 'es:Español']) &&
-        renderers.every(renderer => renderer === 'youtube') &&
+        tracks.every(track => track.kind === 'subtitles' && /^blob:/.test(track.src)) &&
         window.__wblockCaptionPlayerRequests === 1 && window.__wblockCaptionTextRequests === 2,
-      detail: `tracks=${labels.join(',')} renderers=${renderers.join(',')} playerRequests=${window.__wblockCaptionPlayerRequests} textRequests=${window.__wblockCaptionTextRequests}`,
+      detail: `tracks=${labels.join(',')} src=${tracks.map(t => t.src.slice(0, 8)).join(',')} playerRequests=${window.__wblockCaptionPlayerRequests} textRequests=${window.__wblockCaptionTextRequests}`,
     };
   });
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
     const track = video?.querySelector('track[data-wblock-native-subtitle]')?.track;
     window.__youtubeSubtitlesOn = false;
+    window.__subtitleClicks = 0;
     if (track) track.mode = 'showing';
-    video?.dispatchEvent(new Event('timeupdate'));
   });
-  await check(page, 'desktop', 'routes Safari caption selection to YouTube without rendering the mirrored cues', () => {
+  await check(page, 'desktop', 'lets Safari show captions without clicking YouTube CC', () => {
     const video = document.querySelector('#movie_player video');
     const element = video?.querySelector('track[data-wblock-native-subtitle]');
     const mode = element?.track?.mode;
-    return { pass: mode === 'showing' && window.__youtubeSubtitlesOn && window.__subtitleClicks === 1 &&
-        window.__youtubeCaptionTrack === 'en' && element?.getAttribute('data-wblock-subtitle-renderer') === 'youtube',
-      detail: `nativeMode=${mode} youtubeOn=${window.__youtubeSubtitlesOn} language=${window.__youtubeCaptionTrack} clicks=${window.__subtitleClicks}` };
-  });
-  await page.evaluate(() => {
-    const player = document.getElementById('movie_player');
-    const original = player.setOption;
-    player.__originalSetOption = original;
-    player.setOption = function (module, option, value) {
-      if (module === 'captions' && option === 'track' && value?.languageCode === 'en') throw new Error('fallback regression');
-      return original.call(this, module, option, value);
-    };
-    const tracks = Array.from(document.querySelectorAll('track[data-wblock-native-subtitle]'));
-    tracks[0].track.mode = 'showing';
-    tracks[1].track.mode = 'hidden';
-    document.querySelector('#movie_player video').dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'uses Safari WebVTT fallback when YouTube rejects one caption language', () => {
-    const track = document.querySelectorAll('track[data-wblock-native-subtitle]')[0];
-    return { pass: track?.getAttribute('data-wblock-subtitle-renderer') === 'safari', detail: `renderer=${track?.getAttribute('data-wblock-subtitle-renderer')}` };
-  });
-  await page.evaluate(() => {
-    const tracks = Array.from(document.querySelectorAll('track[data-wblock-native-subtitle]'));
-    tracks[0].track.mode = 'hidden';
-    tracks[1].track.mode = 'showing';
-    document.querySelector('#movie_player video').dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'routes a second caption language to YouTube after fallback switching', () => {
-    const tracks = Array.from(document.querySelectorAll('track[data-wblock-native-subtitle]'));
     return {
-      pass: tracks[0]?.getAttribute('data-wblock-subtitle-renderer') === 'youtube' &&
-        tracks[1]?.getAttribute('data-wblock-subtitle-renderer') === 'youtube' &&
-        window.__youtubeCaptionTrack === 'es' && tracks[0].src === tracks[0]._wblockNativeSubtitleControlURL,
-      detail: `renderers=${tracks.map(t => t.getAttribute('data-wblock-subtitle-renderer')).join(',')} language=${window.__youtubeCaptionTrack}`,
+      pass: mode === 'showing' && window.__youtubeSubtitlesOn === false && window.__subtitleClicks === 0,
+      detail: `nativeMode=${mode} youtubeOn=${window.__youtubeSubtitlesOn} clicks=${window.__subtitleClicks}`,
     };
-  });
-  await page.evaluate(() => {
-    const player = document.getElementById('movie_player');
-    if (player.__originalSetOption) player.setOption = player.__originalSetOption;
   });
   await page.waitForFunction(() => document.querySelector('#watch-metadata h1 yt-formatted-string')?.textContent === 'Accurate Watch Title' &&
     document.querySelector('ytd-compact-video-renderer #video-title')?.textContent === 'Accurate Related Title');
