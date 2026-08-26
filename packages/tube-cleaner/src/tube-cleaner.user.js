@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.9
+// @version      0.1.10
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -28,6 +28,18 @@
 
 (function () {
     'use strict';
+
+    // Embed iframes are a poster and YouTube's own play button in a box the
+    // host page sizes. Nativeizing them hides that chrome and leaves a blank
+    // frame, so leave youtube.com/embed and youtube-nocookie alone.
+    try {
+        var embedHost = location.hostname || '';
+        var embedPath = location.pathname || '';
+        var isNocookie = /(^|\.)youtube-nocookie\.com$/i.test(embedHost);
+        var isEmbedPath = /^\/(?:embed|live_embed)(?:\/|$)/.test(embedPath) ||
+            /^\/shorts\/[^/]+\/embed(?:\/|$)/.test(embedPath);
+        if (isNocookie || isEmbedPath) { return; }
+    } catch (e) { /* continue on a regular watch page */ }
 
     // ------------------------------------------------------------------
     // Tube Cleaner v4.5.0

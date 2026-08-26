@@ -47,6 +47,7 @@ const FIXTURE_PLAYER_PBS_HOST = join(__dirname, 'fixture-player-cleaner-pbs-host
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
 const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
 const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
+const FIXTURE_PLAYER_YOUTUBE_EMBED = join(__dirname, 'fixture-player-cleaner-youtube-embed.html');
 
 const userscript = readFileSync(SCRIPT_PATH, 'utf8');
 const playerUserscript = readFileSync(PLAYER_SCRIPT_PATH, 'utf8');
@@ -2656,6 +2657,34 @@ async function qualityUISelectionCheck(page, scenario) {
   await browser.close();
 }
 
+// ---- Scenario: Player Cleaner must not blank YouTube embed iframes ---------
+// A recognized custom player that also hosts a YouTube embed must not hide
+// that iframe or the wrapper around it. That is the blank-embed failure mode.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (YouTube embed)', {
+    fixture: pathToFileURL(FIXTURE_PLAYER_YOUTUBE_EMBED).href,
+    scriptSource: playerUserscript,
+    readySignal: '[data-wblock-player-cleaner]',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-youtube-embed';
+
+  await check(page, S, 'leaves the YouTube embed iframe visible', () => {
+    const iframe = document.getElementById('yt-embed');
+    const wrap = document.getElementById('yt-embed-wrap');
+    if (!iframe || !wrap) return { pass: false, detail: 'missing embed' };
+    const iframeStyle = getComputedStyle(iframe);
+    const wrapStyle = getComputedStyle(wrap);
+    const hidden = iframe.hasAttribute('data-wblock-pc-hidden') ||
+      wrap.hasAttribute('data-wblock-pc-hidden') ||
+      iframeStyle.display === 'none' || wrapStyle.display === 'none';
+    return { pass: !hidden, detail: `iframe=${iframeStyle.display} wrap=${wrapStyle.display} marked=${iframe.getAttribute('data-wblock-pc-hidden')}/${wrap.getAttribute('data-wblock-pc-hidden')}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario: Player Cleaner unknown player (generic chrome hiding) --------
 // A player whose wrapper class is NOT in Player Cleaner's known-library list.
 // The container has position:relative, so the generic chrome hider treats it
@@ -3269,9 +3298,8 @@ for (const config of [
 }
 
 // ---- Scenario: Tube Cleaner YouTube embed iframe injection -----------------
-// Vinegar-style nativeization has to reach youtube.com/embed and
-// youtube-nocookie.com/embed frames. @noframes skipped those, so the README
-// embed demos never got Safari controls.
+// Embed frames are a poster + YouTube play button. Nativeizing them hides
+// that chrome and leaves a blank box, so Tube Cleaner must stay out.
 {
   console.log('\n=== Scenario: Tube Cleaner YouTube embed iframe ===');
   const S = 'tube-cleaner-embed-iframe';
@@ -3333,18 +3361,22 @@ for (const config of [
   if (!embedFrame) {
     record(S, 'found the YouTube embed frame', false, 'no youtube-nocookie frame');
   } else {
-    await embedFrame.waitForSelector('.wblock-tc-toolbar', { timeout: 10000 }).catch(() => {});
-    const native = await embedFrame.evaluate(() => {
+    await embedFrame.waitForTimeout(400);
+    const leftAlone = await embedFrame.evaluate(() => {
       const player = document.getElementById('movie_player');
-      const video = player && player.querySelector('video');
+      const play = player && player.querySelector('.ytp-large-play-button, .ytp-chrome-bottom');
+      const playStyle = play ? getComputedStyle(play) : null;
       return {
+        player: !!player,
         native: !!(player && player.classList.contains('wblock-tc-native')),
-        controls: !!(video && video.controls),
         toolbar: !!document.querySelector('.wblock-tc-toolbar'),
+        style: !!document.getElementById('wblock-tc-style'),
+        chromeVisible: !!(play && playStyle && playStyle.display !== 'none'),
       };
     });
-    record(S, 'nativeizes a youtube-nocookie embed iframe', !!(native.native && native.controls && native.toolbar),
-      `native=${native.native} controls=${native.controls} toolbar=${native.toolbar}`);
+    record(S, 'leaves a youtube-nocookie embed iframe to YouTube',
+      !!(leftAlone.player && !leftAlone.native && !leftAlone.toolbar && !leftAlone.style && leftAlone.chromeVisible),
+      `player=${leftAlone.player} native=${leftAlone.native} toolbar=${leftAlone.toolbar} style=${leftAlone.style} chrome=${leftAlone.chromeVisible}`);
   }
   const unexpected = pageErrors.filter(message => !/getOption is not a function/.test(message));
   record(S, 'no unexpected page errors', unexpected.length === 0, unexpected.join(' | '));

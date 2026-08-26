@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.25
+// @version      0.1.26
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1219,9 +1219,45 @@
         } catch (e) { /* ignore */ }
     }
 
+    function isYouTubeEmbedIframe(el) {
+        if (!el || el.tagName !== 'IFRAME') { return false; }
+        var src = '';
+        try { src = el.currentSrc || el.src || el.getAttribute('src') || ''; }
+        catch (e) { src = ''; }
+        if (!src) { return false; }
+        try {
+            var url = new URL(src, document.baseURI);
+            var host = String(url.hostname || '').toLowerCase();
+            var path = url.pathname || '';
+            var youtubeHost = host === 'youtu.be' ||
+                host === 'youtube.com' || host.slice(-12) === '.youtube.com' ||
+                host === 'youtube-nocookie.com' || host.slice(-22) === '.youtube-nocookie.com';
+            if (!youtubeHost) { return false; }
+            if (host === 'youtu.be') { return true; }
+            return /^\/(?:embed|live_embed)(?:\/|$)/.test(path) ||
+                /^\/shorts\/[^/]+\/embed(?:\/|$)/.test(path);
+        } catch (e) {
+            return /youtube(?:-nocookie)?\.com\/(?:embed|live_embed)\//i.test(src) ||
+                /youtu\.be\//i.test(src);
+        }
+    }
+
+    function hostsYouTubeEmbed(el) {
+        if (isYouTubeEmbedIframe(el)) { return true; }
+        if (!el || !el.querySelectorAll) { return false; }
+        try {
+            var iframes = el.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+                if (isYouTubeEmbedIframe(iframes[i])) { return true; }
+            }
+        } catch (e) { /* ignore */ }
+        return false;
+    }
+
     function hideElement(el) {
         if (!el || el === document.documentElement || el === document.body) return;
         if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK') return;
+        if (hostsYouTubeEmbed(el)) return;
         try {
             ensureHideStyle();
             el.setAttribute(HIDDEN_ATTR, '1');
@@ -2263,6 +2299,10 @@
 
     function cleanPlayer(container, video, src) {
         if (video._wblockCleaned) { return; }
+        if (hostsYouTubeEmbed(container)) {
+            log('preserving YouTube embed iframe; skipping structural cleanup');
+            return;
+        }
         // A blob: src means the page attached a MediaSource / MSE pipeline it
         // owns and is actively feeding (cnn / ms.now, iOS and desktop).
         // Emptying the wrapper or overwriting src wedges that pipeline and

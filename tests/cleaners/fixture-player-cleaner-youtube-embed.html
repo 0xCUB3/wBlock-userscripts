@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube embed next to a custom player (Player Cleaner test)</title>
+<style>
+  body { margin: 0; background: #111; }
+  .video-js {
+    position: relative;
+    width: 640px;
+    height: 360px;
+    margin: 24px;
+    background: #000;
+  }
+  .video-js video { display: block; width: 640px; height: 360px; background: #222; }
+  .vjs-control-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 40px;
+    background: rgba(0,0,0,.7);
+  }
+  .yt-embed-wrap {
+    position: absolute; inset: 0; z-index: 2;
+  }
+  .yt-embed-wrap iframe {
+    width: 640px; height: 360px; border: 0; display: block; background: #000;
+  }
+</style>
+</head>
+<body>
+  <div class="video-js" id="mixed-player">
+    <video id="site-video" src="https://example.com/media/movie.mp4"></video>
+    <div class="vjs-control-bar">custom chrome</div>
+    <div class="yt-embed-wrap" id="yt-embed-wrap">
+      <iframe id="yt-embed" src="https://www.youtube.com/embed/aqz-KE-bpKQ" title="YouTube embed" allow="autoplay; encrypted-media"></iframe>
+    </div>
+  </div>
+</body>
+</html>
