@@ -2298,6 +2298,62 @@ async function qualityUISelectionCheck(page, scenario) {
     };
   });
 
+  await page.evaluate(() => {
+    const host = document.querySelector('shreddit-player');
+    const video = host.shadowRoot.querySelector('video');
+    video._wblockInNativeFullscreen = true;
+    try {
+      video.dispatchEvent(new Event('webkitbeginfullscreen', { bubbles: true, composed: true }));
+    } catch (e) { /* WebKit may reject untrusted fullscreen events */ }
+    window.__redditHostPark = { parent: host.parentNode, next: host.nextSibling, host };
+    host.remove();
+  });
+  await page.waitForTimeout(80);
+  await page.evaluate(() => {
+    const { parent, next, host } = window.__redditHostPark;
+    parent.insertBefore(host, next || null);
+    const video = host.shadowRoot.querySelector('video');
+    const root = host.shadowRoot;
+    const old = root.querySelector('shreddit-media-ui');
+    const nextUi = old.cloneNode(true);
+    old.remove();
+    root.appendChild(nextUi);
+    video._wblockInNativeFullscreen = false;
+    try {
+      video.dispatchEvent(new Event('webkitendfullscreen', { bubbles: true, composed: true }));
+    } catch (e) { /* WebKit may reject untrusted fullscreen events */ }
+  });
+
+  await check(page, S, 'keeps nativeize through iOS fullscreen detach', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    return {
+      pass: !!(video && video.controls && video.getAttribute('data-wblock-player-cleaner') === '1'),
+      detail: video ? `controls=${video.controls} done=${video.getAttribute('data-wblock-player-cleaner')}` : 'no video'
+    };
+  });
+
+  await check(page, S, 're-hides Reddit chrome after fullscreen exit', () => {
+    const host = document.querySelector('shreddit-player');
+    const ui = host && host.shadowRoot && host.shadowRoot.querySelector('shreddit-media-ui');
+    const uiHidden = !!(ui && (ui.hasAttribute('data-wblock-pc-hidden') ||
+      getComputedStyle(ui).display === 'none'));
+    return { pass: uiHidden, detail: ui ? `hidden=${uiHidden}` : 'no ui' };
+  });
+
+  await check(page, S, 'touchend still does not toggle after fullscreen', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    window.__redditToggleCount = 0;
+    const paused = video.paused;
+    video.dispatchEvent(new Event('touchend', { bubbles: true, cancelable: true, composed: true }));
+    return {
+      pass: window.__redditToggleCount === 0 && video.paused === paused,
+      detail: `toggles=${window.__redditToggleCount} paused=${video.paused}`
+    };
+  });
+
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }

@@ -74,6 +74,8 @@ Player Cleaner scenarios:
   `parentElement` is null and a light-DOM descendant sweep never sees the overlay.
   Native controls must engage and the Reddit bar must hide, including after a remount.
   A host tap-anywhere toggle must not see click, pointerup, or touchend from the video.
+  iOS native fullscreen detaches the media element; the tap-guard and Reddit hide
+  must survive that detach and re-apply on `webkitendfullscreen`.
 - `fixture-player-cleaner-bare.html` — modern/custom players whose wrapper is
   not a recognized library class (Mux-style or bespoke). Verifies the bare-video
   fallback: a controls-less `<video>` in an unknown wrapper is enhanced in place

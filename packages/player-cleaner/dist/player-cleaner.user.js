@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.28
+// @version      0.1.29
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1539,6 +1539,22 @@
         } catch (e) { return false; }
     }
 
+    function isTemporarilyFullscreen(video) {
+        if (!video) { return false; }
+        if (video._wblockInNativeFullscreen) { return true; }
+        try {
+            if (video.webkitDisplayingFullscreen) { return true; }
+        } catch (e) { /* ignore */ }
+        try {
+            if (document.fullscreenElement === video || document.webkitFullscreenElement === video) {
+                return true;
+            }
+        } catch (e) { /* ignore */ }
+        return false;
+    }
+
+
+
     // iOS WebKit can drop an MSE decoder if we mutate playsinline or rebuild
     // the wrapper after the first playing event. Keep the existing media
     // element and only expose native controls + hide site chrome.
@@ -2147,6 +2163,20 @@
                 timers.push(timer);
             });
         }
+        function markNativeFullscreen() {
+            video._wblockInNativeFullscreen = true;
+        }
+        function reassertAfterFullscreen() {
+            video._wblockInNativeFullscreen = false;
+            if (!active) { return; }
+            if (!video.isConnected) { return; }
+            var container = containerForVideo(video);
+            if (container) { suppressChrome(container, video); }
+            kickDeferred();
+            blockCompetingClicks(video);
+            try { forceNativeControls(video); } catch (e) { /* ignore */ }
+            guardNativeControls(video);
+        }
         try {
             video.addEventListener('play', kickDeferred);
             video.addEventListener('pause', kickDeferred);
@@ -2155,7 +2185,12 @@
             video.addEventListener('loadeddata', kick);
             video.addEventListener('mouseenter', kickOnHover);
             video.addEventListener('mousemove', kickOnHover);
+            video.addEventListener('webkitbeginfullscreen', markNativeFullscreen);
+            video.addEventListener('webkitendfullscreen', reassertAfterFullscreen);
+            video.addEventListener('webkitpresentationmodechanged', reassertAfterFullscreen);
             window.addEventListener('resize', kickDeferred);
+            document.addEventListener('fullscreenchange', reassertAfterFullscreen);
+            document.addEventListener('webkitfullscreenchange', reassertAfterFullscreen);
         } catch (e) { /* ignore */ }
         registerVideoCleanup(video, function () {
             active = false;
@@ -2167,7 +2202,12 @@
                 video.removeEventListener('loadeddata', kick);
                 video.removeEventListener('mouseenter', kickOnHover);
                 video.removeEventListener('mousemove', kickOnHover);
+                video.removeEventListener('webkitbeginfullscreen', markNativeFullscreen);
+                video.removeEventListener('webkitendfullscreen', reassertAfterFullscreen);
+                video.removeEventListener('webkitpresentationmodechanged', reassertAfterFullscreen);
                 window.removeEventListener('resize', kickDeferred);
+                document.removeEventListener('fullscreenchange', reassertAfterFullscreen);
+                document.removeEventListener('webkitfullscreenchange', reassertAfterFullscreen);
             } catch (e) { /* ignore */ }
             clearTimers();
             video._wblockChromeWatch = false;
@@ -2728,8 +2768,14 @@
             if (root === document || !root.host || root.host.isConnected) { continue; }
             var videos = [];
             collectVideos(root, videos);
-            for (var v = 0; v < videos.length; v++) { releaseVideoResources(videos[v]); }
-            disconnectTreeRoot(root);
+            var keep = false;
+            for (var v = 0; v < videos.length; v++) {
+                if (isTemporarilyFullscreen(videos[v])) { keep = true; continue; }
+                releaseVideoResources(videos[v]);
+            }
+            // iOS native fullscreen detaches shreddit-player. Dropping the
+            // shadow observer there is what lets Reddit's tap-toggle return.
+            if (!keep) { disconnectTreeRoot(root); }
         }
     }
 
@@ -2806,7 +2852,10 @@
         }
         for (var e = enhancedVideos.length - 1; e >= 0; e--) {
             var ev = enhancedVideos[e];
-            if (!ev.isConnected) { enhancedVideos.splice(e, 1); continue; }
+            if (!ev.isConnected) {
+                if (!isTemporarilyFullscreen(ev)) { enhancedVideos.splice(e, 1); }
+                continue;
+            }
             var shell = playerShell(ev);
             var touched = false;
             for (var mi = 0; mi < records.length && !touched; mi++) {
@@ -2830,8 +2879,10 @@
         }
         // DOM moves report a removal and addition in the same batch. Release
         // resources only for videos that remain detached after processing.
+        // iOS native fullscreen detaches <video> for the system player; wiping
+        // the tap-guard there is why Reddit's toggle comes back after expand.
         for (var d = 0; d < detachedVideos.length; d++) {
-            if (!detachedVideos[d].isConnected) {
+            if (!detachedVideos[d].isConnected && !isTemporarilyFullscreen(detachedVideos[d])) {
                 releaseVideoResources(detachedVideos[d]);
             }
         }
@@ -2888,6 +2939,26 @@
         // then share the same pre-paint mutation/source lifecycle.
         patchAttachShadow();
         observeTreeRoot(document);
+        // iOS fires these on the video before detaching it into the system
+        // player. Mark first so a childList removal in the same turn does not
+        // wipe the tap-guard.
+        document.addEventListener('webkitbeginfullscreen', function (e) {
+            var t = e.target;
+            if (t && t.tagName === 'VIDEO') { t._wblockInNativeFullscreen = true; }
+        }, true);
+        document.addEventListener('webkitendfullscreen', function (e) {
+            var t = e.target;
+            if (!t || t.tagName !== 'VIDEO') { return; }
+            t._wblockInNativeFullscreen = false;
+            if (!t.isConnected) { return; }
+            var c = containerForVideo(t);
+            if (c) { suppressChrome(c, t); }
+            hideOverlappingChrome(t);
+            hideStackedChrome(t);
+            blockCompetingClicks(t);
+            try { forceNativeControls(t); } catch (err) { /* ignore */ }
+            guardNativeControls(t);
+        }, true);
     }
 
     // After all stylesheets have loaded, re-run chrome hiding for enhanced
