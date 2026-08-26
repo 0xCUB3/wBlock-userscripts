@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.8
+// @version      0.1.9
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2223,50 +2223,65 @@
     // ------------------------------------------------------------------
     // Chapters
     //
-    // Safari's <video> element is backed by the same AVFoundation engine
-    // described in Apple's "Presenting chapter markers" documentation. That
-    // native API is not callable from a userscript, but its web equivalent is:
-    // attach a TextTrack of kind "chapters" with VTTCues and WebKit feeds it to
-    // the native player, which exposes the cues through its chapter menu. We
-    // read YouTube's chapter list from ytInitialData and mirror it onto the
-    // native element.
+    // Safari's native chapter picker is filled from a <track kind="chapters">
+    // element, the same way the CC menu is filled from subtitle tracks.
+    // addTextTrack("chapters") creates a JavaScript TextTrack, but WebKit's
+    // AVPlayer chapter menu does not enumerate those in-memory tracks. Read
+    // YouTube's chapter list from ytInitialData / the player response, build a
+    // WebVTT blob, and attach it as a real track element.
     // ------------------------------------------------------------------
 
-    function collectChapterRenderers(node, out, seen) {
+    function collectChapterRenderers(node, out) {
         if (!node || typeof node !== 'object') return;
-        if (seen.indexOf(node) !== -1) return;
-        seen.push(node);
-        if (Array.isArray(node)) {
-            for (var i = 0; i < node.length; i++) {
-                collectChapterRenderers(node[i], out, seen);
-            }
-            return;
-        }
-        if (node.macroMarkersListItemRenderer) {
-            out.push(node.macroMarkersListItemRenderer);
-        }
-        if (node.chapterRenderer) {
-            out.push(node.chapterRenderer);
-        }
-        var markersList = node.markersList;
-        var markerType = markersList && String(markersList.markerType || '');
-        if (markersList && markersList.markers &&
-            /CHAPTER|TIMESTAMP/i.test(markerType) && !/HEATMAP/i.test(markerType)) {
-            var entityId = node.externalVideoId || '';
-            var currentId = currentChapterVideoId();
-            var idMismatch = entityId && currentId &&
-                /^[A-Za-z0-9_-]{11}$/.test(currentId) && entityId !== currentId;
-            if (!idMismatch) {
-                var markers = markersList.markers;
-                for (var m = 0; m < markers.length; m++) {
-                    if (markers[m]) { out.push(markers[m]); }
+        var seen = typeof WeakSet === 'function' ? new WeakSet() : [];
+        var stack = [node];
+        while (stack.length) {
+            var current = stack.pop();
+            if (!current || typeof current !== 'object') continue;
+            try {
+                if (typeof WeakSet === 'function' && seen.add) {
+                    if (seen.has(current)) continue;
+                    seen.add(current);
+                } else if (seen.indexOf(current) !== -1) {
+                    continue;
+                } else {
+                    seen.push(current);
                 }
+            } catch (e) { continue; }
+            if (Array.isArray(current)) {
+                for (var i = 0; i < current.length; i++) stack.push(current[i]);
+                continue;
             }
-        }
-        for (var key in node) {
-            if (Object.prototype.hasOwnProperty.call(node, key)) {
-                collectChapterRenderers(node[key], out, seen);
-            }
+            try {
+                if (current.macroMarkersListItemRenderer) out.push(current.macroMarkersListItemRenderer);
+            } catch (e) { /* ignore a poisoned getter */ }
+            try {
+                if (current.chapterRenderer) out.push(current.chapterRenderer);
+            } catch (e) { /* ignore a poisoned getter */ }
+            try {
+                var markersList = current.markersList;
+                var markerType = markersList && String(markersList.markerType || '');
+                if (markersList && markersList.markers &&
+                    /CHAPTER|TIMESTAMP/i.test(markerType) && !/HEATMAP/i.test(markerType)) {
+                    var entityId = current.externalVideoId || '';
+                    var currentId = currentChapterVideoId();
+                    var idMismatch = entityId && currentId &&
+                        /^[A-Za-z0-9_-]{11}$/.test(currentId) && entityId !== currentId;
+                    if (!idMismatch) {
+                        var markers = markersList.markers;
+                        for (var m = 0; m < markers.length; m++) {
+                            if (markers[m]) { out.push(markers[m]); }
+                        }
+                    }
+                }
+            } catch (e) { /* ignore a poisoned getter */ }
+            try {
+                for (var key in current) {
+                    if (Object.prototype.hasOwnProperty.call(current, key)) {
+                        try { stack.push(current[key]); } catch (ignored) { /* skip throwing property */ }
+                    }
+                }
+            } catch (e) { /* ignore */ }
         }
     }
 
@@ -2337,7 +2352,7 @@
         data = data || chapterDataSource();
         if (!data) return null;
         var renderers = [];
-        try { collectChapterRenderers(data, renderers, []); } catch (e) { return null; }
+        try { collectChapterRenderers(data, renderers); } catch (e) { return null; }
         if (!renderers.length) return null;
 
         var chapters = [];
@@ -2359,8 +2374,8 @@
             if (title && start !== null && start >= 0) {
                 // YouTube mirrors the same chapter list in several places in
                 // ytInitialData (the engagement panel, the player overlay, and
-                // framework/entity updates). The recursive walk therefore finds
-                // each chapter more than once; collapse exact duplicates.
+                // framework/entity updates). The walk therefore finds each
+                // chapter more than once; collapse exact duplicates.
                 var key = start + '|' + title;
                 if (seenKeys[key]) continue;
                 seenKeys[key] = true;
@@ -2383,16 +2398,129 @@
             location.pathname + location.search;
     }
 
-    function clearChapterCues(track) {
-        if (!track) return;
+    function formatVttTimestamp(sec) {
+        if (!isFinite(sec) || sec < 0) sec = 0;
+        var msTotal = Math.round(sec * 1000);
+        var hours = Math.floor(msTotal / 3600000);
+        msTotal -= hours * 3600000;
+        var minutes = Math.floor(msTotal / 60000);
+        msTotal -= minutes * 60000;
+        var seconds = Math.floor(msTotal / 1000);
+        var millis = msTotal - seconds * 1000;
+        function pad(n, width) {
+            var s = String(n);
+            while (s.length < width) s = '0' + s;
+            return s;
+        }
+        return pad(hours, 2) + ':' + pad(minutes, 2) + ':' + pad(seconds, 2) + '.' + pad(millis, 3);
+    }
+
+    function vttCueText(text) {
+        return String(text || '').replace(/[\r\n]+/g, ' ').replace(/-->/g, '->');
+    }
+
+    function chaptersToWebVtt(chapters, duration) {
+        var lines = ['WEBVTT', ''];
+        var added = 0;
+        for (var i = 0; i < chapters.length; i++) {
+            var start = chapters[i].start;
+            var end;
+            if (i + 1 < chapters.length) {
+                end = chapters[i + 1].start;
+            } else {
+                // Last chapter runs to the end of the media. Before metadata is
+                // loaded, use a one-second placeholder so the cue is still valid.
+                end = duration !== null ? duration : start + 1;
+            }
+            if (duration !== null && start >= duration) continue;
+            if (duration !== null) end = Math.min(end, duration);
+            if (!(end > start)) continue;
+            // The native chapter menu renders the cue text verbatim, so
+            // prefix the title with its timestamp for an at-a-glance list.
+            var label = formatTimestamp(start) + '  ' + vttCueText(chapters[i].title);
+            lines.push(formatVttTimestamp(start) + ' --> ' + formatVttTimestamp(end));
+            lines.push(label);
+            lines.push('');
+            added++;
+        }
+        return { vtt: lines.join('\n'), added: added };
+    }
+
+    function hideChapterTrack(element) {
         try {
-            while (track.cues && track.cues.length) { track.removeCue(track.cues[0]); }
+            if (element && element.track) element.track.mode = 'hidden';
         } catch (e) { /* ignore */ }
     }
 
-    function clearChapterTrack(track) {
-        clearChapterCues(track);
-        try { track.mode = 'hidden'; } catch (e) { /* ignore */ }
+    function removeChapterTrack(video) {
+        if (!video) return;
+        var element = video._wblockChaptersElement;
+        if (element) {
+            if (element._wblockRevokeUrl) {
+                try { URL.revokeObjectURL(element._wblockRevokeUrl); } catch (e) { /* ignore */ }
+                element._wblockRevokeUrl = null;
+            }
+            if (element.parentNode) {
+                try { element.remove(); } catch (e) { /* ignore */ }
+            }
+        }
+        if (video._wblockChaptersBlobUrl) {
+            try { URL.revokeObjectURL(video._wblockChaptersBlobUrl); } catch (e) { /* ignore */ }
+        }
+        video._wblockChaptersElement = null;
+        video._wblockChaptersBlobUrl = null;
+        video._wblockChaptersTrack = null;
+        video._wblockChapterApplyKey = null;
+        video._wblockChapterDuration = null;
+    }
+
+    function hideAndRevokeChapterTrack(element) {
+        hideChapterTrack(element);
+        var stale = element && element._wblockRevokeUrl;
+        if (element) element._wblockRevokeUrl = null;
+        if (stale) {
+            try { URL.revokeObjectURL(stale); } catch (e) { /* ignore */ }
+        }
+    }
+
+    function installChapterTrack(video, vtt) {
+        if (!window.Blob || !URL.createObjectURL) {
+            warn('chapter track blobs unavailable');
+            return false;
+        }
+        var blobUrl;
+        try {
+            blobUrl = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+        } catch (e) {
+            warn('chapter blob URL failed', e);
+            return false;
+        }
+        var element = video._wblockChaptersElement;
+        var previousUrl = video._wblockChaptersBlobUrl;
+        if (!element || !element.isConnected) {
+            element = document.createElement('track');
+            element.kind = 'chapters';
+            element.label = 'Chapters';
+            element.srclang = 'en';
+            element.default = true;
+            element.setAttribute('data-wblock-native-chapters', '1');
+            element.addEventListener('load', function () { hideAndRevokeChapterTrack(element); });
+            try {
+                video.appendChild(element);
+            } catch (e) {
+                try { URL.revokeObjectURL(blobUrl); } catch (ignored) { /* ignore */ }
+                warn('chapter track attach failed', e);
+                return false;
+            }
+            video._wblockChaptersElement = element;
+        } else if (previousUrl) {
+            element._wblockRevokeUrl = previousUrl;
+        }
+        element.src = blobUrl;
+        hideChapterTrack(element);
+        video._wblockChaptersBlobUrl = blobUrl;
+        video._wblockChaptersTrack = element.track;
+        return true;
     }
 
     // Mirror YouTube's chapters onto the native element as a chapters track.
@@ -2402,7 +2530,6 @@
     // temporarily empty; only clear them when the current video id changes.
     function applyChapters(video) {
         if (!video) return false;
-        var track = video._wblockChaptersTrack;
         var videoId = currentChapterVideoId();
         var source = chapterDataSource();
         var chapters = extractChapters(source);
@@ -2423,8 +2550,9 @@
         } else if (video._wblockChapterVideoId === videoId &&
             video._wblockChapterData && video._wblockChapterData.length) {
             chapters = video._wblockChapterData;
+            fingerprint = video._wblockChapterFingerprint || JSON.stringify(chapters);
         } else {
-            clearChapterTrack(track);
+            removeChapterTrack(video);
             video._wblockChapterData = null;
             video._wblockChapterVideoId = videoId;
             video._wblockChapterDataSource = source;
@@ -2436,44 +2564,24 @@
             return false;
         }
 
-        if (!track) {
-            try {
-                track = video.addTextTrack('chapters', 'Chapters', 'en');
-            } catch (e) {
-                warn('addTextTrack(chapters) failed', e);
-                return false;
-            }
-            video._wblockChaptersTrack = track;
-        } else {
-            clearChapterCues(track);
+        var duration = (isFinite(video.duration) && video.duration > 0) ? video.duration : null;
+        var applyKey = fingerprint + '|' + (duration === null ? '' : String(duration));
+        if (video._wblockChaptersElement && video._wblockChaptersElement.isConnected &&
+            video._wblockChapterApplyKey === applyKey) {
+            hideChapterTrack(video._wblockChaptersElement);
+            return true;
         }
 
-        var duration = (isFinite(video.duration) && video.duration > 0) ? video.duration : null;
-        var added = 0;
-        for (var i = 0; i < chapters.length; i++) {
-            var start = chapters[i].start;
-            var end;
-            if (i + 1 < chapters.length) {
-                end = chapters[i + 1].start;
-            } else {
-                // Last chapter runs to the end of the media. Before metadata is
-                // loaded, defer finalization to the next media event.
-                end = duration !== null ? duration : start + 1;
-            }
-            if (duration !== null && start >= duration) continue;
-            if (duration !== null) end = Math.min(end, duration);
-            if (!(end > start)) continue;
-            // The native chapter menu renders the cue text verbatim, so
-            // prefix the title with its timestamp for an at-a-glance list.
-            var label = formatTimestamp(start) + '  ' + chapters[i].title;
-            try {
-                track.addCue(new VTTCue(start, end, label));
-                added++;
-            } catch (e) { /* ignore a single bad cue */ }
+        var built = chaptersToWebVtt(chapters, duration);
+        if (!built.added) {
+            removeChapterTrack(video);
+            return false;
         }
-        try { track.mode = 'hidden'; } catch (e) { /* ignore */ }
-        log('applied', added, 'chapters');
-        return added > 0;
+        if (!installChapterTrack(video, built.vtt)) return false;
+        video._wblockChapterApplyKey = applyKey;
+        video._wblockChapterDuration = duration;
+        log('applied', built.added, 'chapters');
+        return true;
     }
 
     function setupChapters(player, video) {
@@ -2516,6 +2624,7 @@
             document.removeEventListener('yt-page-data-updated', onYouTubeData, true);
             document.removeEventListener('yt-navigate-finish', onYouTubeData, true);
             stopRetry();
+            removeChapterTrack(video);
         });
     }
 
