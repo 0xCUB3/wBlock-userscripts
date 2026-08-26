@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.7
+// @version      0.1.8
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -494,9 +494,10 @@
         '{ color-scheme: dark; -webkit-appearance: none; appearance: none; }',
         '.wblock-tc-quality-menu button',
         '{ background: transparent !important; }',
-        '.wblock-tc-quality-menu button:hover,',
-        '.wblock-tc-quality-menu button:focus',
+        '.wblock-tc-quality-menu button:hover',
         '{ background: rgba(255,255,255,0.15) !important; }',
+        '.wblock-tc-quality-menu button:focus',
+        '{ outline: none; }',
     ].join(' ');
 
     // On mobile YouTube, html5-video-container is the positioned box that
