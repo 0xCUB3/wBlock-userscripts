@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.6
+// @version      0.1.7
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -486,6 +486,17 @@
         // Prevent iOS double-tap zoom on toolbar buttons.
         '.wblock-tc-toolbar button, .wblock-tc-toolbar div',
         '{ touch-action: manipulation !important; }',
+
+        // Safari paints native <button> chrome light gray on hover. Keep the
+        // quality ladder on the dark menu instead of the system control look.
+        '.wblock-tc-quality-menu,',
+        '.wblock-tc-quality-menu button',
+        '{ color-scheme: dark; -webkit-appearance: none; appearance: none; }',
+        '.wblock-tc-quality-menu button',
+        '{ background: transparent !important; }',
+        '.wblock-tc-quality-menu button:hover,',
+        '.wblock-tc-quality-menu button:focus',
+        '{ background: rgba(255,255,255,0.15) !important; }',
     ].join(' ');
 
     // On mobile YouTube, html5-video-container is the positioned box that
@@ -3420,8 +3431,6 @@
                 updateQualityBtn();
                 qualityMenu.style.display = 'none';
             });
-            autoItem.addEventListener('mouseenter', function () { this.style.background = 'rgba(255,255,255,0.15)'; });
-            autoItem.addEventListener('mouseleave', function () { this.style.background = ''; });
             qualityMenu.appendChild(autoItem);
 
             // Available quality levels
@@ -3444,8 +3453,6 @@
                         updateQualityBtn();
                         qualityMenu.style.display = 'none';
                     });
-                    item.addEventListener('mouseenter', function () { this.style.background = 'rgba(255,255,255,0.15)'; });
-                    item.addEventListener('mouseleave', function () { this.style.background = ''; });
                     qualityMenu.appendChild(item);
                 })(levels[i]);
             }

@@ -735,6 +735,17 @@ async function desktopPartialQualityLadderCheck(page) {
     const pass = has('Auto') && has('1440p') && has('1080p') && has('720p') && has('480p') && has('360p');
     return { pass, detail: `menu=${labels.join(',')}` };
   });
+  await page.locator('.wblock-tc-quality-menu > button', { hasText: '1080p' }).hover();
+  await check(page, 'desktop', 'keeps hovered quality options on the dark menu', () => {
+    const item = Array.from(document.querySelectorAll('.wblock-tc-quality-menu > button'))
+      .find((button) => button.textContent === '1080p');
+    if (!item) return { pass: false, detail: 'missing 1080p' };
+    const bg = getComputedStyle(item).backgroundColor;
+    const rgb = (bg.match(/[\d.]+/g) || []).map(Number);
+    const alpha = rgb.length >= 4 ? rgb[3] : 1;
+    const luminance = rgb.length >= 3 ? ((0.2126 * rgb[0]) + (0.7152 * rgb[1]) + (0.0722 * rgb[2])) * alpha : 255;
+    return { pass: luminance < 80, detail: `bg=${bg} lum=${luminance.toFixed(1)}` };
+  });
   await page.evaluate(() => {
     const button = document.querySelector('.wblock-tc-quality-button');
     if (button && document.querySelector('.wblock-tc-quality-menu')?.style.display !== 'none') button.click();
