@@ -37,7 +37,7 @@ current-channel exclusions, bounded request reuse across SPA activation, and the
 dedicated SB/DA service row.
 `fixture-tube-cleaner-multiple.html` models retained
 Shorts players and verifies native enhancements follow the visible playing
-video. `fixture-tube-cleaner-early.html` creates the YouTube player from a
+video, with the toolbar kept off the subscribe row and action rail. `fixture-tube-cleaner-early.html` creates the YouTube player from a
 `<head>` script and enforces anti-flash CSS plus nativeization before
 DOMContentLoaded and within one frame of insertion.
 

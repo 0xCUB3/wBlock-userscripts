@@ -3456,6 +3456,55 @@
         if (IS_IOS && menu && menu.parentNode === document.body) { menu.remove(); }
     }
 
+    function shortsToolbarLayout() {
+        return isShortsPath();
+    }
+
+    function toolbarBoxStyle() {
+        var shorts = shortsToolbarLayout();
+        var opacity = IS_IOS ? '1' : '0.75';
+        var font = IS_IOS ? '14px' : '11px';
+        var align = shorts ? 'flex-start' : 'flex-end';
+        var edges;
+        if (shorts) {
+            // Shorts keeps subscribe, title, and the action rail on the
+            // bottom and right. Sit under the top chrome on the left so
+            // quality / SB / DA stay reachable without covering them.
+            var top = IS_IOS ? 'calc(52px + env(safe-area-inset-top, 0px))' : '12px';
+            var left = IS_IOS ? 'max(8px, env(safe-area-inset-left, 0px))' : '8px';
+            edges = 'top:' + top + ';left:' + left + ';right:auto;bottom:auto';
+        } else {
+            var bottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : '42px';
+            var right = IS_IOS ? 'max(8px, env(safe-area-inset-right, 0px))' : '8px';
+            edges = 'bottom:' + bottom + ';right:' + right + ';top:auto;left:auto';
+        }
+        return 'position:absolute;' + edges + ';z-index:2147483646;display:flex;flex-direction:column;gap:6px;align-items:' +
+            align + ';pointer-events:auto;font:' + font + '/1.2 -apple-system,system-ui,sans-serif;opacity:' +
+            opacity + ';transition:opacity 0.15s';
+    }
+
+    function placeDesktopAnchoredMenu(menu, options) {
+        options = options || {};
+        menu.style.position = 'absolute';
+        menu.style.height = 'auto';
+        menu.style.maxHeight = options.maxHeight || '60vh';
+        if (shortsToolbarLayout()) {
+            menu.style.top = '100%';
+            menu.style.bottom = 'auto';
+            menu.style.left = options.downLeft || '0';
+            menu.style.right = options.downRight || 'auto';
+            menu.style.marginTop = options.gap || '4px';
+            menu.style.marginBottom = '0';
+            return;
+        }
+        menu.style.top = 'auto';
+        menu.style.bottom = '100%';
+        menu.style.left = options.upLeft || 'auto';
+        menu.style.right = options.upRight || '0';
+        menu.style.marginTop = '0';
+        menu.style.marginBottom = options.gap || '4px';
+    }
+
     function buildToolbar(player, video) {
         var existing = player.querySelector('.wblock-tc-toolbar');
         if (existing) {
@@ -3465,15 +3514,12 @@
 
         var toolbar = document.createElement('div');
         toolbar.className = 'wblock-tc-toolbar';
-        // Position at bottom-right above Safari's native controls. The mobile
-        // toolbar auto-hides and reappears on a tap to the video surface (see
-        // the auto-hide wiring below); it only needs to stay out of the native
-        // control strip at the very bottom.
-        var toolbarBottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : '42px';
-        var toolbarRight = IS_IOS ? 'max(8px, env(safe-area-inset-right, 0px))' : '8px';
-        var toolbarOpacity = IS_IOS ? '1' : '0.75';
-        var toolbarFont = IS_IOS ? '14px' : '11px';
-        toolbar.style.cssText = 'position:absolute;bottom:' + toolbarBottom + ';right:' + toolbarRight + ';z-index:2147483646;display:flex;flex-direction:column;gap:6px;align-items:flex-end;pointer-events:auto;font:' + toolbarFont + '/1.2 -apple-system,system-ui,sans-serif;opacity:' + toolbarOpacity + ';transition:opacity 0.15s';
+        // Watch pages sit above Safari's native control strip at the
+        // bottom-right. Shorts uses the top-left so the same buttons miss
+        // the subscribe row and action rail. The mobile toolbar auto-hides
+        // and reappears on a tap to the video surface.
+        toolbar.setAttribute('data-wblock-tc-placement', shortsToolbarLayout() ? 'shorts' : 'watch');
+        toolbar.style.cssText = toolbarBoxStyle();
 
         var btnStyle = 'background:rgba(0,0,0,0.7);color:#fff;border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;-webkit-user-select:none;user-select:none';
         // On iOS, use larger touch targets (minimum 44pt)
@@ -3482,10 +3528,11 @@
         }
         var playbackRow = document.createElement('div');
         playbackRow.className = 'wblock-tc-playback-row';
-        playbackRow.style.cssText = 'display:flex;gap:6px;align-items:center;justify-content:flex-end';
+        var rowJustify = shortsToolbarLayout() ? 'flex-start' : 'flex-end';
+        playbackRow.style.cssText = 'display:flex;gap:6px;align-items:center;justify-content:' + rowJustify;
         var servicesRow = document.createElement('div');
         servicesRow.className = 'wblock-tc-services-row';
-        servicesRow.style.cssText = 'display:flex;gap:6px;align-items:center;justify-content:flex-end';
+        servicesRow.style.cssText = 'display:flex;gap:6px;align-items:center;justify-content:' + rowJustify;
         toolbar.appendChild(playbackRow);
         toolbar.appendChild(servicesRow);
 
@@ -3502,13 +3549,16 @@
         }
         updateQualityBtn();
 
-        // Quality dropdown — opens upward since toolbar is at bottom
+        // Quality dropdown — opens away from the toolbar edge.
         var qualityMenu = document.createElement('div');
         qualityMenu.className = 'wblock-tc-quality-menu';
         var menuFont = IS_IOS ? '16px' : '12px';
         var menuPadding = IS_IOS ? '8px 0' : '4px 0';
         var menuMinWidth = IS_IOS ? '140px' : '100px';
-        qualityMenu.style.cssText = 'position:absolute;bottom:100%;right:0;margin-bottom:4px;box-sizing:border-box;background:rgba(0,0,0,0.92);border-radius:5px;padding:' + menuPadding + ';min-width:' + menuMinWidth + ';max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch;display:none;z-index:70;font:' + menuFont + '/1.8 -apple-system,system-ui,sans-serif';
+        var qualityMenuAnchor = shortsToolbarLayout()
+            ? 'top:100%;left:0;right:auto;margin-top:4px;margin-bottom:0;'
+            : 'bottom:100%;right:0;margin-bottom:4px;';
+        qualityMenu.style.cssText = 'position:absolute;' + qualityMenuAnchor + 'box-sizing:border-box;background:rgba(0,0,0,0.92);border-radius:5px;padding:' + menuPadding + ';min-width:' + menuMinWidth + ';max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch;display:none;z-index:70;font:' + menuFont + '/1.8 -apple-system,system-ui,sans-serif';
 
         function buildQualityMenu() {
             // Clear safely — avoid innerHTML which triggers TrustedHTML CSP
@@ -3583,13 +3633,7 @@
                 if (IS_IOS) {
                     showMobilePageOverlay(qualityMenu, 520);
                 } else {
-                    qualityMenu.style.position = 'absolute';
-                    qualityMenu.style.top = 'auto';
-                    qualityMenu.style.bottom = '100%';
-                    qualityMenu.style.right = '0';
-                    qualityMenu.style.marginBottom = '4px';
-                    qualityMenu.style.height = 'auto';
-                    qualityMenu.style.maxHeight = '60vh';
+                    placeDesktopAnchoredMenu(qualityMenu, { maxHeight: '60vh', gap: '4px' });
                 }
                 qualityMenu.style.display = 'block';
             } else {
@@ -3811,13 +3855,11 @@
                 if (IS_IOS) {
                     showMobilePageOverlay(sponsorMenu, 700);
                 } else {
-                    sponsorMenu.style.position = 'absolute';
-                    sponsorMenu.style.top = 'auto';
-                    sponsorMenu.style.bottom = '100%';
-                    sponsorMenu.style.marginBottom = '6px';
-                    sponsorMenu.style.height = 'auto';
-                    sponsorMenu.style.maxHeight = '65vh';
-                    sponsorMenu.style.right = deArrowWrap ? -(deArrowWrap.offsetWidth + 6) + 'px' : '0';
+                    placeDesktopAnchoredMenu(sponsorMenu, {
+                        maxHeight: '65vh',
+                        gap: '6px',
+                        upRight: deArrowWrap ? -(deArrowWrap.offsetWidth + 6) + 'px' : '0'
+                    });
                 }
                 sponsorMenu.style.display = 'block';
                 sponsorBtn.setAttribute('aria-expanded', 'true');
@@ -3955,6 +3997,7 @@
             if (deArrowMenu.style.display === 'none') {
                 buildDeArrowMenu();
                 if (IS_IOS) { showMobilePageOverlay(deArrowMenu, 520); }
+                else { placeDesktopAnchoredMenu(deArrowMenu, { maxHeight: '65vh', gap: '6px' }); }
                 deArrowMenu.style.display = 'block';
                 deArrowBtn.setAttribute('aria-expanded', 'true');
             } else {

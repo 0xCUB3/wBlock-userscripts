@@ -1596,6 +1596,46 @@ async function qualityUISelectionCheck(page, scenario) {
       !!document.querySelector('#current-short .wblock-tc-quality-button') &&
       !document.querySelector('#previous-short .wblock-tc-toolbar') };
   });
+  await check(page, S, 'keeps the Shorts toolbar off the action rail and subscribe row', () => {
+    const player = document.querySelector('#current-short');
+    const toolbar = player?.querySelector('.wblock-tc-toolbar');
+    if (!player || !toolbar) return { pass: false, detail: 'missing player/toolbar' };
+    const p = player.getBoundingClientRect();
+    const t = toolbar.getBoundingClientRect();
+    const inTop = t.bottom < p.top + p.height * 0.45;
+    const inLeft = t.right < p.left + p.width * 0.55;
+    const awayFromRail = t.right < p.right - 56;
+    return {
+      pass: toolbar.getAttribute('data-wblock-tc-placement') === 'shorts' && inTop && inLeft && awayFromRail,
+      detail: `placement=${toolbar.getAttribute('data-wblock-tc-placement')} top=${(t.top - p.top).toFixed(1)} left=${(t.left - p.left).toFixed(1)} rightGap=${(p.right - t.right).toFixed(1)}`
+    };
+  });
+  await page.evaluate(() => {
+    history.replaceState(null, '', '/watch?v=Shorts12345');
+    document.dispatchEvent(new Event('yt-navigate-finish'));
+  });
+  await check(page, S, 'moves the toolbar back to the watch-page corner off Shorts', () => {
+    const toolbar = document.querySelector('#current-short .wblock-tc-toolbar');
+    if (!toolbar) return { pass: false, detail: 'missing toolbar' };
+    const player = document.querySelector('#current-short');
+    const p = player.getBoundingClientRect();
+    const t = toolbar.getBoundingClientRect();
+    return {
+      pass: toolbar.getAttribute('data-wblock-tc-placement') === 'watch' && t.top > p.top + p.height * 0.45,
+      detail: `placement=${toolbar.getAttribute('data-wblock-tc-placement')} top=${(t.top - p.top).toFixed(1)}`
+    };
+  });
+  await page.evaluate(() => {
+    history.replaceState(null, '', '/shorts/Shorts12345');
+    document.dispatchEvent(new Event('yt-navigate-finish'));
+  });
+  await check(page, S, 'restores Shorts placement after returning from watch', () => {
+    const toolbar = document.querySelector('#current-short .wblock-tc-toolbar');
+    return {
+      pass: toolbar?.getAttribute('data-wblock-tc-placement') === 'shorts',
+      detail: `placement=${toolbar?.getAttribute('data-wblock-tc-placement')}`
+    };
+  });
   const overlaySetup = await page.evaluate(() => {
     const player = document.querySelector('#current-short');
     const host = document.querySelector('#shorts-container');
@@ -1662,7 +1702,7 @@ async function qualityUISelectionCheck(page, scenario) {
     const selected = window.__wblockTubeDebug.getPlayer();
     const video = document.querySelector('#previous-short video');
     return { pass: selected?.id === 'previous-short' && video.controls &&
-      !!document.querySelector('#previous-short .wblock-tc-quality-button') &&
+      document.querySelector('#previous-short .wblock-tc-toolbar')?.getAttribute('data-wblock-tc-placement') === 'shorts' &&
       !document.querySelector('#current-short .wblock-tc-toolbar') &&
       document.querySelector('#previous-reel')?.classList.contains('wblock-tc-short-reel') &&
       !document.querySelector('#current-reel')?.classList.contains('wblock-tc-short-reel') &&
