@@ -819,6 +819,7 @@ async function qualityUISelectionCheck(page, scenario) {
   await commonChecks(page, 'desktop');
   await check(page, 'desktop', 'deduplicates and timestamps native chapter cues', () => {
     const video = document.querySelector('#movie_player video');
+    const elements = Array.from(video?.querySelectorAll('track[data-wblock-native-chapters]') || []);
     const tracks = video ? Array.from(video.textTracks).filter(t => t.kind === 'chapters') : [];
     const cues = tracks[0]?.cues ? Array.from(tracks[0].cues) : [];
     const labels = cues.map(c => c.text);
@@ -828,9 +829,29 @@ async function qualityUISelectionCheck(page, scenario) {
       '3:43  Architecture: Tau AI, Tau agent, and Tau coding'
     ];
     return {
-      pass: tracks.length === 1 && JSON.stringify(labels) === JSON.stringify(expected),
-      detail: `tracks=${tracks.length} labels=${labels.join(' | ')}`,
+      pass: elements.length === 1 && elements[0].kind === 'chapters' && elements[0].default &&
+        /^blob:/.test(elements[0].src) && tracks.length === 1 && JSON.stringify(labels) === JSON.stringify(expected),
+      detail: `elements=${elements.length} kind=${elements[0]?.kind} default=${elements[0]?.default} src=${elements[0]?.src} tracks=${tracks.length} labels=${labels.join(' | ')}`,
     };
+  });
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    video._wblockChapterData = null;
+    video._wblockChapterVideoId = null;
+    video._wblockChapterFingerprint = null;
+    video._wblockChapterApplyKey = null;
+    Object.defineProperty(window.ytInitialData, 'poison', {
+      configurable: true,
+      enumerable: true,
+      get() { throw new Error('ytInitialData poison'); },
+    });
+    window.__wblockTubeDebug.applyChapters();
+  });
+  await check(page, 'desktop', 'keeps chapters when ytInitialData has throwing getters', () => {
+    const video = document.querySelector('#movie_player video');
+    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'chapters');
+    const labels = track?.cues ? Array.from(track.cues).map(c => c.text) : [];
+    return { pass: labels.length === 3, detail: `labels=${labels.join(' | ')}` };
   });
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
@@ -1220,10 +1241,15 @@ async function qualityUISelectionCheck(page, scenario) {
   });
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
-    const track = Array.from(video.textTracks).find(t => t.kind === 'chapters');
-    while (track.cues.length) track.removeCue(track.cues[0]);
+    const element = video.querySelector('track[data-wblock-native-chapters]');
+    if (element) element.remove();
+    video._wblockChaptersElement = null;
+    video._wblockChaptersBlobUrl = null;
+    video._wblockChaptersTrack = null;
     video._wblockChapterData = null;
     video._wblockChapterVideoId = null;
+    video._wblockChapterFingerprint = null;
+    video._wblockChapterApplyKey = null;
     window.ytInitialData = {};
     window.ytInitialPlayerResponse = { videoDetails: { videoId: 'LATECHAP01X' } };
     history.replaceState(null, '', location.pathname + '?v=LATECHAP01X');
