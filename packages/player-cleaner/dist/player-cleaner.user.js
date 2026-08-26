@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.27
+// @version      0.1.28
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1152,19 +1152,25 @@
         } catch (e) { /* ignore */ }
     }
 
-    // The UA services native-control clicks below the JS event layer, but stopping
-    // clicks in capture phase breaks native control buttons in WebKit shadow DOM.
-    // Stopping propagation in bubble phase allows native controls (play, pause,
-    // skip) to handle the click first, while preventing outer custom player shells
-    // (video.js, Vimeo) from receiving the click and double-toggling playback.
+    // The UA services native-control hits below the JS event layer, but stopping
+    // them in capture phase breaks native control buttons in WebKit shadow DOM.
+    // Stopping propagation in bubble phase lets native play/pause/skip run first
+    // while keeping outer shells (video.js, Vimeo, Reddit) from seeing the same
+    // tap and toggling playback again. iOS Reddit listens for touch/pointer on
+    // shreddit-player, so click-only was not enough.
     function blockCompetingClicks(video) {
         if (!video || video._wblockClickGuard) return;
-        function onClick(e) { e.stopPropagation(); }
+        function stopBubble(e) { e.stopPropagation(); }
+        var types = ['click', 'pointerdown', 'pointerup', 'touchstart', 'touchend'];
         try {
-            video.addEventListener('click', onClick);
+            for (var i = 0; i < types.length; i++) {
+                video.addEventListener(types[i], stopBubble);
+            }
             video._wblockClickGuard = true;
             registerVideoCleanup(video, function () {
-                video.removeEventListener('click', onClick);
+                for (var j = 0; j < types.length; j++) {
+                    video.removeEventListener(types[j], stopBubble);
+                }
                 video._wblockClickGuard = false;
             });
         } catch (e) { /* ignore */ }

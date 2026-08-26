@@ -73,6 +73,7 @@ Player Cleaner scenarios:
   `<video>` and `<shreddit-media-ui>` are direct children of the shadow root, so
   `parentElement` is null and a light-DOM descendant sweep never sees the overlay.
   Native controls must engage and the Reddit bar must hide, including after a remount.
+  A host tap-anywhere toggle must not see click, pointerup, or touchend from the video.
 - `fixture-player-cleaner-bare.html` — modern/custom players whose wrapper is
   not a recognized library class (Mux-style or bespoke). Verifies the bare-video
   fallback: a controls-less `<video>` in an unknown wrapper is enhanced in place

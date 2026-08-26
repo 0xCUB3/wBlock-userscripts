@@ -25,6 +25,18 @@
           '  <button type="button">Play</button>',
           '</shreddit-media-ui>'
         ].join('');
+        var host = this;
+        function togglePlayback() {
+          window.__redditToggleCount = (window.__redditToggleCount || 0) + 1;
+          var video = host.shadowRoot && host.shadowRoot.querySelector('video');
+          if (!video) { return; }
+          try { video[video.paused ? 'play' : 'pause'](); } catch (e) {}
+        }
+        // Reddit toggles on any tap in the player. A native play hit then
+        // pauses again unless the video swallows the bubble.
+        host.addEventListener('click', togglePlayback);
+        host.addEventListener('pointerup', togglePlayback);
+        host.addEventListener('touchend', togglePlayback);
       }
     });
     document.documentElement.appendChild(document.createElement('shreddit-player'));

@@ -2224,6 +2224,80 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: uiHidden, detail: ui ? `hidden=${uiHidden}` : 'no ui' };
   });
 
+  await check(page, S, 'video click does not toggle Reddit playback', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    window.__redditToggleCount = 0;
+    const paused = video.paused;
+    video.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+    return {
+      pass: window.__redditToggleCount === 0 && video.paused === paused,
+      detail: `toggles=${window.__redditToggleCount} paused=${video.paused}`
+    };
+  });
+  await check(page, S, 'video pointerup does not toggle Reddit playback', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    window.__redditToggleCount = 0;
+    const paused = video.paused;
+    video.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, composed: true, pointerType: 'touch' }));
+    return {
+      pass: window.__redditToggleCount === 0 && video.paused === paused,
+      detail: `toggles=${window.__redditToggleCount} paused=${video.paused}`
+    };
+  });
+  await check(page, S, 'video touchend does not toggle Reddit playback', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    window.__redditToggleCount = 0;
+    const paused = video.paused;
+    video.dispatchEvent(new Event('touchend', { bubbles: true, cancelable: true, composed: true }));
+    return {
+      pass: window.__redditToggleCount === 0 && video.paused === paused,
+      detail: `toggles=${window.__redditToggleCount} paused=${video.paused}`
+    };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Reddit iPhone)', {
+    device: iphone,
+    hasTouch: true,
+    fixture: FIXTURE_PLAYER_REDDIT_URL,
+    scriptSource: playerUserscript,
+    readySignal: 'shreddit-player',
+  });
+  const S = 'player-cleaner-reddit-iphone';
+
+  await check(page, S, 'nativeizes the iOS shadow video', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    return {
+      pass: !!(video && video.controls && video.hasAttribute('data-wblock-player-cleaner')),
+      detail: video ? `controls=${video.controls} done=${video.getAttribute('data-wblock-player-cleaner')}` : 'no video'
+    };
+  });
+
+  await check(page, S, 'iOS touchend does not toggle Reddit playback', () => {
+    const host = document.querySelector('shreddit-player');
+    const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    window.__redditToggleCount = 0;
+    const paused = video.paused;
+    video.dispatchEvent(new Event('touchend', { bubbles: true, cancelable: true, composed: true }));
+    return {
+      pass: window.__redditToggleCount === 0 && video.paused === paused,
+      detail: `toggles=${window.__redditToggleCount} paused=${video.paused}`
+    };
+  });
+
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
