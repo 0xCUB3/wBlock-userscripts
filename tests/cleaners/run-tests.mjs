@@ -45,6 +45,7 @@ const FIXTURE_PLAYER_ARTDECO_URL = pathToFileURL(join(__dirname, 'fixture-player
 const FIXTURE_PLAYER_ESPN_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-espn.html')).href;
 const FIXTURE_PLAYER_PBS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-pbs.html')).href;
 const FIXTURE_PLAYER_PBS_HOST = join(__dirname, 'fixture-player-cleaner-pbs-host.html');
+const FIXTURE_PLAYER_DISCORD_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-discord.html')).href;
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
 const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
 const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
@@ -4015,6 +4016,62 @@ for (const config of [
     return { pass, detail: video ? 'src=' + src + ' retries=' + (video._wblockIOSNativeRetries || 0) : 'no video' };
   });
 
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: in-chat video + messenger composer (Discord geometry) -----
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Discord composer)', {
+    fixture: FIXTURE_PLAYER_DISCORD_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#chat-video[data-wblock-player-cleaner]',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-discord';
+  await check(page, S, 'enhances the in-chat attachment with native controls', () => {
+    const v = document.getElementById('chat-video');
+    return {
+      pass: !!(v && v.controls && v.hasAttribute('data-wblock-player-cleaner')),
+      detail: v ? `controls=${v.controls} done=${v.getAttribute('data-wblock-player-cleaner')}` : 'no chat video',
+    };
+  });
+  await check(page, S, 'hides custom player overlay chrome', () => {
+    const overlay = document.getElementById('player-overlay');
+    const bar = document.getElementById('player-bar');
+    const hidden = el => el && (getComputedStyle(el).display === 'none' || el.hasAttribute('data-wblock-pc-hidden'));
+    return {
+      pass: !!(hidden(overlay) && hidden(bar)),
+      detail: `overlay=${overlay && getComputedStyle(overlay).display} bar=${bar && getComputedStyle(bar).display}`,
+    };
+  });
+  await check(page, S, 'keeps the overlapping message composer visible', () => {
+    const field = document.getElementById('message-field');
+    const composer = document.getElementById('composer');
+    const visible = el => el && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden';
+    const unmarked = el => el && !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    return {
+      pass: !!(visible(field) && visible(composer) && unmarked(field) && unmarked(composer)),
+      detail: `field=${field && getComputedStyle(field).display}/${getComputedStyle(field).visibility} composer=${composer && getComputedStyle(composer).display}/${getComputedStyle(composer).visibility}`,
+    };
+  });
+  await check(page, S, 'leaves the WebRTC call tile untouched', () => {
+    const v = document.getElementById('call-video');
+    return {
+      pass: !!(v && !v.controls && !v.hasAttribute('data-wblock-player-cleaner') && !v._wblockEnhanced),
+      detail: v ? `controls=${v.controls} done=${v.getAttribute('data-wblock-player-cleaner')} enhanced=${!!v._wblockEnhanced}` : 'no call video',
+    };
+  });
+  await check(page, S, 'keeps the call-side composer visible', () => {
+    const field = document.getElementById('call-message-field');
+    const composer = document.getElementById('call-composer');
+    const visible = el => el && getComputedStyle(el).display !== 'none' && getComputedStyle(el).visibility !== 'hidden';
+    const unmarked = el => el && !el.hasAttribute('data-wblock-pc-hidden') && !el.closest('[data-wblock-pc-hidden]');
+    return {
+      pass: !!(visible(field) && visible(composer) && unmarked(field) && unmarked(composer)),
+      detail: `field=${field && getComputedStyle(field).display} composer=${composer && getComputedStyle(composer).display}`,
+    };
+  });
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }

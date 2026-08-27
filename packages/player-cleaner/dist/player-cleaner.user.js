@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.29
+// @version      0.1.30
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1021,6 +1021,15 @@
         return sawAudio && !sawVideo;
     }
 
+    function isLiveMediaStream(video) {
+        try {
+            var obj = video.srcObject;
+            if (!obj) { return false; }
+            if (typeof MediaStream !== 'undefined' && obj instanceof MediaStream) { return true; }
+            return typeof obj.getTracks === 'function' && typeof obj.addTrack === 'function';
+        } catch (e) { return false; }
+    }
+
     // ------------------------------------------------------------------
     // Replacement
     // ------------------------------------------------------------------
@@ -1262,12 +1271,54 @@
         return false;
     }
 
+    function isTextEditingSurface(el) {
+        if (!el || el.nodeType !== 1) { return false; }
+        var tag = el.tagName;
+        if (tag === 'TEXTAREA') { return true; }
+        if (el.isContentEditable) {
+            try {
+                var ce = el.getAttribute && el.getAttribute('contenteditable');
+                if (ce !== null && String(ce).toLowerCase() === 'false') { return false; }
+            } catch (e) { /* ignore */ }
+            return true;
+        }
+        try {
+            var role = (el.getAttribute('role') || '').toLowerCase();
+            if (role === 'textbox' || role === 'searchbox') { return true; }
+        } catch (e) { /* ignore */ }
+        if (tag === 'INPUT') {
+            var type = '';
+            try {
+                type = (el.getAttribute('type') || el.type || '').toLowerCase();
+            } catch (e) { type = ''; }
+            if (!type || type === 'text' || type === 'search' || type === 'email' ||
+                type === 'url' || type === 'password' || type === 'tel') {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function containsTextEditingSurface(el) {
+        if (!el || el.nodeType !== 1) { return false; }
+        if (isTextEditingSurface(el)) { return true; }
+        if (!el.children || !el.children.length) { return false; }
+        try {
+            var nodes = el.querySelectorAll('textarea, input, [contenteditable], [role="textbox"], [role="searchbox"]');
+            for (var i = 0; i < nodes.length; i++) {
+                if (isTextEditingSurface(nodes[i])) { return true; }
+            }
+        } catch (e) { /* ignore */ }
+        return false;
+    }
+
     function hideElement(el) {
         if (!el || el === document.documentElement || el === document.body) return;
         if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK' ||
             el.tagName === 'STYLE' || el.tagName === 'LINK' || el.tagName === 'SLOT' ||
             el.tagName === 'META' || el.tagName === 'TEMPLATE') return;
         if (hostsYouTubeEmbed(el)) return;
+        if (containsTextEditingSurface(el)) return;
         try {
             ensureHideStyle();
             el.setAttribute(HIDDEN_ATTR, '1');
@@ -2532,6 +2583,10 @@
             log('declared audio-only media; leaving video untouched');
             return;
         }
+        if (isLiveMediaStream(video)) {
+            log('live MediaStream video; leaving video untouched');
+            return;
+        }
         if (isIOSPreservedPlayer(video) && !video._wblockIOSNativeSrc) { return; }
         // FAVE/AMP attach media during their own play-event dispatch. Wait
         // for that handshake even on desktop so we do not nativeize (or hide
@@ -2633,6 +2688,7 @@
         if (isIOSPreservedPlayer(video)) { return false; }
         if (video.controls) { return false; } // native controls already present
         if (isDeclaredAudioOnly(video)) { return false; }
+        if (isLiveMediaStream(video)) { return false; }
         // These players attach media during their own play-event dispatch. Wait
         // for the delegated playing handler above so controls/chrome changes do
         // not interrupt startup. A late inject after playing already fired

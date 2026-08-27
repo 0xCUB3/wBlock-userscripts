@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synthetic in-chat video + messenger composer (Player Cleaner Discord test)</title>
+<style>
+  body { margin: 0; background: #313338; color: #dbdee1; font: 16px/1.4 sans-serif; min-height: 800px; }
+  /* In-chat attachment: custom player shell with overlay chrome. */
+  .chat-player {
+    position: relative; width: 640px; height: 360px; margin: 0 auto;
+    background: #000;
+  }
+  .chat-player video { display: block; width: 640px; height: 360px; background: #222; }
+  #player-overlay {
+    position: absolute; inset: 0; background: rgba(0,0,0,.2);
+    display: flex; align-items: center; justify-content: center;
+    pointer-events: auto;
+  }
+  #player-bar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 40px;
+    background: rgba(0,0,0,.75); display: flex; align-items: center; gap: 8px;
+    padding: 0 12px; pointer-events: auto;
+  }
+  /* Discord-like sticky composer overlapping the video bottom (~40px). */
+  #composer {
+    position: fixed; left: 0; right: 0; height: 56px; top: 360px;
+    background: #383a40; border-top: 1px solid #1e1f22;
+    display: flex; align-items: center; padding: 0 16px; z-index: 10;
+  }
+  #message-field {
+    flex: 1; min-height: 44px; padding: 8px 12px; background: #383a40;
+    border-radius: 8px; outline: none;
+  }
+  /* WebRTC call tile + side chat (separate from in-chat clip). */
+  .call-layout {
+    display: flex; gap: 16px; max-width: 960px; margin: 480px auto 24px; padding: 0 16px;
+  }
+  .call-tile-wrap { position: relative; width: 320px; flex-shrink: 0; background: #000; }
+  #call-video { display: block; width: 320px; height: 240px; background: #222; }
+  #call-composer {
+    flex: 1; min-height: 120px; background: #2b2d31; border-radius: 8px;
+    padding: 12px; display: flex; flex-direction: column;
+  }
+  #call-message-field {
+    flex: 1; min-height: 44px; padding: 8px; background: #383a40; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+  <div class="chat-player" id="chat-player">
+    <video id="chat-video"></video>
+    <div id="player-overlay"><span>▶</span></div>
+    <div id="player-bar">
+      <input type="range" style="flex:1" aria-label="volume">
+      <button type="button">⏸</button>
+    </div>
+  </div>
+
+  <form id="composer">
+    <div id="message-field" role="textbox" contenteditable="true" aria-label="Message #general"></div>
+  </form>
+
+  <div class="call-layout">
+    <div class="call-tile-wrap">
+      <video id="call-video"></video>
+    </div>
+    <div id="call-composer">
+      <div id="call-message-field" role="textbox" contenteditable="true" aria-label="Message"></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var chatVideo = document.getElementById('chat-video');
+      try {
+        chatVideo.src = 'blob:https://example.com/00000000-0000-0000-0000-000000000000';
+      } catch (e) {}
+
+      var callVideo = document.getElementById('call-video');
+      try {
+        Object.defineProperty(callVideo, 'srcObject', {
+          configurable: true,
+          value: {
+            getTracks: function () { return []; },
+            addTrack: function () {},
+            removeTrack: function () {}
+          }
+        });
+      } catch (e) {}
+    })();
+  </script>
+</body>
+</html>
