@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.10
+// @version      0.1.11
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1017,6 +1017,21 @@
         registerCleanup(cancelQualityRequest);
         forceNativeControls(video);
         guardNativeControls(video);
+
+        // Safari's controls live in WebKit's shadow tree, so let events reach
+        // the video in the bubble phase but stop YouTube's outer player shell
+        // from treating native scrubber and long-press gestures as player taps.
+        var competingEvents = ['click', 'pointerdown', 'pointerup', 'touchstart', 'touchend'];
+        function blockCompetingClicks(event) { event.stopPropagation(); }
+        for (var i = 0; i < competingEvents.length; i++) {
+            video.addEventListener(competingEvents[i], blockCompetingClicks);
+        }
+        registerCleanup(function () {
+            for (var i = 0; i < competingEvents.length; i++) {
+                video.removeEventListener(competingEvents[i], blockCompetingClicks);
+            }
+        });
+
         setupVideoAspectLayout(player, video);
         // Keep YouTube's media listeners intact. SABR/MSE uses waiting,
         // stalled, progress, and related events to maintain the stream. The
@@ -1495,11 +1510,24 @@
             return { key: key, mode: mode, eligible: eligible };
         }
 
+        // Undo and ask-mode notification state lasts only until playback leaves
+        // that segment. Staying inside after Undo remains protected, while a
+        // later re-entry behaves like the first visit.
+        function clearExitedSegmentState(now) {
+            for (var i = 0; i < segments.length; i++) {
+                var item = segments[i];
+                if (now >= item.segment[0] && now < item.segment[1]) continue;
+                var key = item.UUID || item.category + ':' + item.segment.join(':');
+                delete ignored[key];
+                delete notified[key];
+            }
+        }
+
         // Keep timeupdate as a throttling/background fallback, but normally arm
         // one timer for the next segment boundary. This avoids waiting up to a
         // full timeupdate interval before an automatic skip.
         function scheduleNextBoundary(settings, now, force) {
-            if (cancelled || timingSuspended || video.paused || video.ended || !settings.enabled ||
+            if (cancelled || timingSuspended || video.seeking || video.paused || video.ended || !settings.enabled ||
                 sponsorBlockDisabledVideos[videoId] || sponsorBlockChannelExcluded(settings)) {
                 clearBoundaryTimer();
                 return;
@@ -1529,13 +1557,14 @@
         }
 
         function onTimeUpdate(forceSchedule) {
-            if (timingSuspended) { clearBoundaryTimer(); return; }
+            if (timingSuspended || video.seeking) { clearBoundaryTimer(); return; }
             var settings = loadSponsorBlockSettings();
             if (!settings.enabled || sponsorBlockDisabledVideos[videoId] || sponsorBlockChannelExcluded(settings)) {
                 clearBoundaryTimer();
                 return;
             }
             var now = video.currentTime;
+            clearExitedSegmentState(now);
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
                 var state = segmentState(item, settings);
@@ -1630,7 +1659,7 @@
         // never forces a skip while a seek or stall is in progress.
         var pollTimer = null;
         function pollBoundary() {
-            if (cancelled || timingSuspended || video.paused || video.ended) { return; }
+            if (cancelled || timingSuspended || video.seeking || video.paused || video.ended) { return; }
             onTimeUpdate(false);
         }
         function startPoll() {

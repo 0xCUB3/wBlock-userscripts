@@ -820,6 +820,39 @@ async function qualityUISelectionCheck(page, scenario) {
     scriptSource: sponsorBlockPrelude + '\n' + chapterDataPrelude + '\n' + captionDataPrelude + '\n' + mediaSessionPrelude + '\n' + deArrowPrelude + '\n' + userscript,
   });
   await commonChecks(page, 'desktop');
+  await check(page, 'desktop', 'video click does not bubble to the YouTube player shell', () => {
+    const player = document.getElementById('movie_player');
+    const video = player?.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    let reached = 0;
+    const onEvent = () => { reached++; };
+    player.addEventListener('click', onEvent);
+    video.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    player.removeEventListener('click', onEvent);
+    return { pass: reached === 0, detail: `player events=${reached}` };
+  });
+  await check(page, 'desktop', 'video pointerup does not bubble to the YouTube player shell', () => {
+    const player = document.getElementById('movie_player');
+    const video = player?.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    let reached = 0;
+    const onEvent = () => { reached++; };
+    player.addEventListener('pointerup', onEvent);
+    video.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'touch' }));
+    player.removeEventListener('pointerup', onEvent);
+    return { pass: reached === 0, detail: `player events=${reached}` };
+  });
+  await check(page, 'desktop', 'video touchend does not bubble to the YouTube player shell', () => {
+    const player = document.getElementById('movie_player');
+    const video = player?.querySelector('video');
+    if (!video) return { pass: false, detail: 'no video' };
+    let reached = 0;
+    const onEvent = () => { reached++; };
+    player.addEventListener('touchend', onEvent);
+    video.dispatchEvent(new Event('touchend', { bubbles: true, cancelable: true }));
+    player.removeEventListener('touchend', onEvent);
+    return { pass: reached === 0, detail: `player events=${reached}` };
+  });
   await check(page, 'desktop', 'deduplicates and timestamps native chapter cues', () => {
     const video = document.querySelector('#movie_player video');
     const elements = Array.from(video?.querySelectorAll('track[data-wblock-native-chapters]') || []);
@@ -1052,6 +1085,31 @@ async function qualityUISelectionCheck(page, scenario) {
       detail: `time=${video.currentTime}` };
   });
   await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    video.currentTime = 5;
+    video.dispatchEvent(new Event('timeupdate'));
+    video.currentTime = 12;
+    video.dispatchEvent(new Event('timeupdate'));
+  });
+  await check(page, 'desktop', 'skips a SponsorBlock segment again after Undo and re-entry', () => {
+    const video = document.querySelector('#movie_player video');
+    const notice = document.querySelector('.wblock-tc-sponsor-notice');
+    return { pass: video.currentTime === 20 && !!notice, detail: `time=${video.currentTime} notice=${!!notice}` };
+  });
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    let seeking = true;
+    Object.defineProperty(video, 'seeking', { configurable: true, get: () => seeking });
+    video.currentTime = 12;
+    video.dispatchEvent(new Event('timeupdate'));
+    window.__wblockSeekingSponsorTime = video.currentTime;
+    seeking = false;
+  });
+  await check(page, 'desktop', 'does not skip a SponsorBlock segment during an in-progress seek', () => ({
+    pass: window.__wblockSeekingSponsorTime === 12,
+    detail: `time=${window.__wblockSeekingSponsorTime}`,
+  }));
+  await page.evaluate(() => {
     history.replaceState(null, '', location.pathname + '?v=dQw4w9WgXcQ&cache-check=1');
     document.dispatchEvent(new Event('yt-navigate-finish'));
   });
@@ -1119,6 +1177,19 @@ async function qualityUISelectionCheck(page, scenario) {
     const video = document.querySelector('#movie_player video');
     return { pass: video.currentTime === 60, detail: `time=${video.currentTime}` };
   });
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    video.currentTime = 45;
+    video.dispatchEvent(new Event('timeupdate'));
+    video.currentTime = 55;
+    video.dispatchEvent(new Event('timeupdate'));
+  });
+  await check(page, 'desktop', 'shows the SponsorBlock Skip notice again after leaving and re-entering', () => {
+    const video = document.querySelector('#movie_player video');
+    const button = document.querySelector('.wblock-tc-sponsor-notice button');
+    return { pass: video.currentTime === 55 && !!button, detail: `time=${video.currentTime} button=${button?.textContent}` };
+  });
+  await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-notice button').click());
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
     window.__wblockSyntheticMediaTime = 69.9;
