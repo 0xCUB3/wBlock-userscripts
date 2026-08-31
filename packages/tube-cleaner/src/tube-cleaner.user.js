@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.12
+// @version      0.1.13
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1034,7 +1034,17 @@
         // Safari's controls live in WebKit's shadow tree, so let events reach
         // the video in the bubble phase but stop YouTube's outer player shell
         // from treating native scrubber and long-press gestures as player taps.
-        var competingEvents = ['click', 'pointerdown', 'pointerup', 'touchstart', 'touchend'];
+        // Move and mouse-compat events must be blocked too: while the native
+        // scrubber is dragged, pointermove/mousemove bubbling out of the shadow
+        // tree reaches YouTube's activity handlers, which reassert player state
+        // on the video. Any controls-attribute toggle rebuilds the inline
+        // shadow controls and cancels the drag after a few pixels (fullscreen
+        // is unaffected because its controls do not depend on the attribute).
+        var competingEvents = [
+            'click', 'pointerdown', 'pointermove', 'pointerup',
+            'mousedown', 'mousemove', 'mouseup',
+            'touchstart', 'touchmove', 'touchend'
+        ];
         function blockCompetingClicks(event) { event.stopPropagation(); }
         for (var i = 0; i < competingEvents.length; i++) {
             video.addEventListener(competingEvents[i], blockCompetingClicks);
@@ -4316,6 +4326,72 @@
     }
 
     // ------------------------------------------------------------------
+    // F hotkey routed to native fullscreen
+    // ------------------------------------------------------------------
+
+    // YouTube's own F shortcut fullscreens the #movie_player container. With
+    // the player chrome hidden that just zooms the current inline layout,
+    // while the native controls fullscreen button presents Safari's real
+    // fullscreen player. Intercept F ahead of YouTube's document handlers
+    // (capture phase) and drive the video element's native presentation
+    // instead. Typing targets pass through untouched so search boxes and
+    // comment fields still receive the keystroke.
+
+    function isTypingTarget(target) {
+        if (!target || target.nodeType !== 1) { return false; }
+        if (target.isContentEditable) { return true; }
+        var tag = target.tagName;
+        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    }
+
+    function toggleNativeFullscreen(video) {
+        try {
+            if (video.webkitPresentationMode === 'fullscreen' &&
+                typeof video.webkitSetPresentationMode === 'function') {
+                video.webkitSetPresentationMode('inline');
+                return;
+            }
+            if (video.webkitDisplayingFullscreen === true &&
+                typeof video.webkitExitFullscreen === 'function') {
+                video.webkitExitFullscreen();
+                return;
+            }
+            var fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
+            if (fullscreenElement) {
+                if (typeof document.exitFullscreen === 'function') { document.exitFullscreen(); }
+                else if (typeof document.webkitExitFullscreen === 'function') { document.webkitExitFullscreen(); }
+                return;
+            }
+            if (typeof video.webkitSupportsPresentationMode === 'function' &&
+                video.webkitSupportsPresentationMode('fullscreen') &&
+                typeof video.webkitSetPresentationMode === 'function') {
+                video.webkitSetPresentationMode('fullscreen');
+                return;
+            }
+            if (typeof video.webkitEnterFullscreen === 'function') {
+                video.webkitEnterFullscreen();
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    function onFullscreenHotkey(event) {
+        if (event.ctrlKey || event.metaKey || event.altKey) { return; }
+        if (event.key !== 'f' && event.key !== 'F') { return; }
+        var video = activeVideo;
+        if (!video || !video.isConnected) { return; }
+        if (isTypingTarget(event.target)) { return; }
+        // Consume key repeats too so YouTube never sees a held F, but only
+        // toggle once per press.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!event.repeat) { toggleNativeFullscreen(video); }
+    }
+
+    function setupFullscreenHotkey() {
+        document.addEventListener('keydown', onFullscreenHotkey, true);
+    }
+
+    // ------------------------------------------------------------------
     // Boot
     // ------------------------------------------------------------------
 
@@ -4394,6 +4470,7 @@
         enableBackgroundPlayback();
         lastUrl = location.href;
         watchNavigation();
+        setupFullscreenHotkey();
         transformPlayer();
         scheduleDeArrowScan(document);
 

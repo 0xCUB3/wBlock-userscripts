@@ -370,6 +370,76 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
     return { pass: !!(v && v.controls === true), detail: v ? `controls=${v.controls}` : 'no video' };
   });
 
+  // Native scrubber drags die if YouTube's shell sees the pointer stream and
+  // reasserts player state mid-drag (a controls toggle rebuilds the inline
+  // shadow controls). Every pointer/mouse/touch event bubbling out of the
+  // video must stop there.
+  await check(page, scenario, 'keeps scrubber drag events away from the YouTube player shell', () => {
+    const player = document.getElementById('movie_player');
+    const video = player?.querySelector('video');
+    if (!player || !video) return { pass: false, detail: 'missing player or video' };
+    // The synthetic click below trips the iOS toolbar's tap-to-toggle handler;
+    // snapshot the toolbar's inline style so later toolbar checks see the
+    // state a real page load produces.
+    const toolbar = document.querySelector('.wblock-tc-toolbar');
+    const savedToolbarStyle = toolbar ? toolbar.getAttribute('style') : null;
+    const leaked = [];
+    const record = (event) => leaked.push(event.type);
+    const types = ['click', 'pointerdown', 'pointermove', 'pointerup',
+      'mousedown', 'mousemove', 'mouseup', 'touchstart', 'touchmove', 'touchend'];
+    types.forEach((type) => player.addEventListener(type, record));
+    let sent = 0;
+    types.forEach((type) => {
+      let event;
+      if (type.startsWith('pointer')) {
+        if (typeof PointerEvent !== 'function') return;
+        event = new PointerEvent(type, { bubbles: true, composed: true });
+      } else if (type.startsWith('touch')) {
+        if (typeof TouchEvent !== 'function') return;
+        try { event = new TouchEvent(type, { bubbles: true, composed: true }); }
+        catch { return; }
+      } else {
+        event = new MouseEvent(type, { bubbles: true, composed: true });
+      }
+      sent += 1;
+      video.dispatchEvent(event);
+    });
+    types.forEach((type) => player.removeEventListener(type, record));
+    if (toolbar && savedToolbarStyle !== null) toolbar.setAttribute('style', savedToolbarStyle);
+    return { pass: sent > 0 && leaked.length === 0,
+      detail: leaked.length ? `leaked=${leaked.join(',')}` : `sent=${sent} leaked=0` };
+  });
+
+  // Pressing F must match the native fullscreen button (video-element
+  // fullscreen), not YouTube's container fullscreen, and must never fire
+  // while the user is typing.
+  await check(page, scenario, 'routes the F shortcut to native video fullscreen', () => {
+    const video = document.querySelector('#movie_player video');
+    if (!video) return { pass: false, detail: 'no video' };
+    const modes = [];
+    video.webkitSupportsPresentationMode = () => true;
+    video.webkitSetPresentationMode = (mode) => { modes.push(mode); };
+    const reachedYouTube = [];
+    const record = (event) => reachedYouTube.push(event.key);
+    document.addEventListener('keydown', record);
+    const plain = new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true, composed: true });
+    document.body.dispatchEvent(plain);
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    const typed = new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true, composed: true });
+    input.dispatchEvent(typed);
+    document.removeEventListener('keydown', record);
+    input.remove();
+    delete video.webkitSupportsPresentationMode;
+    delete video.webkitSetPresentationMode;
+    return {
+      pass: plain.defaultPrevented && modes.length === 1 && modes[0] === 'fullscreen' &&
+        reachedYouTube.length === 1 && !typed.defaultPrevented,
+      detail: 'prevented=' + plain.defaultPrevented + ' modes=' + modes.join(',') +
+        ' reached=' + reachedYouTube.length + ' typedPrevented=' + typed.defaultPrevented
+    };
+  });
+
   await check(page, scenario, 'keeps unknown YouTube overlays behind the native video', () => {
     const player = document.querySelector('.wblock-tc-native');
     const video = player?.querySelector('video');
