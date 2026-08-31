@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.11
+// @version      0.1.12
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -407,6 +407,19 @@
         '.wblock-tc-native .ytp-player-content,',
         '.wblock-tc-native .html5-video-container',
         '{ pointer-events: none !important; }',
+
+        // YouTube adds new transparent layers without keeping the class names
+        // above stable. Keep every unknown descendant behind Safari's controls,
+        // then restore the Tube Cleaner surfaces that must remain interactive.
+        '.wblock-tc-native *',
+        '{ pointer-events: none !important; }',
+        '.wblock-tc-native video,',
+        '.wblock-tc-native .ytp-unmute,',
+        '.wblock-tc-native .wblock-tc-toolbar,',
+        '.wblock-tc-native .wblock-tc-toolbar *,',
+        '.wblock-tc-native .wblock-tc-sponsor-notice,',
+        '.wblock-tc-native .wblock-tc-sponsor-notice *',
+        '{ pointer-events: auto !important; }',
 
         // Mobile YouTube renders its new controls outside #movie_player in a
         // sibling custom-element tree. It appears after "Tap to unmute" and
@@ -4076,7 +4089,7 @@
 
             function showToolbar() {
                 toolbar.style.opacity = '1';
-                toolbar.style.pointerEvents = 'auto';
+                toolbar.style.setProperty('pointer-events', 'auto', 'important');
                 clearTimeout(toolbarTimer);
             }
             function hideToolbar() {
@@ -4088,7 +4101,7 @@
                 });
                 if (anyOpen) { scheduleHideToolbar(); return; }
                 toolbar.style.opacity = '0';
-                toolbar.style.pointerEvents = 'none';
+                toolbar.style.setProperty('pointer-events', 'none', 'important');
             }
             function scheduleHideToolbar() {
                 clearTimeout(toolbarTimer);
@@ -4138,7 +4151,7 @@
         } else {
             // Start hidden on desktop — it appears with native controls
             toolbar.style.opacity = '0';
-            toolbar.style.pointerEvents = 'none';
+            toolbar.style.setProperty('pointer-events', 'none', 'important');
 
             var toolbarTimer = null;
             var TOOLBAR_HIDE_DELAY = 3000;
@@ -4163,7 +4176,7 @@
 
             function showToolbar() {
                 toolbar.style.opacity = '1';
-                toolbar.style.pointerEvents = 'auto';
+                toolbar.style.setProperty('pointer-events', 'auto', 'important');
                 clearTimeout(toolbarTimer);
             }
 
@@ -4173,7 +4186,7 @@
                     return;
                 }
                 toolbar.style.opacity = '0';
-                toolbar.style.pointerEvents = 'none';
+                toolbar.style.setProperty('pointer-events', 'none', 'important');
             }
 
             function scheduleHideToolbar() {

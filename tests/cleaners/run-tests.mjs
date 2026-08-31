@@ -370,6 +370,26 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
     return { pass: !!(v && v.controls === true), detail: v ? `controls=${v.controls}` : 'no video' };
   });
 
+  await check(page, scenario, 'keeps unknown YouTube overlays behind the native video', () => {
+    const player = document.querySelector('.wblock-tc-native');
+    const video = player?.querySelector('video');
+    if (!player || !video) return { pass: false, detail: 'missing player or video' };
+
+    const overlay = document.createElement('div');
+    overlay.className = 'ytp-overlays-container';
+    overlay.style.cssText = 'position:absolute;inset:0;z-index:10000';
+    player.appendChild(overlay);
+
+    const rect = video.getBoundingClientRect();
+    const pointerEvents = getComputedStyle(overlay).pointerEvents;
+    const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    overlay.remove();
+    return {
+      pass: pointerEvents === 'none' && hit === video,
+      detail: `pointerEvents=${pointerEvents} hit=${hit?.tagName}`,
+    };
+  });
+
   await check(page, scenario, 'centers non-standard video ratios after YouTube offsets the media element', () => {
     const player = document.querySelector('#movie_player');
     const video = player?.querySelector('video');
