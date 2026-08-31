@@ -410,6 +410,26 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       detail: leaked.length ? `leaked=${leaked.join(',')}` : `sent=${sent} leaked=0` };
   });
 
+  // Bubble-phase blockers cannot silence YouTube's capture-phase document
+  // handlers, so the mid-drag teardown they trigger is prevented at the
+  // source instead: nothing may turn the controls attribute off, and no
+  // controls-attribute mutation may occur at all (each one rebuilds WebKit's
+  // inline shadow controls and cancels the drag).
+  await check(page, scenario, 'pins the controls attribute against mid-drag teardown', () => {
+    const video = document.querySelector('#movie_player video');
+    if (!video) return { pass: false, detail: 'no video' };
+    const observer = new MutationObserver(() => {});
+    observer.observe(video, { attributes: true, attributeFilter: ['controls'] });
+    video.controls = false;
+    video.removeAttribute('controls');
+    video.setAttribute('controls', '');
+    if (typeof video.toggleAttribute === 'function') video.toggleAttribute('controls');
+    const kept = video.controls === true && video.hasAttribute('controls');
+    const mutations = observer.takeRecords().length;
+    observer.disconnect();
+    return { pass: kept && mutations === 0, detail: `kept=${kept} mutations=${mutations}` };
+  });
+
   // Pressing F must match the native fullscreen button (video-element
   // fullscreen), not YouTube's container fullscreen, and must never fire
   // while the user is typing.
@@ -1732,7 +1752,10 @@ async function qualityUISelectionCheck(page, scenario) {
   await browser.close();
 }
 
-// ---- Scenario 5: iPadOS active-player selection (Shorts-style) -----------
+// ---- Scenario 5: Shorts stay stock (cleaner suspended on /shorts) --------
+// Users asked for YouTube's own Shorts UI. On /shorts paths the cleaner must
+// fully stand down (stylesheet suspended, player released, no toolbar) and
+// must come back pre-paint when the SPA returns to a watch page.
 {
   const { browser, page, pageErrors } = await runScenario('iPadOS multiple YouTube players', {
     fixture: FIXTURE_TUBE_MULTIPLE_URL,
@@ -1742,157 +1765,61 @@ async function qualityUISelectionCheck(page, scenario) {
     hasTouch: true,
     viewport: { width: 1024, height: 768 },
     scriptSource: ipadDesktopPrelude + '\n' + userscript,
-    readySignal: '#current-short.wblock-tc-native',
+    readySignal: '#current-short video',
   });
   const S = 'iPad-multiple-players';
-  await check(page, S, 'marks only the active desktop/mobile Shorts reel hosts', () => {
-    const active = document.querySelector('#current-reel');
-    const old = document.querySelector('#previous-reel');
-    return { pass: active?.classList.contains('wblock-tc-short-reel') &&
-      document.querySelector('#shorts-container')?.classList.contains('wblock-tc-short-reel') &&
-      !old?.classList.contains('wblock-tc-short-reel'),
-      detail: `active=${active?.className} old=${old?.className}` };
+  await check(page, S, 'suspends the stylesheet on Shorts', () => {
+    const style = document.getElementById('wblock-tc-style');
+    return { pass: !!style && style.disabled === true,
+      detail: `present=${!!style} disabled=${style && style.disabled}` };
   });
-  await check(page, S, 'nativeizes the visible playing player, not the first DOM match', () => {
-    const selected = window.__wblockTubeDebug.getPlayer();
-    const video = document.querySelector('#current-short video');
-    return { pass: selected?.id === 'current-short' && video.controls &&
-      !!document.querySelector('#current-short .wblock-tc-quality-button') &&
-      !document.querySelector('#previous-short .wblock-tc-toolbar') };
-  });
-  await check(page, S, 'keeps the Shorts toolbar off the action rail and subscribe row', () => {
+  await check(page, S, 'leaves the Shorts player and video untouched', () => {
     const player = document.querySelector('#current-short');
-    const toolbar = player?.querySelector('.wblock-tc-toolbar');
-    if (!player || !toolbar) return { pass: false, detail: 'missing player/toolbar' };
-    const p = player.getBoundingClientRect();
-    const t = toolbar.getBoundingClientRect();
-    const inTop = t.bottom < p.top + p.height * 0.45;
-    const inLeft = t.right < p.left + p.width * 0.55;
-    const awayFromRail = t.right < p.right - 56;
-    return {
-      pass: toolbar.getAttribute('data-wblock-tc-placement') === 'shorts' && inTop && inLeft && awayFromRail,
-      detail: `placement=${toolbar.getAttribute('data-wblock-tc-placement')} top=${(t.top - p.top).toFixed(1)} left=${(t.left - p.left).toFixed(1)} rightGap=${(p.right - t.right).toFixed(1)}`
-    };
+    const video = player && player.querySelector('video');
+    return { pass: !!player && !player.classList.contains('wblock-tc-native') &&
+      !player.hasAttribute('data-wblock-tc-cleaned') &&
+      !document.querySelector('.wblock-tc-toolbar') &&
+      !!video && !video.hasAttribute('controls'),
+      detail: `class=${player && player.className} controls=${video && video.hasAttribute('controls')}` };
+  });
+  await check(page, S, 'keeps YouTube Shorts chrome visible and interactive', () => {
+    const chrome = document.querySelector('#current-short .ytp-chrome-bottom');
+    if (!chrome) return { pass: false, detail: 'no chrome' };
+    const style = getComputedStyle(chrome);
+    return { pass: style.display !== 'none' && style.pointerEvents !== 'none',
+      detail: `display=${style.display} pointerEvents=${style.pointerEvents}` };
   });
   await page.evaluate(() => {
     history.replaceState(null, '', '/watch?v=Shorts12345');
     document.dispatchEvent(new Event('yt-navigate-finish'));
   });
-  await check(page, S, 'moves the toolbar back to the watch-page corner off Shorts', () => {
-    const toolbar = document.querySelector('#current-short .wblock-tc-toolbar');
-    if (!toolbar) return { pass: false, detail: 'missing toolbar' };
+  await check(page, S, 'resumes on watch and nativeizes the visible player, not the first DOM match', () => {
+    const style = document.getElementById('wblock-tc-style');
+    const selected = window.__wblockTubeDebug.getPlayer();
     const player = document.querySelector('#current-short');
-    const p = player.getBoundingClientRect();
-    const t = toolbar.getBoundingClientRect();
-    return {
-      pass: toolbar.getAttribute('data-wblock-tc-placement') === 'watch' && t.top > p.top + p.height * 0.45,
-      detail: `placement=${toolbar.getAttribute('data-wblock-tc-placement')} top=${(t.top - p.top).toFixed(1)}`
-    };
+    const video = player && player.querySelector('video');
+    return { pass: !!style && style.disabled === false &&
+      selected?.id === 'current-short' &&
+      !!player && player.classList.contains('wblock-tc-native') &&
+      !!video && video.controls === true &&
+      !!player.querySelector('.wblock-tc-quality-button') &&
+      !document.querySelector('#previous-short .wblock-tc-toolbar'),
+      detail: `disabled=${style && style.disabled} selected=${selected?.id} controls=${video && video.controls}` };
   });
   await page.evaluate(() => {
     history.replaceState(null, '', '/shorts/Shorts12345');
     document.dispatchEvent(new Event('yt-navigate-finish'));
   });
-  await check(page, S, 'restores Shorts placement after returning from watch', () => {
-    const toolbar = document.querySelector('#current-short .wblock-tc-toolbar');
-    return {
-      pass: toolbar?.getAttribute('data-wblock-tc-placement') === 'shorts',
-      detail: `placement=${toolbar?.getAttribute('data-wblock-tc-placement')}`
-    };
-  });
-  const overlaySetup = await page.evaluate(() => {
+  await check(page, S, 'releases the player when returning to Shorts', () => {
+    const style = document.getElementById('wblock-tc-style');
     const player = document.querySelector('#current-short');
-    const host = document.querySelector('#shorts-container');
-    const rect = player?.getBoundingClientRect();
-    if (!player || !host || !rect) return { before: false, detail: 'missing Shorts player/host' };
-    const scrim = document.createElement('div');
-    scrim.className = 'shorts-scrim shorts-overlay';
-    scrim.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:9999;background:rgba(255,0,0,.05);pointer-events:auto`;
-    host.appendChild(scrim);
-    const before = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === scrim;
-    const rail = document.createElement('div');
-    rail.className = 'shorts-action-rail';
-    rail.style.cssText = `position:fixed;left:${rect.right - 56}px;top:${rect.top + 120}px;width:48px;height:48px;z-index:10001`;
-    rail.innerHTML = '<button id="shorts-like" type="button" style="width:48px;height:48px">Like</button>';
-    rail.querySelector('button').addEventListener('click', () => { window.__shortsLikeClicks = (window.__shortsLikeClicks || 0) + 1; });
-    document.body.appendChild(rail);
-    window.__shortsHitPoint = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    window.__shortsRailPoint = { x: rect.right - 32, y: rect.top + 144 };
-    return { before, detail: `hit=${document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.className}` };
-  });
-  record(S, 'outer Shorts scrim intercepts the native video before patching', overlaySetup.before, overlaySetup.detail);
-  await check(page, S, 'removes the outer Shorts scrim from native video hit-testing', () => {
-    const point = window.__shortsHitPoint;
-    const hit = point && document.elementFromPoint(point.x, point.y);
-    const scrim = document.querySelector('.shorts-scrim');
-    return { pass: !!point && hit?.tagName === 'VIDEO' &&
-      scrim && getComputedStyle(scrim).display === 'none' && getComputedStyle(scrim).pointerEvents === 'none',
-      detail: `hit=${hit?.tagName}.${hit?.className} scrim=${scrim && getComputedStyle(scrim).display}/${scrim && getComputedStyle(scrim).pointerEvents}` };
-  });
-  const railPoint = await page.evaluate(() => window.__shortsRailPoint);
-  await page.mouse.click(railPoint.x, railPoint.y);
-  await check(page, S, 'keeps the Shorts action rail clickable outside the native video controls', () => ({
-    pass: window.__shortsLikeClicks === 1 && document.elementFromPoint(window.__shortsRailPoint.x, window.__shortsRailPoint.y)?.id === 'shorts-like',
-    detail: `clicks=${window.__shortsLikeClicks} hit=${document.elementFromPoint(window.__shortsRailPoint.x, window.__shortsRailPoint.y)?.id}`,
-  }));
-  await page.evaluate(() => {
-    const host = document.querySelector('#shorts-container');
-    const player = document.querySelector('#current-short');
-    const rect = player.getBoundingClientRect();
-    const unmute = document.createElement('button');
-    unmute.className = 'ytm-custom-control shorts-unmute';
-    unmute.addEventListener('click', () => {
-      const late = document.createElement('div');
-      late.className = 'ytm-watch-player-controls shorts-overlay';
-      late.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:10000;pointer-events:auto`;
-      host.appendChild(late);
-    });
-    host.appendChild(unmute);
-    unmute.click();
-  });
-  await check(page, S, 'blocks a Shorts control layer inserted after tap to unmute', () => {
-    const point = window.__shortsHitPoint;
-    const hit = point && document.elementFromPoint(point.x, point.y);
-    const late = document.querySelector('.ytm-watch-player-controls');
-    return { pass: !!late && getComputedStyle(late).display === 'none' && hit?.tagName === 'VIDEO',
-      detail: `late=${late && getComputedStyle(late).display} hit=${hit?.tagName}` };
-  });
-  await page.evaluate(() => {
-    window.__switchActiveShort();
-    history.replaceState(null, '', '/shorts/OtherShort1');
-    document.dispatchEvent(new Event('yt-navigate-finish'));
-  });
-  await check(page, S, 'moves native enhancements when the active Short changes', () => {
-    const selected = window.__wblockTubeDebug.getPlayer();
-    const video = document.querySelector('#previous-short video');
-    return { pass: selected?.id === 'previous-short' && video.controls &&
-      document.querySelector('#previous-short .wblock-tc-toolbar')?.getAttribute('data-wblock-tc-placement') === 'shorts' &&
-      !document.querySelector('#current-short .wblock-tc-toolbar') &&
-      document.querySelector('#previous-reel')?.classList.contains('wblock-tc-short-reel') &&
-      !document.querySelector('#current-reel')?.classList.contains('wblock-tc-short-reel') &&
-      !document.querySelector('#current-reel .wblock-tc-short-overlay'),
-      detail: `selected=${selected?.id} oldHost=${document.querySelector('#current-reel')?.className}` };
-  });
-  await page.evaluate(() => {
-    const host = document.querySelector('#previous-reel');
-    const player = document.querySelector('#previous-short');
-    const rect = player.getBoundingClientRect();
-    const late = document.createElement('div');
-    late.className = 'ytd-shorts-player-controls';
-    late.style.cssText = `position:fixed;left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px;z-index:10000;pointer-events:auto`;
-    host.appendChild(late);
-  });
-  await check(page, S, 'patches a late overlay on the newly active reel', () => {
-    const late = document.querySelector('#previous-reel .ytd-shorts-player-controls');
-    const point = document.querySelector('#previous-short video')?.getBoundingClientRect();
-    const hit = point && document.elementFromPoint(point.left + point.width / 2, point.top + point.height / 2);
-    return { pass: !!late && getComputedStyle(late).display === 'none' && hit?.tagName === 'VIDEO',
-      detail: `late=${late && getComputedStyle(late).display} hit=${hit?.tagName}` };
-  });
-  await check(page, S, 'hides chrome on a non-movie_player instance', () => {
-    const chrome = document.querySelector('#previous-short .ytp-chrome-bottom');
-    return { pass: !!(chrome && getComputedStyle(chrome).display === 'none'),
-      detail: chrome ? `display=${getComputedStyle(chrome).display}` : 'no chrome' };
+    const video = player && player.querySelector('video');
+    return { pass: !!style && style.disabled === true &&
+      !!player && !player.classList.contains('wblock-tc-native') &&
+      !player.hasAttribute('data-wblock-tc-cleaned') &&
+      !document.querySelector('.wblock-tc-toolbar') &&
+      !!video && !video.hasAttribute('controls'),
+      detail: `disabled=${style && style.disabled} class=${player && player.className} controls=${video && video.hasAttribute('controls')}` };
   });
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();

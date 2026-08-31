@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.13
+// @version      0.1.14
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -390,12 +390,6 @@
         '.wblock-tc-native video',
         '{ display: block !important; pointer-events: auto !important; }',
 
-        // Shorts mounts playback chrome outside the nativeized player. These
-        // classes are applied only to the active reel's intercepted layers.
-        '.wblock-tc-short-overlay,',
-        '.wblock-tc-short-chrome',
-        '{ display: none !important; pointer-events: none !important; }',
-
         // YouTube leaves several transparent gesture/feedback layers above the
         // media element. They must not steal taps from Safari's native controls.
         '.wblock-tc-native .ytp-cued-thumbnail-overlay,',
@@ -550,6 +544,9 @@
         style.id = STYLE_ID;
         style.textContent = CSS;
         root.appendChild(style);
+        // Shorts pages keep YouTube's stock UI; transformPlayer() re-enables
+        // the sheet when the SPA returns to a regular page.
+        if (isShortsPath()) { style.disabled = true; }
         return true;
     }
 
@@ -636,9 +633,6 @@
     var playerObserver = null;
     var activeCleanups = [];
     var playbackCarry = null;
-    var activeShortsHosts = [];
-    var activeShortsOverlays = [];
-    var activeShortsPlayer = null;
 
     function youtubePlayerVideoId(player) {
         try {
@@ -1030,16 +1024,15 @@
         registerCleanup(cancelQualityRequest);
         forceNativeControls(video);
         guardNativeControls(video);
+        pinNativeControls(video);
 
         // Safari's controls live in WebKit's shadow tree, so let events reach
         // the video in the bubble phase but stop YouTube's outer player shell
         // from treating native scrubber and long-press gestures as player taps.
-        // Move and mouse-compat events must be blocked too: while the native
-        // scrubber is dragged, pointermove/mousemove bubbling out of the shadow
-        // tree reaches YouTube's activity handlers, which reassert player state
-        // on the video. Any controls-attribute toggle rebuilds the inline
-        // shadow controls and cancels the drag after a few pixels (fullscreen
-        // is unaffected because its controls do not depend on the attribute).
+        // Blocking the move and mouse-compat events keeps YouTube's bubble-phase
+        // handlers quiet, but its capture-phase document handlers run first and
+        // still see the stream; pinNativeControls() is what actually keeps a
+        // native scrubber drag alive.
         var competingEvents = [
             'click', 'pointerdown', 'pointermove', 'pointerup',
             'mousedown', 'mousemove', 'mouseup',
@@ -1315,6 +1308,71 @@
 
         registerCleanup(function () {
             if (observer) { try { observer.disconnect(); } catch (e) { /* ignore */ } }
+        });
+    }
+
+    // The observer restore above is not enough for native scrubber drags.
+    // YouTube's activity handlers listen in the capture phase on the document
+    // and player ancestors, so they run before the video's bubble-phase
+    // blockers no matter what, and they respond to the pointer stream by
+    // clearing the controls attribute. The restore re-adds it a microtask
+    // later, but WebKit has already torn down and rebuilt the inline shadow
+    // controls, cancelling the drag after a few pixels (0.1.13 shipped only
+    // bubble-phase blockers, which is why drags still died outside
+    // fullscreen). Stop the teardown at the source instead: while Tube
+    // Cleaner owns the video, writes that would turn the controls attribute
+    // off are ignored. Shadowing is installed only after the attribute is
+    // natively set, so WebKit's media-controls initialization is unaffected.
+    function pinNativeControls(video) {
+        if (!video || video._wblockControlsPinned) return;
+        video._wblockControlsPinned = true;
+
+        var nativeRemoveAttribute = video.removeAttribute;
+        var nativeSetAttribute = video.setAttribute;
+        var nativeToggleAttribute = video.toggleAttribute;
+
+        function isControlsName(name) {
+            return String(name).toLowerCase() === 'controls';
+        }
+
+        try {
+            video.removeAttribute = function (name) {
+                if (isControlsName(name)) return;
+                return nativeRemoveAttribute.apply(this, arguments);
+            };
+            video.setAttribute = function (name) {
+                // A redundant re-set still runs WebKit's attribute-changed
+                // path; skip it so nothing rebuilds the shadow controls.
+                if (isControlsName(name) && this.hasAttribute('controls')) return;
+                return nativeSetAttribute.apply(this, arguments);
+            };
+            if (typeof nativeToggleAttribute === 'function') {
+                video.toggleAttribute = function (name) {
+                    if (isControlsName(name)) {
+                        if (!this.hasAttribute('controls')) {
+                            nativeSetAttribute.call(this, 'controls', '');
+                        }
+                        return true;
+                    }
+                    return nativeToggleAttribute.apply(this, arguments);
+                };
+            }
+            var descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'controls');
+            if (descriptor && descriptor.get && descriptor.set) {
+                Object.defineProperty(video, 'controls', {
+                    configurable: true,
+                    get: function () { return descriptor.get.call(this); },
+                    set: function (value) { if (value) { descriptor.set.call(this, true); } }
+                });
+            }
+        } catch (e) { /* partial pin; the observer restore still applies */ }
+
+        registerCleanup(function () {
+            video._wblockControlsPinned = false;
+            try { delete video.removeAttribute; } catch (e) { /* ignore */ }
+            try { delete video.setAttribute; } catch (e) { /* ignore */ }
+            try { delete video.toggleAttribute; } catch (e) { /* ignore */ }
+            try { delete video.controls; } catch (e) { /* ignore */ }
         });
     }
 
@@ -3001,134 +3059,66 @@
         return best;
     }
 
-    var SHORTS_HOST_SELECTOR = [
-        'ytd-shorts', 'ytd-shorts-player', 'ytd-reel-video-renderer',
-        'ytd-shorts-video-renderer', 'ytm-shorts', 'ytm-shorts-player',
-        'ytm-reel-video-renderer', 'ytm-shorts-video-renderer',
-        '[data-shorts-player]', '[data-reel-video-renderer]',
-        '.shorts-player', '.reel-video-renderer'
-    ].join(',');
-
     function isShortsPath() {
         return /^\/shorts(?:\/|$)/.test(location.pathname);
     }
 
-    function isShortsHost(node) {
-        if (!node || node.nodeType !== 1) return false;
-        try {
-            if (node.matches(SHORTS_HOST_SELECTOR)) return true;
-            var identity = String(node.tagName || '') + ' ' + String(node.id || '') + ' ' + String(node.className || '');
-            return /(?:shorts|reel-video|short-player)/i.test(identity);
-        } catch (e) { return false; }
+    // Users asked for YouTube's stock Shorts experience: the Shorts UI
+    // (action rail, subscribe row, sound picker, tap gestures) is built
+    // around YouTube's own player chrome, so nativeizing the reel player
+    // does more harm than good there. On /shorts paths the stylesheet is
+    // suspended and any nativeized player is fully released; navigating
+    // back to a regular page re-enables everything pre-paint.
+    var shortsSuspensionComplete = false;
+
+    function setStylesSuspended(suspended) {
+        var style = document.getElementById(STYLE_ID);
+        if (style && style.disabled !== suspended) { style.disabled = suspended; }
     }
 
-    function findShortsHosts(player) {
-        var hosts = [];
-        for (var node = player && player.parentElement, depth = 0;
-             node && node !== document.body && node !== document.documentElement && depth < 16;
-             node = node.parentElement, depth++) {
-            if (isShortsHost(node)) hosts.push(node);
+    function suspendForShorts() {
+        // The stylesheet can appear after the first suspension pass (the
+        // document observer injects it pre-paint), so re-disable it cheaply
+        // on every call.
+        setStylesSuspended(true);
+        if (shortsSuspensionComplete) return;
+        shortsSuspensionComplete = true;
+        if (playerObserver) {
+            try { playerObserver.disconnect(); } catch (e) { /* ignore */ }
+            playerObserver = null;
         }
-        return hosts;
-    }
-
-    function isShortsOverlayCandidate(node, player) {
-        if (!node || node === player || node.contains(player)) return false;
-        var identity = String(node.tagName || '') + ' ' + String(node.id || '') + ' ' + String(node.className || '');
-        var interaction = /scrim|gesture|tap.?to.?unmute|unmute|player.?controls?|playback.?controls?|custom.?control/i.test(identity);
-        if (!interaction && !/(?:shorts|reel).*(?:overlay|chrome)|(?:overlay|scrim)/i.test(identity)) return false;
-        try {
-            if (node.closest('[data-shorts-action-rail], .shorts-action-rail, .reel-action-rail, [aria-label*="action rail" i]')) return false;
-            if (!interaction && node.querySelector('a,button,[role="button"]')) return false;
-        } catch (e) { return false; }
-        return true;
-    }
-
-    function clearShortsReel() {
-        for (var i = 0; i < activeShortsHosts.length; i++) {
-            activeShortsHosts[i].classList.remove('wblock-tc-short-reel');
+        var released = activeVideo;
+        if (released) {
+            releaseActiveVideo();
+            // Teardown keeps the forced controls attribute; strip it so
+            // Safari's native bar does not cover the Shorts UI.
+            try { released.removeAttribute('controls'); } catch (e) { /* ignore */ }
         }
-        for (var j = 0; j < activeShortsOverlays.length; j++) {
-            activeShortsOverlays[j].classList.remove('wblock-tc-short-overlay', 'wblock-tc-short-chrome');
-        }
-        if (activeShortsPlayer) activeShortsPlayer.classList.remove('wblock-tc-short-player');
-        activeShortsHosts = [];
-        activeShortsOverlays = [];
-        activeShortsPlayer = null;
-    }
-
-    function sameShortsHosts(hosts) {
-        if (hosts.length !== activeShortsHosts.length) return false;
-        for (var i = 0; i < hosts.length; i++) {
-            if (hosts[i] !== activeShortsHosts[i]) return false;
-        }
-        return true;
-    }
-
-    function syncShortsReel(player) {
-        if (!isShortsPath() || !player) {
-            if (activeShortsHosts.length || activeShortsPlayer) clearShortsReel();
-            return;
-        }
-        var hosts = findShortsHosts(player);
-        if (!hosts.length) {
-            if (activeShortsHosts.length || activeShortsPlayer) clearShortsReel();
-            return;
-        }
-        if (activeShortsPlayer && (activeShortsPlayer !== player || !sameShortsHosts(hosts))) clearShortsReel();
-        activeShortsPlayer = player;
-        activeShortsHosts = hosts;
-        player.classList.add('wblock-tc-short-player');
-        for (var i = 0; i < hosts.length; i++) hosts[i].classList.add('wblock-tc-short-reel');
-        var retainedOverlays = [];
-        for (var old = 0; old < activeShortsOverlays.length; old++) {
-            var previous = activeShortsOverlays[old];
-            var stillHosted = false;
-            for (var parent = 0; parent < hosts.length; parent++) {
-                if (hosts[parent].contains(previous)) { stillHosted = true; break; }
-            }
-            if (stillHosted && isShortsOverlayCandidate(previous, player)) retainedOverlays.push(previous);
-            else previous.classList.remove('wblock-tc-short-overlay', 'wblock-tc-short-chrome');
-        }
-        activeShortsOverlays = retainedOverlays;
-
-        for (var h = 0; h < hosts.length; h++) {
-            var nodes;
-            try { nodes = hosts[h].querySelectorAll('[id],[class],[role]'); } catch (e) { continue; }
-            for (var n = 0; n < nodes.length; n++) {
-                var candidate = nodes[n];
-                if (!isShortsOverlayCandidate(candidate, player) || activeShortsOverlays.indexOf(candidate) !== -1) continue;
-                candidate.classList.add('wblock-tc-short-overlay');
-                var identity = String(candidate.tagName || '') + ' ' + String(candidate.id || '') + ' ' + String(candidate.className || '');
-                if (/chrome|overlay|scrim|gesture|player.?controls?|playback.?controls?|unmute/i.test(identity)) {
-                    candidate.classList.add('wblock-tc-short-chrome');
-                }
-                activeShortsOverlays.push(candidate);
-            }
+        var marked = document.querySelectorAll('.wblock-tc-native, [' + ATTR_CLEANED + ']');
+        for (var i = 0; i < marked.length; i++) {
+            marked[i].classList.remove('wblock-tc-native');
+            marked[i].removeAttribute(ATTR_CLEANED);
         }
     }
 
     function transformPlayer() {
-        var player = findPlayer();
-        if (!player) {
-            syncShortsReel(null);
+        if (isShortsPath()) {
+            suspendForShorts();
             return;
         }
+        setStylesSuspended(false);
+        shortsSuspensionComplete = false;
+
+        var player = findPlayer();
+        if (!player) return;
 
         var video = player.querySelector('video');
         if (!video) return;
-        if (isHoverPreviewPlayer(player) || isHoverPreviewPlayer(video)) {
-            syncShortsReel(null);
-            return;
-        }
+        if (isHoverPreviewPlayer(player) || isHoverPreviewPlayer(video)) return;
 
         // Check if we already processed this video.
         var videoId = youtubeVideoIdentity(player) || '';
-        if (player.getAttribute(ATTR_CLEANED) === videoId && activeVideo === video) {
-            syncShortsReel(player);
-            return;
-        }
-        syncShortsReel(player);
+        if (player.getAttribute(ATTR_CLEANED) === videoId && activeVideo === video) return;
         player.setAttribute(ATTR_CLEANED, videoId);
 
         log('transforming player for', videoId || '(unknown)');
@@ -3520,30 +3510,14 @@
         if (IS_IOS && menu && menu.parentNode === document.body) { menu.remove(); }
     }
 
-    function shortsToolbarLayout() {
-        return isShortsPath();
-    }
-
     function toolbarBoxStyle() {
-        var shorts = shortsToolbarLayout();
         var opacity = IS_IOS ? '1' : '0.75';
         var font = IS_IOS ? '14px' : '11px';
-        var align = shorts ? 'flex-start' : 'flex-end';
-        var edges;
-        if (shorts) {
-            // Shorts keeps subscribe, title, and the action rail on the
-            // bottom and right. Sit under the top chrome on the left so
-            // quality / SB / DA stay reachable without covering them.
-            var top = IS_IOS ? 'calc(52px + env(safe-area-inset-top, 0px))' : '12px';
-            var left = IS_IOS ? 'max(8px, env(safe-area-inset-left, 0px))' : '8px';
-            edges = 'top:' + top + ';left:' + left + ';right:auto;bottom:auto';
-        } else {
-            var bottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : '42px';
-            var right = IS_IOS ? 'max(8px, env(safe-area-inset-right, 0px))' : '8px';
-            edges = 'bottom:' + bottom + ';right:' + right + ';top:auto;left:auto';
-        }
-        return 'position:absolute;' + edges + ';z-index:2147483646;display:flex;flex-direction:column;gap:6px;align-items:' +
-            align + ';pointer-events:auto;font:' + font + '/1.2 -apple-system,system-ui,sans-serif;opacity:' +
+        var bottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : '42px';
+        var right = IS_IOS ? 'max(8px, env(safe-area-inset-right, 0px))' : '8px';
+        var edges = 'bottom:' + bottom + ';right:' + right + ';top:auto;left:auto';
+        return 'position:absolute;' + edges + ';z-index:2147483646;display:flex;flex-direction:column;gap:6px;align-items:flex-end' +
+            ';pointer-events:auto;font:' + font + '/1.2 -apple-system,system-ui,sans-serif;opacity:' +
             opacity + ';transition:opacity 0.15s';
     }
 
@@ -3552,15 +3526,6 @@
         menu.style.position = 'absolute';
         menu.style.height = 'auto';
         menu.style.maxHeight = options.maxHeight || '60vh';
-        if (shortsToolbarLayout()) {
-            menu.style.top = '100%';
-            menu.style.bottom = 'auto';
-            menu.style.left = options.downLeft || '0';
-            menu.style.right = options.downRight || 'auto';
-            menu.style.marginTop = options.gap || '4px';
-            menu.style.marginBottom = '0';
-            return;
-        }
         menu.style.top = 'auto';
         menu.style.bottom = '100%';
         menu.style.left = options.upLeft || 'auto';
@@ -3579,10 +3544,9 @@
         var toolbar = document.createElement('div');
         toolbar.className = 'wblock-tc-toolbar';
         // Watch pages sit above Safari's native control strip at the
-        // bottom-right. Shorts uses the top-left so the same buttons miss
-        // the subscribe row and action rail. The mobile toolbar auto-hides
-        // and reappears on a tap to the video surface.
-        toolbar.setAttribute('data-wblock-tc-placement', shortsToolbarLayout() ? 'shorts' : 'watch');
+        // bottom-right. The mobile toolbar auto-hides and reappears on a
+        // tap to the video surface. (Shorts never builds a toolbar; the
+        // cleaner is fully suspended there.)
         toolbar.style.cssText = toolbarBoxStyle();
 
         var btnStyle = 'background:rgba(0,0,0,0.7);color:#fff;border:none;border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;-webkit-user-select:none;user-select:none';
@@ -3592,7 +3556,7 @@
         }
         var playbackRow = document.createElement('div');
         playbackRow.className = 'wblock-tc-playback-row';
-        var rowJustify = shortsToolbarLayout() ? 'flex-start' : 'flex-end';
+        var rowJustify = 'flex-end';
         playbackRow.style.cssText = 'display:flex;gap:6px;align-items:center;justify-content:' + rowJustify;
         var servicesRow = document.createElement('div');
         servicesRow.className = 'wblock-tc-services-row';
@@ -3619,9 +3583,7 @@
         var menuFont = IS_IOS ? '16px' : '12px';
         var menuPadding = IS_IOS ? '8px 0' : '4px 0';
         var menuMinWidth = IS_IOS ? '140px' : '100px';
-        var qualityMenuAnchor = shortsToolbarLayout()
-            ? 'top:100%;left:0;right:auto;margin-top:4px;margin-bottom:0;'
-            : 'bottom:100%;right:0;margin-bottom:4px;';
+        var qualityMenuAnchor = 'bottom:100%;right:0;margin-bottom:4px;';
         qualityMenu.style.cssText = 'position:absolute;' + qualityMenuAnchor + 'box-sizing:border-box;background:rgba(0,0,0,0.92);border-radius:5px;padding:' + menuPadding + ';min-width:' + menuMinWidth + ';max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch;display:none;z-index:70;font:' + menuFont + '/1.8 -apple-system,system-ui,sans-serif';
 
         function buildQualityMenu() {
@@ -4410,7 +4372,7 @@
         } catch (e) { return false; }
     }
 
-    function shortsClassMutationOnlyChangesOurClasses(record) {
+    function classMutationOnlyChangesOurClasses(record) {
         if (!record || record.type !== 'attributes' || record.attributeName !== 'class') return false;
         function withoutTubeClasses(value) {
             return String(value || '').split(/\s+/).filter(function (name) {
@@ -4429,7 +4391,7 @@
             var relevant = false;
             for (var i = 0; i < records.length && !relevant; i++) {
                 var record = records[i];
-                if (shortsClassMutationOnlyChangesOurClasses(record)) continue;
+                if (classMutationOnlyChangesOurClasses(record)) continue;
                 if (nodeMayContainPlayer(record.target)) { relevant = true; break; }
                 for (var j = 0; j < record.addedNodes.length; j++) {
                     if (nodeMayContainPlayer(record.addedNodes[j])) {
