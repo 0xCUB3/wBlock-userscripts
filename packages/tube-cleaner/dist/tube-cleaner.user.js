@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.14
+// @version      0.1.15
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -65,6 +65,7 @@
     var LOG_PREFIX = '[Tube Cleaner]';
     var STORAGE_AUDIO = 'wblock.tubeCleaner.audioOnly';
     var STORAGE_QUALITY = 'wblock.tubeCleaner.quality';
+    var STORAGE_TOOLBAR_HIDDEN = 'wblock.tubeCleaner.hideToolbar';
     var STORAGE_POSITION = 'wblock.tubeCleaner.position.';
     var ATTR_CLEANED = 'data-wblock-tc-cleaned';
 
@@ -275,6 +276,21 @@
 
     function setPreferredQuality(q) {
         try { localStorage.setItem(STORAGE_QUALITY, q); } catch (e) { /* ignore */ }
+    }
+
+    // Device-level preference to keep the wBlock toolbar (quality / SB / DA)
+    // off the video entirely. Double-tap or double-click the video reveals it
+    // temporarily; the checkbox lives in the SponsorBlock settings panel.
+    function isToolbarHidden() {
+        try { return localStorage.getItem(STORAGE_TOOLBAR_HIDDEN) === '1'; } catch (e) { return false; }
+    }
+
+    function setToolbarHidden(hidden) {
+        try {
+            if (hidden) { localStorage.setItem(STORAGE_TOOLBAR_HIDDEN, '1'); }
+            else { localStorage.removeItem(STORAGE_TOOLBAR_HIDDEN); }
+        } catch (e) { /* ignore */ }
+        document.dispatchEvent(new CustomEvent('wblock-tc-toolbar-pref'));
     }
 
     // ------------------------------------------------------------------
@@ -1440,6 +1456,7 @@
             title: 'SponsorBlock settings', enabled: 'Enable SponsorBlock', notice: 'Show Undo after automatic skips',
             duration: 'Minimum segment length', current: 'Disable for this video', channel: 'Disable on this channel', reset: 'Reset defaults',
             using: 'Using SponsorBlock',
+            hideControls: 'Hide these controls (double-tap the video to show them)',
             any: 'Any length', auto: 'Auto skip', ask: 'Show skip button', off: 'Disabled',
             skipped: 'segment skipped', segment: 'segment', undo: 'Undo', skip: 'Skip',
             names: ['Sponsor', 'Self-promotion', 'Interaction reminder', 'Intro', 'Outro', 'Preview or recap', 'Filler', 'Off-topic music']
@@ -1464,6 +1481,14 @@
             ru:'Использует SponsorBlock', zh:'使用 SponsorBlock' };
         if (!selected.channel) selected.channel = channelLabels[language] || english.channel;
         if (!selected.using) selected.using = usingLabels[language] || english.using;
+        var hideControlsLabels = { de:'Diese Steuerelemente ausblenden (Doppeltippen auf das Video zeigt sie)',
+            es:'Ocultar estos controles (toca dos veces el vídeo para mostrarlos)',
+            fr:'Masquer ces commandes (touchez deux fois la vidéo pour les afficher)',
+            it:'Nascondi questi controlli (tocca due volte il video per mostrarli)',
+            pt:'Ocultar estes controles (toque duas vezes no vídeo para mostrá-los)',
+            ja:'このコントロールを非表示（動画をダブルタップで表示）', ko:'이 컨트롤 숨기기(동영상을 두 번 탭하면 표시)',
+            ru:'Скрыть эти элементы управления (двойное нажатие по видео покажет их)', zh:'隐藏这些控件（双击视频可显示）' };
+        if (!selected.hideControls) selected.hideControls = hideControlsLabels[language] || english.hideControls;
         return selected;
     }
 
@@ -1533,10 +1558,15 @@
         var locale = sponsorBlockLocale();
         var notice = document.createElement('div');
         notice.className = 'wblock-tc-sponsor-notice';
+        // Keep the toast translucent so it never blots out the content under
+        // it; the blur keeps the label readable over bright video frames.
+        var noticePad = IS_IOS ? '7px 10px' : '9px 12px';
+        var noticeFont = IS_IOS ? '12px' : '13px';
         notice.style.cssText = 'position:absolute;right:16px;top:16px;z-index:2147483647;' +
-            'display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;' +
-            'background:rgba(20,20,20,.92);color:#fff;font:13px -apple-system,BlinkMacSystemFont,sans-serif;' +
-            'box-shadow:0 3px 14px rgba(0,0,0,.35);pointer-events:auto';
+            'display:flex;align-items:center;gap:10px;padding:' + noticePad + ';border-radius:9px;' +
+            'background:rgba(20,20,20,.55);-webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px);' +
+            'color:#fff;font:' + noticeFont + ' -apple-system,BlinkMacSystemFont,sans-serif;' +
+            'box-shadow:0 3px 14px rgba(0,0,0,.25);pointer-events:auto;transition:opacity .3s';
         var label = document.createElement('span');
         label.textContent = sponsorBlockCategoryName(segment.category) + ' ' +
             (action === 'undo' ? locale.skipped : locale.segment);
@@ -1548,7 +1578,8 @@
         notice.appendChild(label);
         notice.appendChild(actionButton);
         player.appendChild(notice);
-        var removeTimer = setTimeout(function () { if (notice.parentNode) notice.remove(); }, 5000);
+        var fadeTimer = setTimeout(function () { notice.style.opacity = '0'; }, 3700);
+        var removeTimer = setTimeout(function () { if (notice.parentNode) notice.remove(); }, 4000);
         actionButton.addEventListener('click', function () {
             if (action === 'undo') {
                 ignored[segment.UUID || segment.segment.join(':')] = true;
@@ -1556,10 +1587,11 @@
             } else {
                 try { video.currentTime = segment.segment[1]; } catch (e) { /* ignore */ }
             }
+            clearTimeout(fadeTimer);
             clearTimeout(removeTimer);
             notice.remove();
         });
-        return function () { clearTimeout(removeTimer); if (notice.parentNode) notice.remove(); };
+        return function () { clearTimeout(fadeTimer); clearTimeout(removeTimer); if (notice.parentNode) notice.remove(); };
     }
 
     function setupSponsorBlock(player, video) {
@@ -3255,6 +3287,22 @@
         return q || 'auto';
     }
 
+    // The SABR mobile player sometimes reports 'unknown' (or lags) from
+    // getPlaybackQuality. Fall back to the decoded frame height so the label
+    // reflects the stream that is actually rendering.
+    function qualityFromVideoHeight(video) {
+        var h = video && Math.min(video.videoWidth || Infinity, video.videoHeight || Infinity);
+        if (!h || !isFinite(h)) return null;
+        if (h >= 2000) return 'hd2160';
+        if (h >= 1300) return 'hd1440';
+        if (h >= 1000) return 'hd1080';
+        if (h >= 650) return 'hd720';
+        if (h >= 430) return 'large';
+        if (h >= 330) return 'medium';
+        if (h >= 210) return 'small';
+        return 'tiny';
+    }
+
     // Click YouTube's internal settings button to open the quality menu
     function openSettingsMenu(player) {
         var settingsBtn = player.querySelector('.ytp-settings-button') ||
@@ -3570,9 +3618,21 @@
         qualityBtn.type = 'button';
         qualityBtn.style.cssText = btnStyle;
         function updateQualityBtn() {
+            var preferred = getPreferredQuality();
             var current = getCurrentQuality();
-            var label = QUALITY_LABELS[current] || current;
-            qualityBtn.textContent = label;
+            if (current === 'auto' || current === 'unknown' || !QUALITY_LABELS[current]) {
+                var mapped = qualityFromVideoHeight(video);
+                if (mapped) current = mapped;
+            }
+            var currentLabel = QUALITY_LABELS[current] || current;
+            if (preferred === 'auto') {
+                // Auto is a mode, not a wedged setting. Small portrait players
+                // legitimately stream 360p on auto; show it as status so it
+                // does not read as a stuck quality choice.
+                qualityBtn.textContent = current === 'auto' ? 'Auto' : 'Auto (' + currentLabel + ')';
+            } else {
+                qualityBtn.textContent = currentLabel;
+            }
             qualityBtn.title = 'Video quality (click to change)';
         }
         updateQualityBtn();
@@ -3810,6 +3870,12 @@
             sponsorMenu.appendChild(sponsorCheckboxRow(locale.notice, settings.showNotice, function (checked) {
                 settings.showNotice = checked;
                 saveSponsorBlockSettings(settings);
+            }));
+            // Whole-toolbar visibility preference. It lives here because this
+            // is the only settings surface Tube Cleaner has; it hides the
+            // quality, SB, and DA pills together on this device.
+            sponsorMenu.appendChild(sponsorCheckboxRow(locale.hideControls, isToolbarHidden(), function (checked) {
+                setToolbarHidden(checked);
             }));
             var durationRow = document.createElement('label');
             durationRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 0';
@@ -4049,6 +4115,22 @@
         // PiP button is intentionally omitted — Safari's native controls
         // already provide PiP. Auto PiP handles automatic PiP entry.
 
+        // Device-level "hide these controls" preference. While set, the
+        // toolbar refuses to appear except while one of its own panels is
+        // open (so the checkbox that unsets it stays reachable) or after a
+        // deliberate double-tap / double-click reveal on the video.
+        var toolbarUserHidden = isToolbarHidden();
+        var toolbarRevealOverride = false;
+        function anyToolbarPanelOpen() {
+            var panels = [qualityMenu, sponsorMenu, deArrowMenu];
+            return panels.some(function (p) {
+                return p && p.style.display !== 'none' && p.style.display !== '';
+            });
+        }
+        function toolbarSuppressed() {
+            return toolbarUserHidden && !toolbarRevealOverride && !anyToolbarPanelOpen();
+        }
+
         if (IS_IOS) {
             // The mobile toolbar auto-hides a few seconds after playback
             // resumes and reappears on a tap to the video surface, mirroring
@@ -4060,6 +4142,7 @@
             var TOOLBAR_HIDE_DELAY = 3000;
 
             function showToolbar() {
+                if (toolbarSuppressed()) return;
                 toolbar.style.opacity = '1';
                 toolbar.style.setProperty('pointer-events', 'auto', 'important');
                 clearTimeout(toolbarTimer);
@@ -4098,6 +4181,32 @@
             }
             video.addEventListener('click', onVideoTap);
 
+            // Double-tap reveals (or re-hides) the toolbar while the hide
+            // preference is on; single taps keep ignoring it.
+            function onVideoReveal() {
+                if (!toolbarUserHidden) return;
+                toolbarRevealOverride = !toolbarRevealOverride;
+                if (toolbarRevealOverride) {
+                    showToolbar();
+                    if (!video.paused && !video.ended) { scheduleHideToolbar(); }
+                } else {
+                    hideToolbar();
+                }
+            }
+            video.addEventListener('dblclick', onVideoReveal);
+
+            function onToolbarPref() {
+                toolbarUserHidden = isToolbarHidden();
+                toolbarRevealOverride = false;
+                if (toolbarUserHidden) {
+                    scheduleHideToolbar();
+                } else {
+                    showToolbar();
+                    if (!video.paused && !video.ended) { scheduleHideToolbar(); }
+                }
+            }
+            document.addEventListener('wblock-tc-toolbar-pref', onToolbarPref);
+
             // Keep visible while the toolbar itself is being touched.
             toolbar.addEventListener('touchstart', function () {
                 showToolbar();
@@ -4110,13 +4219,21 @@
             video.addEventListener('play', onVideoPlay);
             video.addEventListener('pause', onVideoPause);
 
-            // Initial state: visible if paused, auto-hide once playing.
-            showToolbar();
-            if (!video.paused && !video.ended) { scheduleHideToolbar(); }
+            // Initial state: visible if paused, auto-hide once playing. The
+            // hide preference starts it hidden outright.
+            if (toolbarUserHidden) {
+                toolbar.style.opacity = '0';
+                toolbar.style.setProperty('pointer-events', 'none', 'important');
+            } else {
+                showToolbar();
+                if (!video.paused && !video.ended) { scheduleHideToolbar(); }
+            }
 
             registerCleanup(function () {
                 clearTimeout(toolbarTimer);
                 video.removeEventListener('click', onVideoTap);
+                video.removeEventListener('dblclick', onVideoReveal);
+                document.removeEventListener('wblock-tc-toolbar-pref', onToolbarPref);
                 video.removeEventListener('play', onVideoPlay);
                 video.removeEventListener('pause', onVideoPause);
             });
@@ -4147,13 +4264,14 @@
             }
 
             function showToolbar() {
+                if (toolbarSuppressed()) return;
                 toolbar.style.opacity = '1';
                 toolbar.style.setProperty('pointer-events', 'auto', 'important');
                 clearTimeout(toolbarTimer);
             }
 
             function hideToolbar() {
-                if (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended) {
+                if (!toolbarSuppressed() && (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended)) {
                     showToolbar();
                     return;
                 }
@@ -4162,7 +4280,7 @@
             }
 
             function scheduleHideToolbar() {
-                if (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended) {
+                if (!toolbarSuppressed() && (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended)) {
                     showToolbar();
                     return;
                 }
@@ -4221,6 +4339,27 @@
             function onVideoPause() { showToolbar(); }
             video.addEventListener('pause', onVideoPause);
 
+            // Double-click reveals (or re-hides) the toolbar while the hide
+            // preference is on.
+            function onVideoReveal() {
+                if (!toolbarUserHidden) return;
+                toolbarRevealOverride = !toolbarRevealOverride;
+                if (toolbarRevealOverride) {
+                    showToolbar();
+                    scheduleHideToolbar();
+                } else {
+                    hideToolbar();
+                }
+            }
+            video.addEventListener('dblclick', onVideoReveal);
+
+            function onToolbarPref() {
+                toolbarUserHidden = isToolbarHidden();
+                toolbarRevealOverride = false;
+                if (toolbarUserHidden) { scheduleHideToolbar(); }
+            }
+            document.addEventListener('wblock-tc-toolbar-pref', onToolbarPref);
+
             var presentationTimer = null;
             function onPresentationModeChange() {
                 if (video.webkitPresentationMode === 'picture-in-picture') {
@@ -4235,6 +4374,8 @@
                 clearTimeout(toolbarTimer);
                 clearTimeout(presentationTimer);
                 document.removeEventListener('mousemove', onDocumentMouseMove);
+                video.removeEventListener('dblclick', onVideoReveal);
+                document.removeEventListener('wblock-tc-toolbar-pref', onToolbarPref);
                 player.removeEventListener('mouseenter', onPlayerMouseEnter);
                 player.removeEventListener('mouseleave', onPlayerMouseLeave);
                 video.removeEventListener('play', onVideoPlay);
@@ -4454,6 +4595,14 @@
             applyPreferredQuality: applyPreferredQuality,
             getPreferredQuality: getPreferredQuality,
             setPreferredQuality: setPreferredQuality,
+            isToolbarHidden: isToolbarHidden,
+            setToolbarHidden: setToolbarHidden,
+            previewSponsorNotice: function () {
+                var p = findPlayer();
+                if (!p || !activeVideo) return 'no player';
+                showSponsorBlockNotice(p, activeVideo, { category: 'sponsor', segment: [0, 5], UUID: 'preview' }, {}, 'undo');
+                return 'ok';
+            },
             QUALITY_LABELS: QUALITY_LABELS,
             getPlayer: findPlayer,
             getChapters: extractChapters,
