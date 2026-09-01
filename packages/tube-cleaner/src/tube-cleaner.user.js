@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.15
+// @version      0.1.16
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2913,6 +2913,9 @@
         });
     }
 
+    // Diagnostic counter for the PiP caption pump below.
+    var pipCaptionPumpTicks = 0;
+
     function setupNativeSubtitles(player, video) {
         if (!player || !video || !window.fetch || !window.Blob || !URL.createObjectURL) return;
         var cancelled = false;
@@ -2996,9 +2999,49 @@
             }, 500);
         }
 
+        // WebKit repaints native VTT cues into the PiP overlay during the
+        // page's rendering updates. A genuinely hidden tab stops those
+        // updates, so the PiP window keeps showing the last painted line even
+        // though playback and cue timing continue. The media element still
+        // fires timeupdate while hidden; watch for cue boundaries there and
+        // cycle the showing track's mode, which makes WebKit resolve and
+        // paint the current cue again. Cycling only at boundaries keeps the
+        // foreground path untouched and avoids flicker.
+        var pipCueSignature = null;
+        function activeCueSignature(track, time) {
+            var cues = track.cues;
+            if (!cues) return '';
+            var signature = '';
+            for (var i = 0; i < cues.length; i++) {
+                if (cues[i].startTime <= time && time < cues[i].endTime) {
+                    signature += cues[i].startTime + '-' + cues[i].endTime + ';';
+                }
+            }
+            return signature;
+        }
+        function onPiPCaptionTick() {
+            var forced = !!window.__wblockTCForcePiPCaptionPump;
+            if (!forced && (!_realHidden || !isPiPActive(video))) { pipCueSignature = null; return; }
+            var tracks = video.textTracks;
+            if (!tracks) return;
+            for (var i = 0; i < tracks.length; i++) {
+                var track = tracks[i];
+                if (track.mode !== 'showing') continue;
+                var signature = activeCueSignature(track, video.currentTime);
+                if (pipCueSignature === signature) return;
+                pipCueSignature = signature;
+                track.mode = 'hidden';
+                track.mode = 'showing';
+                pipCaptionPumpTicks++;
+                return;
+            }
+        }
+        video.addEventListener('timeupdate', onPiPCaptionTick);
+
         registerCleanup(function () {
             cancelled = true;
             stopRetry();
+            video.removeEventListener('timeupdate', onPiPCaptionTick);
             if (controller) controller.abort();
             for (var i = 0; i < elements.length; i++) {
                 if (elements[i].parentNode) elements[i].remove();
@@ -4596,6 +4639,7 @@
             getPreferredQuality: getPreferredQuality,
             setPreferredQuality: setPreferredQuality,
             isToolbarHidden: isToolbarHidden,
+            pipCaptionPumpTicks: function () { return pipCaptionPumpTicks; },
             setToolbarHidden: setToolbarHidden,
             previewSponsorNotice: function () {
                 var p = findPlayer();
