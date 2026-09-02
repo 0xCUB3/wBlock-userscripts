@@ -31,7 +31,7 @@ caption selection to YouTube’s styled renderer), and k-anonymous SponsorBlock
 skipping with a bounded session cache, precise boundary timers, persistent
 category modes, manual skip, and Undo behavior. The desktop fixture also enables
 the otherwise opt-in DeArrow integration (configured by the wBlock app through an injected constant) and verifies submitted watch/card titles,
-cached thumbnails, the opt-in random-frame fallback for videos without a submitted
+fetched thumbnails (re-requested once at the server's `X-Timestamp` when it differs from the branding time), the opt-in random-frame fallback for videos without a submitted
 thumbnail, separate title/thumbnail settings, original-on-hover restoration,
 bounded request reuse across SPA activation, and the SB service row with no
 DeArrow pill on the player.

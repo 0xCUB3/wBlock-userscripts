@@ -55,6 +55,8 @@ const userscript = readFileSync(SCRIPT_PATH, 'utf8');
 const playerUserscript = readFileSync(PLAYER_SCRIPT_PATH, 'utf8');
 const injectorSource = readFileSync(INJECTOR_PATH, 'utf8');
 const filter = (process.argv.find(a => a.startsWith('--filter=')) || '').split('=')[1] || '';
+// Thumbnail URLs the current scenario requested from dearrow-thumb.ajay.app.
+let page_thumbnailRequests = [];
 
 const iosStuckPreferencesPrelude = `
 try {
@@ -331,11 +333,27 @@ async function runScenario(name, { device, fixture, ua, hasTouch, viewport, scri
   if (hasTouch) ctxOpts.hasTouch = true;
   if (viewport) ctxOpts.viewport = viewport;
   const context = await browser.newContext(ctxOpts);
-  await context.route('https://dearrow-thumb.ajay.app/**', route => route.fulfill({
-    status: 200,
-    contentType: 'image/svg+xml',
-    body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"><rect width="16" height="9" fill="#345"/></svg>',
-  }));
+  // The thumbnail server reports the frame time it actually served in
+  // X-Timestamp. CARDVID1234 at 12.5 answers with 14 so the script's
+  // mandatory re-request at the served time is exercised.
+  const thumbnailRequests = [];
+  await context.route('https://dearrow-thumb.ajay.app/**', route => {
+    const url = new URL(route.request().url());
+    thumbnailRequests.push(url.href);
+    const requested = Number(url.searchParams.get('time'));
+    const served = url.searchParams.get('videoID') === 'CARDVID1234' && requested === 12.5 ? 14 : requested;
+    return route.fulfill({
+      status: 200,
+      contentType: 'image/svg+xml',
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Expose-Headers': 'X-Timestamp, X-Title, X-Failure-Reason',
+        'X-Timestamp': String(served),
+      },
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="9"><rect width="16" height="9" fill="#345"/></svg>',
+    });
+  });
+  page_thumbnailRequests = thumbnailRequests;
   if (gotoURL && responseBody != null) {
     const origin = new URL(gotoURL).origin + '/**';
     await context.route(origin, route => route.fulfill({
@@ -1216,16 +1234,22 @@ async function qualityUISelectionCheck(page, scenario) {
     const watchTitle = document.querySelector('#watch-metadata h1 yt-formatted-string')?.textContent;
     const cardTitle = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
     const thumbnail = document.querySelector('ytd-compact-video-renderer img')?.getAttribute('src') || '';
+    const requested = document.querySelector('ytd-compact-video-renderer img')?.getAttribute('data-wblock-dearrow-thumbnail') || '';
     const requests = window.__wblockDeArrowRequests || [];
     const hashRequest = requests.find(value => /api\/branding\/[a-f0-9]{4}/.test(value));
     const cardRequest = requests.find(value => value.includes('videoID=CARDVID1234'));
     return {
       pass: watchTitle === 'Accurate Watch Title' && cardTitle === 'Accurate Related Title' &&
-        thumbnail.includes('dearrow-thumb.ajay.app/api/v1/getThumbnail') && thumbnail.includes('time=12.5') &&
-        !!hashRequest && !hashRequest.includes('dQw4w9WgXcQ') && !!cardRequest,
-      detail: `watch=${watchTitle} card=${cardTitle} requests=${requests.length} thumbnail=${thumbnail}`,
+        thumbnail.startsWith('blob:') && requested.includes('dearrow-thumb.ajay.app/api/v1/getThumbnail') &&
+        requested.includes('time=14') && !!hashRequest && !hashRequest.includes('dQw4w9WgXcQ') && !!cardRequest,
+      detail: `watch=${watchTitle} card=${cardTitle} requests=${requests.length} thumbnail=${thumbnail} requested=${requested}`,
     };
   });
+  record('desktop', 're-requests a DeArrow thumbnail at the served X-Timestamp when it differs',
+    page_thumbnailRequests.some(u => u.includes('videoID=CARDVID1234') && u.includes('time=12.5')) &&
+    page_thumbnailRequests.some(u => u.includes('videoID=CARDVID1234') && u.includes('time=14')) &&
+    page_thumbnailRequests.filter(u => u.includes('videoID=CARDVID1234')).length === 2,
+    `thumbnailRequests=${page_thumbnailRequests.filter(u => u.includes('CARDVID1234')).join(' ')}`);
   await page.evaluate(() => document.querySelector('ytd-compact-video-renderer').dispatchEvent(new MouseEvent('mouseenter')));
   await check(page, 'desktop', 'shows original DeArrow card branding on hover', () => {
     const title = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
@@ -1237,7 +1261,7 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'restores custom DeArrow card branding after hover', () => {
     const title = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
     const thumbnail = document.querySelector('ytd-compact-video-renderer img')?.getAttribute('src') || '';
-    return { pass: title === 'Accurate Related Title' && thumbnail.includes('dearrow-thumb.ajay.app'),
+    return { pass: title === 'Accurate Related Title' && thumbnail.startsWith('blob:'),
       detail: `title=${title} thumbnail=${thumbnail}` };
   });
   await page.evaluate(() => {
@@ -1248,7 +1272,7 @@ async function qualityUISelectionCheck(page, scenario) {
     const cardTitle = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
     const thumbnail = document.querySelector('ytd-compact-video-renderer img')?.getAttribute('src') || '';
     return { pass: watchTitle === 'Original Watch Title' &&
-        cardTitle === 'Original Related Title' && thumbnail.includes('dearrow-thumb.ajay.app'),
+        cardTitle === 'Original Related Title' && thumbnail.startsWith('blob:'),
       detail: `watch=${watchTitle} card=${cardTitle}` };
   });
   await page.evaluate(() => {
@@ -1341,11 +1365,11 @@ async function qualityUISelectionCheck(page, scenario) {
     card.innerHTML = '<a id="thumbnail" href="/watch?v=RANDOMVID01"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="></a><a id="video-title" href="/watch?v=RANDOMVID01">Original random video</a>';
     document.getElementById('recommendations').appendChild(card);
   });
-  await page.waitForFunction(() => document.querySelector('[data-video-id="RANDOMVID01"] img')?.getAttribute('src')?.includes('dearrow-thumb.ajay.app/api/v1/getThumbnail'));
+  await page.waitForFunction(() => document.querySelector('[data-video-id="RANDOMVID01"] img')?.getAttribute('src')?.startsWith('blob:'));
   await check(page, 'desktop', 'uses DeArrow random-time fallback when a video has no submitted thumbnail', () => {
     const image = document.querySelector('[data-video-id="RANDOMVID01"] img');
-    const thumbnail = image?.getAttribute('src') || '';
-    return { pass: thumbnail.includes('time=30'), detail: `thumbnail=${thumbnail}` };
+    const requested = image?.getAttribute('data-wblock-dearrow-thumbnail') || '';
+    return { pass: requested.includes('dearrow-thumb.ajay.app/api/v1/getThumbnail') && requested.includes('time=30'), detail: `requested=${requested}` };
   });
   await page.evaluate(() => {
     document.querySelector('.wblock-tc-sponsor-button').click();
@@ -1362,6 +1386,11 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: panel?.style.display === 'block' && settings.modes?.selfpromo === 'auto' &&
         settings.modes?.interaction === 'ask',
       detail: `panel=${panel?.style.display} selfpromo=${settings.modes?.selfpromo} interaction=${settings.modes?.interaction}` };
+  });
+  await check(page, 'desktop', 'credits SponsorBlock and links its donate page from the panel footer', () => {
+    const links = [...document.querySelectorAll('.wblock-tc-sponsor-menu a')].map(a => a.href + '|' + a.textContent);
+    return { pass: links.includes('https://sponsor.ajay.app/|Using SponsorBlock') && links.includes('https://sponsor.ajay.app/donate/|Donate'),
+      detail: links.join(' ') };
   });
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');

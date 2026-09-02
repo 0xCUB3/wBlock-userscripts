@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.21
+// @version      0.1.22
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1496,7 +1496,7 @@
         var english = {
             title: 'SponsorBlock settings', enabled: 'Enable SponsorBlock', notice: 'Show Undo after automatic skips',
             duration: 'Minimum segment length', current: 'Disable for this video', channel: 'Disable on this channel', reset: 'Reset defaults',
-            using: 'Using SponsorBlock',
+            using: 'Using SponsorBlock', donate: 'Donate',
             hideControls: 'Hide these controls (double-tap the video to show them)',
             any: 'Any length', auto: 'Auto skip', ask: 'Show skip button', off: 'Disabled',
             skipped: 'segment skipped', segment: 'segment', undo: 'Undo', skip: 'Skip',
@@ -1521,7 +1521,10 @@
             it:'Usa SponsorBlock', pt:'Usa SponsorBlock', ja:'SponsorBlockを使用', ko:'SponsorBlock 사용',
             ru:'Использует SponsorBlock', zh:'使用 SponsorBlock' };
         if (!selected.channel) selected.channel = channelLabels[language] || english.channel;
+        var donateLabels = { de:'Spenden', es:'Donar', fr:'Faire un don', it:'Dona', pt:'Doar', ja:'寄付', ko:'기부',
+            ru:'Поддержать', zh:'捐款' };
         if (!selected.using) selected.using = usingLabels[language] || english.using;
+        if (!selected.donate) selected.donate = donateLabels[language] || english.donate;
         var hideControlsLabels = { de:'Diese Steuerelemente ausblenden (Doppeltippen auf das Video zeigt sie)',
             es:'Ocultar estos controles (toca dos veces el vídeo para mostrarlos)',
             fr:'Masquer ces commandes (touchez deux fois la vidéo pour les afficher)',
@@ -2108,39 +2111,108 @@
         else element.setAttribute(name, value);
     }
 
-    function applyDeArrowThumbnailElement(element, videoId, timestamp) {
-        if (!element) return;
-        var url = DEARROW_THUMBNAIL_API + '?videoID=' + encodeURIComponent(videoId) +
+    function deArrowThumbnailUrl(videoId, timestamp) {
+        return DEARROW_THUMBNAIL_API + '?videoID=' + encodeURIComponent(videoId) +
             '&time=' + encodeURIComponent(String(timestamp));
-        if (element._wblockDeArrowOriginalSrc === undefined) {
-            element._wblockDeArrowOriginalSrc = element.getAttribute('src');
-            element._wblockDeArrowOriginalSrcset = element.getAttribute('srcset');
-            element._wblockDeArrowOriginalReferrerPolicy = element.getAttribute('referrerpolicy');
-        } else if (!element._wblockDeArrowShowingOriginal && element.getAttribute('src') !== url &&
-            element.getAttribute('src') !== element._wblockDeArrowOriginalSrc) {
-            // YouTube recycles card image elements as the feed changes. Preserve
-            // its newly assigned original before applying the cached thumbnail.
-            element._wblockDeArrowOriginalSrc = element.getAttribute('src');
-            element._wblockDeArrowOriginalSrcset = element.getAttribute('srcset');
-            element._wblockDeArrowOriginalReferrerPolicy = element.getAttribute('referrerpolicy');
-            delete element._wblockDeArrowThumbnailFailed;
+    }
+
+    // The thumbnail server may answer with a frame from a different time than
+    // the one requested and reports the time it used in X-Timestamp. The API
+    // docs require comparing that header with the branding timestamp and
+    // requesting once more at the server's time when they differ, so the image
+    // is fetched here rather than assigned straight to the element's src.
+    function fetchDeArrowThumbnail(videoId, timestamp, retried) {
+        var url = deArrowThumbnailUrl(videoId, timestamp);
+        if (!window.fetch || !window.URL || typeof URL.createObjectURL !== 'function') return Promise.resolve(null);
+        return fetch(url, { referrerPolicy: 'no-referrer' }).then(function (response) {
+            if (response.status !== 200) {
+                throw new Error('DeArrow thumbnail HTTP ' + response.status + ' ' +
+                    (response.headers.get('X-Failure-Reason') || ''));
+            }
+            var served = parseFloat(response.headers.get('X-Timestamp'));
+            if (!retried && isFinite(served) && served >= 0 && Math.abs(served - timestamp) > 0.001) {
+                log('DeArrow thumbnail served at', served, 'instead of', timestamp);
+                return fetchDeArrowThumbnail(videoId, served, true);
+            }
+            return response.blob().then(function (blob) {
+                return { url: url, objectUrl: URL.createObjectURL(blob) };
+            });
+        }).catch(function (error) {
+            log('DeArrow thumbnail unavailable', error);
+            return null;
+        });
+    }
+
+    function releaseDeArrowThumbnail(element) {
+        var src = element._wblockDeArrowCustomSrc;
+        if (src && src.indexOf('blob:') === 0) {
+            try { URL.revokeObjectURL(src); } catch (e) { /* ignore */ }
         }
-        element._wblockDeArrowCustomSrc = url;
-        element.setAttribute('data-wblock-dearrow-thumbnail', '');
-        if (element._wblockDeArrowThumbnailFailed === url || element._wblockDeArrowShowingOriginal) return;
+        delete element._wblockDeArrowCustomSrc;
+        delete element._wblockDeArrowRequestedUrl;
+        delete element._wblockDeArrowThumbnailFailed;
+    }
+
+    function showDeArrowThumbnail(element) {
+        if (!element._wblockDeArrowCustomSrc) return;
         element.removeAttribute('srcset');
         element.setAttribute('referrerpolicy', 'no-referrer');
-        if (element.getAttribute('src') !== url) element.setAttribute('src', url);
+        if (element.getAttribute('src') !== element._wblockDeArrowCustomSrc) {
+            element.setAttribute('src', element._wblockDeArrowCustomSrc);
+        }
+    }
+
+    function applyDeArrowThumbnailElement(element, videoId, timestamp) {
+        if (!element) return;
+        var url = deArrowThumbnailUrl(videoId, timestamp);
+        var currentSrc = element.getAttribute('src');
+        if (element._wblockDeArrowOriginalSrc === undefined) {
+            element._wblockDeArrowOriginalSrc = currentSrc;
+            element._wblockDeArrowOriginalSrcset = element.getAttribute('srcset');
+            element._wblockDeArrowOriginalReferrerPolicy = element.getAttribute('referrerpolicy');
+        } else if (!element._wblockDeArrowShowingOriginal && currentSrc !== element._wblockDeArrowCustomSrc &&
+            currentSrc !== element._wblockDeArrowOriginalSrc) {
+            // YouTube recycles card image elements as the feed changes. Preserve
+            // its newly assigned original before applying the cached thumbnail.
+            element._wblockDeArrowOriginalSrc = currentSrc;
+            element._wblockDeArrowOriginalSrcset = element.getAttribute('srcset');
+            element._wblockDeArrowOriginalReferrerPolicy = element.getAttribute('referrerpolicy');
+            releaseDeArrowThumbnail(element);
+        }
+        if (!element.hasAttribute('data-wblock-dearrow-thumbnail')) element.setAttribute('data-wblock-dearrow-thumbnail', '');
+        if (element._wblockDeArrowThumbnailFailed === url || element._wblockDeArrowShowingOriginal) return;
         if (!element._wblockDeArrowErrorHooked) {
             element._wblockDeArrowErrorHooked = true;
             element.addEventListener('error', function () {
-                if (element.getAttribute('src') !== element._wblockDeArrowCustomSrc) return;
-                element._wblockDeArrowThumbnailFailed = element._wblockDeArrowCustomSrc;
+                if (!element._wblockDeArrowCustomSrc || element.getAttribute('src') !== element._wblockDeArrowCustomSrc) return;
+                var failedUrl = element._wblockDeArrowRequestedUrl;
+                releaseDeArrowThumbnail(element);
+                element._wblockDeArrowThumbnailFailed = failedUrl;
                 restoreDeArrowAttribute(element, 'src', element._wblockDeArrowOriginalSrc);
                 restoreDeArrowAttribute(element, 'srcset', element._wblockDeArrowOriginalSrcset);
                 restoreDeArrowAttribute(element, 'referrerpolicy', element._wblockDeArrowOriginalReferrerPolicy);
             });
         }
+        if (element._wblockDeArrowRequestedUrl === url) {
+            showDeArrowThumbnail(element);
+            return;
+        }
+        releaseDeArrowThumbnail(element);
+        element._wblockDeArrowRequestedUrl = url;
+        fetchDeArrowThumbnail(videoId, timestamp, false).then(function (result) {
+            if (element._wblockDeArrowRequestedUrl !== url) {
+                if (result) { try { URL.revokeObjectURL(result.objectUrl); } catch (e) { /* ignore */ } }
+                return;
+            }
+            if (!result) {
+                // The original YouTube thumbnail was never replaced, so it stays.
+                element._wblockDeArrowThumbnailFailed = url;
+                return;
+            }
+            element._wblockDeArrowCustomSrc = result.objectUrl;
+            element.setAttribute('data-wblock-dearrow-thumbnail', result.url);
+            if (!element._wblockDeArrowShowingOriginal) showDeArrowThumbnail(element);
+        });
     }
 
     function restoreDeArrowThumbnailElement(element) {
@@ -2151,8 +2223,7 @@
         delete element._wblockDeArrowOriginalSrc;
         delete element._wblockDeArrowOriginalSrcset;
         delete element._wblockDeArrowOriginalReferrerPolicy;
-        delete element._wblockDeArrowCustomSrc;
-        delete element._wblockDeArrowThumbnailFailed;
+        releaseDeArrowThumbnail(element);
         delete element._wblockDeArrowShowingOriginal;
         element.removeAttribute('data-wblock-dearrow-thumbnail');
     }
@@ -2189,10 +2260,8 @@
             if (image) {
                 image._wblockDeArrowShowingOriginal = false;
                 if (settings.replaceThumbnails && image._wblockDeArrowCustomSrc &&
-                    image._wblockDeArrowThumbnailFailed !== image._wblockDeArrowCustomSrc) {
-                    image.removeAttribute('srcset');
-                    image.setAttribute('referrerpolicy', 'no-referrer');
-                    image.setAttribute('src', image._wblockDeArrowCustomSrc);
+                    image._wblockDeArrowThumbnailFailed !== image._wblockDeArrowRequestedUrl) {
+                    showDeArrowThumbnail(image);
                 }
             }
         };
@@ -2276,7 +2345,7 @@
             var titleNeedsRepair = title && title._wblockDeArrowCustomText &&
                 title.textContent !== title._wblockDeArrowCustomText;
             var imageNeedsRepair = image && image._wblockDeArrowCustomSrc &&
-                image._wblockDeArrowThumbnailFailed !== image._wblockDeArrowCustomSrc &&
+                image._wblockDeArrowThumbnailFailed !== image._wblockDeArrowRequestedUrl &&
                 image.getAttribute('src') !== image._wblockDeArrowCustomSrc;
             if (!titleNeedsRepair && !imageNeedsRepair) return;
             applyDeArrowCard(card);
@@ -4043,10 +4112,17 @@
                 updateSponsorButton();
                 buildSponsorMenu();
             });
+            // SponsorBlock data is CC BY-NC-SA 4.0; the credit link is a license term.
+            var credits = document.createElement('span');
+            credits.style.cssText = 'display:inline-flex;gap:10px';
             var credit = document.createElement('a');
             credit.href = 'https://sponsor.ajay.app/'; credit.target = '_blank'; credit.rel = 'noopener noreferrer';
             credit.textContent = locale.using; credit.style.cssText = 'color:#69a9ff;text-decoration:none';
-            footer.appendChild(reset); footer.appendChild(credit); sponsorMenu.appendChild(footer);
+            var donate = document.createElement('a');
+            donate.href = 'https://sponsor.ajay.app/donate/'; donate.target = '_blank'; donate.rel = 'noopener noreferrer';
+            donate.textContent = locale.donate; donate.style.cssText = 'color:#69a9ff;text-decoration:none';
+            credits.appendChild(credit); credits.appendChild(donate);
+            footer.appendChild(reset); footer.appendChild(credits); sponsorMenu.appendChild(footer);
         }
 
         sponsorBtn.addEventListener('click', function (e) {
