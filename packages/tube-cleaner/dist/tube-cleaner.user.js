@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.16
+// @version      0.1.17
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -430,6 +430,13 @@
         '.wblock-tc-native .wblock-tc-sponsor-notice,',
         '.wblock-tc-native .wblock-tc-sponsor-notice *',
         '{ pointer-events: auto !important; }',
+        // A faded-out toolbar must not swallow taps. pointer-events does not
+        // cascade, so the buttons need their own rule while it is hidden.
+        '.wblock-tc-toolbar.wblock-tc-toolbar-hidden,',
+        '.wblock-tc-toolbar.wblock-tc-toolbar-hidden *,',
+        '.wblock-tc-native .wblock-tc-toolbar.wblock-tc-toolbar-hidden,',
+        '.wblock-tc-native .wblock-tc-toolbar.wblock-tc-toolbar-hidden *',
+        '{ pointer-events: none !important; }',
 
         // Mobile YouTube renders its new controls outside #movie_player in a
         // sibling custom-element tree. It appears after "Tap to unmute" and
@@ -732,7 +739,7 @@
             stateApplied = true;
             try {
                 if (carried.paused) video.pause();
-                else if (video.paused) {
+                else if (video.paused && !video.ended) {
                     var request = video.play();
                     if (request && request.catch) request.catch(function () { /* autoplay policy */ });
                 }
@@ -1201,7 +1208,7 @@
                         else video.currentTime = details.seekTime;
                     } catch (e) { /* ignore */ }
                 },
-                stop: function () { try { video.pause(); video.currentTime = 0; } catch (e) {} }
+                stop: function () { try { video.pause(); if (!video.ended) video.currentTime = 0; } catch (e) {} }
             };
             video._wblockMediaActions = Object.keys(actions);
             for (var action in actions) {
@@ -1677,6 +1684,13 @@
                 return;
             }
             var now = video.currentTime;
+            var duration = video.duration;
+            var hasDuration = isFinite(duration) && duration > 0;
+            // Once the media sits at its end, a segment whose SponsorBlock end
+            // time overshoots the real duration would keep re-seeking the
+            // element. YouTube treats any seek from its ended state as a
+            // replay request, so that loop restarts the video.
+            if (video.ended || (hasDuration && now >= duration - 0.05)) { clearBoundaryTimer(); return; }
             clearExitedSegmentState(now);
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
@@ -1692,7 +1706,9 @@
                         scheduleNextBoundary(settings, now, true);
                         return;
                     }
-                    try { video.currentTime = item.segment[1]; } catch (e) { return; }
+                    var target = item.segment[1];
+                    if (hasDuration && target > duration) target = duration;
+                    try { video.currentTime = target; } catch (e) { return; }
                     if (settings.showNotice) {
                         if (removeNotice) removeNotice();
                         removeNotice = showSponsorBlockNotice(player, video, item, ignored, 'undo');
@@ -3003,11 +3019,27 @@
         // page's rendering updates. A genuinely hidden tab stops those
         // updates, so the PiP window keeps showing the last painted line even
         // though playback and cue timing continue. The media element still
-        // fires timeupdate while hidden; watch for cue boundaries there and
-        // cycle the showing track's mode, which makes WebKit resolve and
-        // paint the current cue again. Cycling only at boundaries keeps the
-        // foreground path untouched and avoids flicker.
+        // fires timeupdate and cuechange while hidden; watch for cue
+        // boundaries there and cycle the showing track's mode, which makes
+        // WebKit resolve and paint the current cue again. The two halves of
+        // the cycle run in separate tasks: a same-task hidden/showing flip
+        // coalesces into a no-op configuration change and repaints nothing.
+        // A low-rate interval backs up the events in case the throttled
+        // background page delivers them late. Cycling only at boundaries
+        // keeps the foreground path untouched and avoids flicker.
         var pipCueSignature = null;
+        var pipPumpRestoreTimer = null;
+        var pipPumpInterval = null;
+        function cycleTrackMode(track) {
+            if (pipPumpRestoreTimer !== null) return;
+            track.mode = 'hidden';
+            pipCaptionPumpTicks++;
+            pipPumpRestoreTimer = setTimeout(function () {
+                pipPumpRestoreTimer = null;
+                if (cancelled) return;
+                try { if (track.mode === 'hidden') track.mode = 'showing'; } catch (e) { /* ignore */ }
+            }, 0);
+        }
         function activeCueSignature(track, time) {
             var cues = track.cues;
             if (!cues) return '';
@@ -3030,18 +3062,28 @@
                 var signature = activeCueSignature(track, video.currentTime);
                 if (pipCueSignature === signature) return;
                 pipCueSignature = signature;
-                track.mode = 'hidden';
-                track.mode = 'showing';
-                pipCaptionPumpTicks++;
+                cycleTrackMode(track);
                 return;
             }
         }
+        function onTrackAdded(event) {
+            if (event && event.track) event.track.addEventListener('cuechange', onPiPCaptionTick);
+        }
         video.addEventListener('timeupdate', onPiPCaptionTick);
+        if (video.textTracks && typeof video.textTracks.addEventListener === 'function') {
+            video.textTracks.addEventListener('addtrack', onTrackAdded);
+        }
+        pipPumpInterval = setInterval(onPiPCaptionTick, 500);
 
         registerCleanup(function () {
             cancelled = true;
             stopRetry();
             video.removeEventListener('timeupdate', onPiPCaptionTick);
+            if (video.textTracks && typeof video.textTracks.removeEventListener === 'function') {
+                video.textTracks.removeEventListener('addtrack', onTrackAdded);
+            }
+            if (pipPumpInterval !== null) { clearInterval(pipPumpInterval); pipPumpInterval = null; }
+            if (pipPumpRestoreTimer !== null) { clearTimeout(pipPumpRestoreTimer); pipPumpRestoreTimer = null; }
             if (controller) controller.abort();
             for (var i = 0; i < elements.length; i++) {
                 if (elements[i].parentNode) elements[i].remove();
@@ -4188,6 +4230,7 @@
                 if (toolbarSuppressed()) return;
                 toolbar.style.opacity = '1';
                 toolbar.style.setProperty('pointer-events', 'auto', 'important');
+                toolbar.classList.remove('wblock-tc-toolbar-hidden');
                 clearTimeout(toolbarTimer);
             }
             function hideToolbar() {
@@ -4200,6 +4243,7 @@
                 if (anyOpen) { scheduleHideToolbar(); return; }
                 toolbar.style.opacity = '0';
                 toolbar.style.setProperty('pointer-events', 'none', 'important');
+                toolbar.classList.add('wblock-tc-toolbar-hidden');
             }
             function scheduleHideToolbar() {
                 clearTimeout(toolbarTimer);
@@ -4267,6 +4311,7 @@
             if (toolbarUserHidden) {
                 toolbar.style.opacity = '0';
                 toolbar.style.setProperty('pointer-events', 'none', 'important');
+                toolbar.classList.add('wblock-tc-toolbar-hidden');
             } else {
                 showToolbar();
                 if (!video.paused && !video.ended) { scheduleHideToolbar(); }
@@ -4284,6 +4329,7 @@
             // Start hidden on desktop — it appears with native controls
             toolbar.style.opacity = '0';
             toolbar.style.setProperty('pointer-events', 'none', 'important');
+            toolbar.classList.add('wblock-tc-toolbar-hidden');
 
             var toolbarTimer = null;
             var TOOLBAR_HIDE_DELAY = 3000;
@@ -4310,6 +4356,7 @@
                 if (toolbarSuppressed()) return;
                 toolbar.style.opacity = '1';
                 toolbar.style.setProperty('pointer-events', 'auto', 'important');
+                toolbar.classList.remove('wblock-tc-toolbar-hidden');
                 clearTimeout(toolbarTimer);
             }
 
@@ -4320,6 +4367,7 @@
                 }
                 toolbar.style.opacity = '0';
                 toolbar.style.setProperty('pointer-events', 'none', 'important');
+                toolbar.classList.add('wblock-tc-toolbar-hidden');
             }
 
             function scheduleHideToolbar() {
@@ -4490,33 +4538,73 @@
         return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
     }
 
+    // Native fullscreen state as reported by the element's own events. The
+    // webkitDisplayingFullscreen and webkitPresentationMode getters can lag
+    // behind or stick after an exit, so a second F press kept asking for an
+    // exit that had already happened and never re-entered. Once an event has
+    // been observed for an element its events are authoritative.
+    function onNativeFullscreenEvent(event) {
+        var video = event.target;
+        if (!video || video.tagName !== 'VIDEO') return;
+        if (event.type === 'webkitbeginfullscreen') video._wblockNativeFullscreenState = true;
+        else if (event.type === 'webkitendfullscreen') video._wblockNativeFullscreenState = false;
+        else video._wblockNativeFullscreenState = video.webkitPresentationMode === 'fullscreen';
+    }
+
+    function videoInNativeFullscreen(video) {
+        if (typeof video._wblockNativeFullscreenState === 'boolean') return video._wblockNativeFullscreenState;
+        return video.webkitPresentationMode === 'fullscreen' || video.webkitDisplayingFullscreen === true;
+    }
+
+    function enterNativeFullscreen(video, useElementApi) {
+        if (!useElementApi && typeof video.webkitSupportsPresentationMode === 'function' &&
+            video.webkitSupportsPresentationMode('fullscreen') &&
+            typeof video.webkitSetPresentationMode === 'function') {
+            video.webkitSetPresentationMode('fullscreen');
+            return;
+        }
+        if (typeof video.webkitEnterFullscreen === 'function') video.webkitEnterFullscreen();
+    }
+
+    function exitNativeFullscreen(video, useElementApi) {
+        if (!useElementApi && typeof video.webkitSetPresentationMode === 'function' &&
+            (video.webkitPresentationMode === 'fullscreen' ||
+                typeof video.webkitSupportsPresentationMode === 'function')) {
+            video.webkitSetPresentationMode('inline');
+            return;
+        }
+        if (typeof video.webkitExitFullscreen === 'function') video.webkitExitFullscreen();
+    }
+
+    var fullscreenVerifyTimer = null;
+
     function toggleNativeFullscreen(video) {
         try {
-            if (video.webkitPresentationMode === 'fullscreen' &&
-                typeof video.webkitSetPresentationMode === 'function') {
-                video.webkitSetPresentationMode('inline');
-                return;
-            }
-            if (video.webkitDisplayingFullscreen === true &&
-                typeof video.webkitExitFullscreen === 'function') {
-                video.webkitExitFullscreen();
-                return;
-            }
-            var fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement;
-            if (fullscreenElement) {
+            var fullscreenElement = document.fullscreenElement || document.webkitFullscreenElement ||
+                document.webkitCurrentFullScreenElement;
+            if (fullscreenElement && fullscreenElement !== video && !videoInNativeFullscreen(video)) {
+                // YouTube's own container fullscreen is active; leave it so the
+                // next press can enter the native player.
                 if (typeof document.exitFullscreen === 'function') { document.exitFullscreen(); }
                 else if (typeof document.webkitExitFullscreen === 'function') { document.webkitExitFullscreen(); }
                 return;
             }
-            if (typeof video.webkitSupportsPresentationMode === 'function' &&
-                video.webkitSupportsPresentationMode('fullscreen') &&
-                typeof video.webkitSetPresentationMode === 'function') {
-                video.webkitSetPresentationMode('fullscreen');
-                return;
-            }
-            if (typeof video.webkitEnterFullscreen === 'function') {
-                video.webkitEnterFullscreen();
-            }
+            var wasFullscreen = videoInNativeFullscreen(video);
+            if (wasFullscreen) exitNativeFullscreen(video, false);
+            else enterNativeFullscreen(video, false);
+            // If the preferred API silently did nothing (WebKit rejects a
+            // presentation-mode change in some transitional states), retry
+            // through the element API while the key press still counts as a
+            // user gesture.
+            if (fullscreenVerifyTimer !== null) clearTimeout(fullscreenVerifyTimer);
+            fullscreenVerifyTimer = setTimeout(function () {
+                fullscreenVerifyTimer = null;
+                if (!video.isConnected || videoInNativeFullscreen(video) !== wasFullscreen) return;
+                try {
+                    if (wasFullscreen) exitNativeFullscreen(video, true);
+                    else enterNativeFullscreen(video, true);
+                } catch (e) { /* ignore */ }
+            }, 350);
         } catch (e) { /* ignore */ }
     }
 
@@ -4535,6 +4623,10 @@
 
     function setupFullscreenHotkey() {
         document.addEventListener('keydown', onFullscreenHotkey, true);
+        // Capture phase: these events do not bubble.
+        document.addEventListener('webkitbeginfullscreen', onNativeFullscreenEvent, true);
+        document.addEventListener('webkitendfullscreen', onNativeFullscreenEvent, true);
+        document.addEventListener('webkitpresentationmodechanged', onNativeFullscreenEvent, true);
     }
 
     // ------------------------------------------------------------------

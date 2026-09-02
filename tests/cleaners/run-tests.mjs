@@ -460,6 +460,30 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
     };
   });
 
+  // A second press must leave native fullscreen even when the element's
+  // getters lag, and a third must re-enter once the exit event has fired.
+  await check(page, scenario, 'F toggles native fullscreen out and back in using element events', () => {
+    const video = document.querySelector('#movie_player video');
+    if (!video) return { pass: false, detail: 'no video' };
+    const modes = [];
+    let mode = 'inline';
+    video.webkitSupportsPresentationMode = () => true;
+    video.webkitSetPresentationMode = (m) => { modes.push(m); };
+    Object.defineProperty(video, 'webkitPresentationMode', { configurable: true, get: () => mode });
+    const press = () => document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true, composed: true }));
+    mode = 'fullscreen';
+    video.dispatchEvent(new Event('webkitpresentationmodechanged'));
+    press();
+    // Getter sticks at 'fullscreen' after the exit event: events win.
+    video.dispatchEvent(new Event('webkitendfullscreen'));
+    press();
+    delete video.webkitSupportsPresentationMode;
+    delete video.webkitSetPresentationMode;
+    delete video.webkitPresentationMode;
+    delete video._wblockNativeFullscreenState;
+    return { pass: modes.join(',') === 'inline,fullscreen', detail: 'modes=' + modes.join(',') };
+  });
+
   await check(page, scenario, 'keeps unknown YouTube overlays behind the native video', () => {
     const player = document.querySelector('.wblock-tc-native');
     const video = player?.querySelector('video');
@@ -1487,6 +1511,16 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'desktop toolbar still hides after leaving the player even if the pointer keeps moving', () => {
     const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
     return { pass: o === '0', detail: `opacity=${o}` };
+  });
+  // pointer-events does not cascade: a hidden toolbar whose buttons still
+  // accept hits swallows taps meant for the video underneath.
+  await check(page, 'desktop', 'hidden toolbar buttons do not intercept pointer events', () => {
+    const toolbar = document.querySelector('.wblock-tc-toolbar');
+    const buttons = toolbar ? Array.from(toolbar.querySelectorAll('button')) : [];
+    if (!buttons.length) return { pass: false, detail: 'no toolbar buttons' };
+    const live = buttons.filter(b => getComputedStyle(b).pointerEvents !== 'none');
+    const cls = toolbar.classList.contains('wblock-tc-toolbar-hidden');
+    return { pass: cls && live.length === 0, detail: `hiddenClass=${cls} liveButtons=${live.length}/${buttons.length}` };
   });
   record('desktop', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
