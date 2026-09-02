@@ -136,12 +136,12 @@ const sponsorBlockPrelude = `
 })();
 `;
 
+// The app prepends this constant to the script. The prelude runs in the
+// injector's closure, so checks reach it through the debug hook.
 const deArrowPrelude = `
+const __wblockTubeCleanerDeArrow = { enabled: true, replaceTitles: true, replaceThumbnails: true,
+  randomThumbnails: false, showOriginalOnHover: true };
 (function () {
-  localStorage.setItem('wblock.tubeCleaner.deArrow', JSON.stringify({
-    enabled: true, replaceTitles: true, replaceThumbnails: true,
-    showOriginalOnHover: true, excludedChannels: []
-  }));
   var nativeFetch = window.fetch;
   window.__wblockDeArrowRequests = [];
   window.fetch = function (url, options) {
@@ -588,9 +588,8 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       const quality = playback?.querySelector('.wblock-tc-quality-button');
       const audio = playback?.querySelector('.wblock-tc-audio-button');
       const sponsor = services?.querySelector('.wblock-tc-sponsor-button');
-      const deArrow = services?.querySelector('.wblock-tc-dearrow-button');
-      return { pass: !!(quality && audio && sponsor && deArrow) && !playback.querySelector('.wblock-tc-sponsor-button') &&
-          !playback.querySelector('.wblock-tc-dearrow-button'),
+      const deArrow = tb?.querySelector('.wblock-tc-dearrow-button');
+      return { pass: !!(quality && audio && sponsor) && !deArrow && !playback.querySelector('.wblock-tc-sponsor-button'),
         detail: `quality=${!!quality} audio=${!!audio} sponsor=${!!sponsor} deArrow=${!!deArrow}` };
     });
   } else {
@@ -600,10 +599,10 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       const services = toolbar?.querySelector('.wblock-tc-services-row');
       const quality = playback?.querySelector('.wblock-tc-quality-button');
       const sponsor = services?.querySelector('.wblock-tc-sponsor-button');
-      const deArrow = services?.querySelector('.wblock-tc-dearrow-button');
+      const deArrow = toolbar?.querySelector('.wblock-tc-dearrow-button');
       const audio = toolbar?.querySelector('.wblock-tc-audio-button');
       return {
-        pass: !!toolbar && !!quality && !!sponsor && !!deArrow && !audio &&
+        pass: !!toolbar && !!quality && !!sponsor && !deArrow && !audio &&
           getComputedStyle(toolbar).pointerEvents === 'auto',
         detail: `toolbar=${!!toolbar} quality=${!!quality} sponsor=${!!sponsor} deArrow=${!!deArrow} audio=${!!audio}`,
       };
@@ -620,18 +619,6 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
         detail: rect ? `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)} content=${panel.scrollHeight}/${panel.clientHeight} scroll=${panel.scrollTop}/${maxScroll} pageOverlay=${pageOverlay}` : 'no panel' };
     });
     await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
-    await page.evaluate(() => document.querySelector('.wblock-tc-dearrow-button').click());
-    await check(page, scenario, 'keeps the opt-in DeArrow settings panel inside the iOS viewport', () => {
-      const panel = document.querySelector('.wblock-tc-dearrow-menu');
-      const rect = panel?.getBoundingClientRect();
-      const enabled = panel?.querySelector('[data-dearrow-setting="enabled"]');
-      const button = document.querySelector('.wblock-tc-dearrow-button');
-      const pageOverlay = panel?.parentElement === document.body;
-      return { pass: !!rect && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && pageOverlay &&
-          enabled?.checked === false && button?.getAttribute('aria-pressed') === 'false',
-        detail: rect ? `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)} enabled=${enabled?.checked} pageOverlay=${pageOverlay}` : 'no panel' };
-    });
-    await page.evaluate(() => document.querySelector('.wblock-tc-dearrow-button').click());
   }
 
   await check(page, scenario, 'overrides document.hidden (background playback)', () => {
@@ -1246,24 +1233,18 @@ async function qualityUISelectionCheck(page, scenario) {
       detail: `title=${title} thumbnail=${thumbnail}` };
   });
   await page.evaluate(() => {
-    document.querySelector('.wblock-tc-dearrow-button').click();
-    const titles = document.querySelector('[data-dearrow-setting="replaceTitles"]');
-    titles.checked = false;
-    titles.dispatchEvent(new Event('change', { bubbles: true }));
+    window.__wblockTubeDebug.setDeArrowSetting('replaceTitles', false);
   });
-  await check(page, 'desktop', 'persists and immediately applies independent DeArrow title settings', () => {
-    const settings = JSON.parse(localStorage.getItem('wblock.tubeCleaner.deArrow') || '{}');
+  await check(page, 'desktop', 'applies independent DeArrow title settings from the app-injected constant', () => {
     const watchTitle = document.querySelector('#watch-metadata h1 yt-formatted-string')?.textContent;
     const cardTitle = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
     const thumbnail = document.querySelector('ytd-compact-video-renderer img')?.getAttribute('src') || '';
-    return { pass: settings.replaceTitles === false && watchTitle === 'Original Watch Title' &&
+    return { pass: watchTitle === 'Original Watch Title' &&
         cardTitle === 'Original Related Title' && thumbnail.includes('dearrow-thumb.ajay.app'),
-      detail: `replaceTitles=${settings.replaceTitles} watch=${watchTitle} card=${cardTitle}` };
+      detail: `watch=${watchTitle} card=${cardTitle}` };
   });
   await page.evaluate(() => {
-    const titles = document.querySelector('[data-dearrow-setting="replaceTitles"]');
-    titles.checked = true;
-    titles.dispatchEvent(new Event('change', { bubbles: true }));
+    window.__wblockTubeDebug.setDeArrowSetting('replaceTitles', true);
   });
   await check(page, 'desktop', 'reapplies DeArrow titles from its bounded session cache', () => {
     const requests = window.__wblockDeArrowRequests || [];
@@ -1271,26 +1252,6 @@ async function qualityUISelectionCheck(page, scenario) {
     const cardTitle = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
     return { pass: requests.length === 2 && watchTitle === 'Accurate Watch Title' && cardTitle === 'Accurate Related Title',
       detail: `requests=${requests.length} watch=${watchTitle} card=${cardTitle}` };
-  });
-  await page.evaluate(() => {
-    const channel = document.querySelector('[data-dearrow-setting="channel"]');
-    channel.checked = true;
-    channel.dispatchEvent(new Event('change', { bubbles: true }));
-  });
-  await check(page, 'desktop', 'supports per-channel DeArrow exclusions without affecting other channels', () => {
-    const settings = JSON.parse(localStorage.getItem('wblock.tubeCleaner.deArrow') || '{}');
-    const watchTitle = document.querySelector('#watch-metadata h1 yt-formatted-string')?.textContent;
-    const cardTitle = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
-    const button = document.querySelector('.wblock-tc-dearrow-button');
-    return { pass: settings.excludedChannels?.includes('test-channel') && watchTitle === 'Original Watch Title' &&
-        cardTitle === 'Accurate Related Title' && button?.getAttribute('aria-pressed') === 'false',
-      detail: `channels=${settings.excludedChannels?.join(',')} watch=${watchTitle} card=${cardTitle}` };
-  });
-  await page.evaluate(() => {
-    const channel = document.querySelector('[data-dearrow-setting="channel"]');
-    channel.checked = false;
-    channel.dispatchEvent(new Event('change', { bubbles: true }));
-    document.querySelector('.wblock-tc-dearrow-button').click();
   });
   await page.waitForFunction(() => document.querySelector('#watch-metadata h1 yt-formatted-string')?.textContent === 'Accurate Watch Title');
   await page.waitForFunction(() => !!window.__wblockSponsorRequest);
@@ -1365,10 +1326,7 @@ async function qualityUISelectionCheck(page, scenario) {
     detail: `sponsorRequests=${window.__wblockSponsorRequestCount} deArrowRequests=${window.__wblockDeArrowRequests.length}`,
   }));
   await page.evaluate(() => {
-    document.querySelector('.wblock-tc-dearrow-button').click();
-    const random = document.querySelector('[data-dearrow-setting="randomThumbnails"]');
-    random.checked = true;
-    random.dispatchEvent(new Event('change', { bubbles: true }));
+    window.__wblockTubeDebug.setDeArrowSetting('randomThumbnails', true);
     const card = document.createElement('ytd-compact-video-renderer');
     card.setAttribute('data-video-id', 'RANDOMVID01');
     card.setAttribute('data-channel-id', 'other-channel');
@@ -1377,11 +1335,9 @@ async function qualityUISelectionCheck(page, scenario) {
   });
   await page.waitForFunction(() => document.querySelector('[data-video-id="RANDOMVID01"] img')?.getAttribute('src')?.includes('dearrow-thumb.ajay.app/api/v1/getThumbnail'));
   await check(page, 'desktop', 'uses DeArrow random-time fallback when a video has no submitted thumbnail', () => {
-    const settings = JSON.parse(localStorage.getItem('wblock.tubeCleaner.deArrow') || '{}');
     const image = document.querySelector('[data-video-id="RANDOMVID01"] img');
     const thumbnail = image?.getAttribute('src') || '';
-    return { pass: settings.randomThumbnails === true && thumbnail.includes('time=30'),
-      detail: `enabled=${settings.randomThumbnails} thumbnail=${thumbnail}` };
+    return { pass: thumbnail.includes('time=30'), detail: `thumbnail=${thumbnail}` };
   });
   await page.evaluate(() => {
     document.querySelector('.wblock-tc-sponsor-button').click();

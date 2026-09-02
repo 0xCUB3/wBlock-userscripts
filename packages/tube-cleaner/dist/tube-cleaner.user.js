@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.19
+// @version      0.1.20
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -278,7 +278,7 @@
         try { localStorage.setItem(STORAGE_QUALITY, q); } catch (e) { /* ignore */ }
     }
 
-    // Device-level preference to keep the wBlock toolbar (quality / SB / DA)
+    // Device-level preference to keep the wBlock toolbar (quality / SB)
     // off the video entirely. Double-tap or double-click the video reveals it
     // temporarily; the checkbox lives in the SponsorBlock settings panel.
     function isToolbarHidden() {
@@ -1870,7 +1870,6 @@
 
     var DEARROW_API = 'https://sponsor.ajay.app/api/branding';
     var DEARROW_THUMBNAIL_API = 'https://dearrow-thumb.ajay.app/api/v1/getThumbnail';
-    var DEARROW_SETTINGS_KEY = 'wblock.tubeCleaner.deArrow';
     var DEARROW_CARD_SELECTOR = [
         'ytd-rich-grid-media', 'ytd-video-renderer', 'ytd-compact-video-renderer',
         'ytd-grid-video-renderer', 'ytd-playlist-video-renderer', 'yt-lockup-view-model',
@@ -1884,7 +1883,6 @@
         'ytm-watch-metadata h1',
         'h1.title yt-formatted-string'
     ].join(',');
-    var deArrowSettingsCache = null;
     var deArrowBrandingCache = {};
     var deArrowBrandingCacheOrder = [];
     var deArrowActiveRequests = {};
@@ -1892,59 +1890,23 @@
     var deArrowPendingScanRoots = [];
     var deArrowScanScheduled = false;
 
-    function defaultDeArrowSettings() {
-        return {
+    // Settings come from the wBlock app, which prepends them to the script
+    // as __wblockTubeCleanerDeArrow (Userscripts page, Tube Cleaner row).
+    // Older wBlock builds do not inject the constant; DeArrow stays off there.
+    function loadDeArrowSettings() {
+        var settings = {
             enabled: false,
             replaceTitles: true,
             replaceThumbnails: true,
             randomThumbnails: false,
-            showOriginalOnHover: true,
-            excludedChannels: []
+            showOriginalOnHover: true
         };
-    }
-
-    function loadDeArrowSettings() {
-        if (deArrowSettingsCache) return deArrowSettingsCache;
-        var settings = defaultDeArrowSettings();
-        try {
-            var saved = JSON.parse(localStorage.getItem(DEARROW_SETTINGS_KEY) || '{}');
-            ['enabled', 'replaceTitles', 'replaceThumbnails', 'randomThumbnails', 'showOriginalOnHover'].forEach(function (key) {
-                if (typeof saved[key] === 'boolean') settings[key] = saved[key];
-            });
-            if (Array.isArray(saved.excludedChannels)) settings.excludedChannels = saved.excludedChannels.filter(function (id) {
-                return typeof id === 'string' && id.length < 200;
-            }).slice(0, 200);
-        } catch (e) { /* use defaults */ }
-        deArrowSettingsCache = settings;
+        var injected = typeof __wblockTubeCleanerDeArrow === 'object' ? __wblockTubeCleanerDeArrow : null;
+        if (!injected) return settings;
+        for (var key in settings) {
+            if (typeof injected[key] === 'boolean') settings[key] = injected[key];
+        }
         return settings;
-    }
-
-    function saveDeArrowSettings(settings) {
-        deArrowSettingsCache = settings;
-        try { localStorage.setItem(DEARROW_SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
-        refreshDeArrowBranding();
-    }
-
-    function deArrowLocale() {
-        var language = (navigator.language || 'en').toLowerCase().split('-')[0];
-        var english = {
-            title: 'DeArrow settings', enabled: 'Enable DeArrow', titles: 'Replace titles',
-            thumbnails: 'Replace thumbnails', random: 'Use a random frame when no thumbnail is submitted',
-            hover: 'Show originals when hovering over a video', channel: 'Disable on this channel',
-            reset: 'Reset defaults', using: 'Using DeArrow'
-        };
-        var translations = {
-            de: { title:'DeArrow-Einstellungen',enabled:'DeArrow aktivieren',titles:'Titel ersetzen',thumbnails:'Vorschaubilder ersetzen',random:'Zufälliges Einzelbild verwenden, wenn kein Vorschaubild eingereicht wurde',hover:'Originale beim Bewegen über ein Video anzeigen',channel:'Auf diesem Kanal deaktivieren',reset:'Zurücksetzen',using:'Verwendet DeArrow' },
-            es: { title:'Ajustes de DeArrow',enabled:'Activar DeArrow',titles:'Sustituir títulos',thumbnails:'Sustituir miniaturas',random:'Usar un fotograma aleatorio si no se ha enviado una miniatura',hover:'Mostrar originales al pasar sobre un vídeo',channel:'Desactivar en este canal',reset:'Restablecer',using:'Usa DeArrow' },
-            fr: { title:'Réglages DeArrow',enabled:'Activer DeArrow',titles:'Remplacer les titres',thumbnails:'Remplacer les miniatures',random:'Utiliser une image aléatoire si aucune miniature n’a été proposée',hover:'Afficher les originaux au survol d’une vidéo',channel:'Désactiver sur cette chaîne',reset:'Réinitialiser',using:'Utilise DeArrow' },
-            it: { title:'Impostazioni DeArrow',enabled:'Attiva DeArrow',titles:'Sostituisci titoli',thumbnails:'Sostituisci miniature',random:'Usa un fotogramma casuale se non è stata inviata una miniatura',hover:'Mostra gli originali passando su un video',channel:'Disattiva su questo canale',reset:'Ripristina',using:'Usa DeArrow' },
-            pt: { title:'Configurações do DeArrow',enabled:'Ativar DeArrow',titles:'Substituir títulos',thumbnails:'Substituir miniaturas',random:'Usar um quadro aleatório quando nenhuma miniatura for enviada',hover:'Mostrar originais ao passar sobre um vídeo',channel:'Desativar neste canal',reset:'Restaurar padrões',using:'Usa DeArrow' },
-            ja: { title:'DeArrow設定',enabled:'DeArrowを有効にする',titles:'タイトルを置き換える',thumbnails:'サムネイルを置き換える',random:'サムネイルが投稿されていない場合はランダムなフレームを使う',hover:'動画にカーソルを合わせたとき元を表示',channel:'このチャンネルでは無効にする',reset:'初期設定に戻す',using:'DeArrowを使用' },
-            ko: { title:'DeArrow 설정',enabled:'DeArrow 활성화',titles:'제목 바꾸기',thumbnails:'미리보기 이미지 바꾸기',random:'제출된 미리보기가 없으면 임의의 프레임 사용',hover:'동영상 위에 마우스를 놓으면 원본 표시',channel:'이 채널에서 비활성화',reset:'기본값으로 재설정',using:'DeArrow 사용' },
-            ru: { title:'Настройки DeArrow',enabled:'Включить DeArrow',titles:'Заменять названия',thumbnails:'Заменять значки',random:'Использовать случайный кадр, если миниатюра не предложена',hover:'Показывать оригиналы при наведении на видео',channel:'Отключить на этом канале',reset:'Сбросить',using:'Использует DeArrow' },
-            zh: { title:'DeArrow 设置',enabled:'启用 DeArrow',titles:'替换标题',thumbnails:'替换缩略图',random:'没有提交缩略图时使用随机画面',hover:'悬停视频时显示原始内容',channel:'对这个频道停用',reset:'恢复默认设置',using:'使用 DeArrow' }
-        };
-        return translations[language] || english;
     }
 
     function cachedDeArrowBranding(videoId) {
@@ -2063,19 +2025,6 @@
             if (id) return id;
         }
         return null;
-    }
-
-    function deArrowCardChannelId(card) {
-        var direct = card.getAttribute('data-channel-id');
-        if (direct) return direct;
-        var link = card.querySelector('a[href^="/@"],a[href^="/channel/"],a[href^="/c/"],a[href^="/user/"]');
-        if (!link) return null;
-        try { return new URL(link.getAttribute('href'), location.href).pathname; }
-        catch (e) { return null; }
-    }
-
-    function deArrowChannelExcluded(settings, channelId) {
-        return !!(channelId && settings.excludedChannels.indexOf(channelId) !== -1);
     }
 
     function findDeArrowCardTitle(card) {
@@ -2202,7 +2151,7 @@
         card._wblockDeArrowMouseLeave = function () {
             card._wblockDeArrowShowingOriginal = false;
             var settings = loadDeArrowSettings();
-            if (!settings.enabled || deArrowChannelExcluded(settings, deArrowCardChannelId(card))) return;
+            if (!settings.enabled) return;
             var title = card._wblockDeArrowTitleElement;
             var image = card._wblockDeArrowThumbnailElement;
             if (title) {
@@ -2250,7 +2199,7 @@
             restoreDeArrowCard(card);
         }
         var settings = loadDeArrowSettings();
-        if (!settings.enabled || deArrowChannelExcluded(settings, deArrowCardChannelId(card))) {
+        if (!settings.enabled) {
             restoreDeArrowCard(card);
             return;
         }
@@ -2259,7 +2208,7 @@
         fetchDeArrowBranding(videoId, false).then(function (branding) {
             if (!card.isConnected || card._wblockDeArrowRequestedVideoId !== videoId) return;
             var currentSettings = loadDeArrowSettings();
-            if (!currentSettings.enabled || deArrowChannelExcluded(currentSettings, deArrowCardChannelId(card))) {
+            if (!currentSettings.enabled) {
                 restoreDeArrowCard(card);
                 return;
             }
@@ -2331,12 +2280,10 @@
     function applyCurrentDeArrowTitle() {
         var settings = loadDeArrowSettings();
         var videoId = sponsorBlockVideoId();
-        var channelId = sponsorBlockChannelId();
-        if (!settings.enabled || !settings.replaceTitles || !videoId || deArrowChannelExcluded(settings, channelId)) return;
+        if (!settings.enabled || !settings.replaceTitles || !videoId) return;
         fetchDeArrowBranding(videoId, true).then(function (branding) {
             var currentSettings = loadDeArrowSettings();
-            if (!currentSettings.enabled || !currentSettings.replaceTitles || sponsorBlockVideoId() !== videoId ||
-                deArrowChannelExcluded(currentSettings, sponsorBlockChannelId())) return;
+            if (!currentSettings.enabled || !currentSettings.replaceTitles || sponsorBlockVideoId() !== videoId) return;
             var customTitle = deArrowAcceptedTitle(branding);
             if (!customTitle) return;
             var titles = document.querySelectorAll(DEARROW_WATCH_TITLE_SELECTOR);
@@ -3851,10 +3798,6 @@
                 sponsorMenu.style.display = 'none';
                 if (sponsorBtn) sponsorBtn.setAttribute('aria-expanded', 'false');
             }
-            if (deArrowMenu) {
-                deArrowMenu.style.display = 'none';
-                if (deArrowBtn) deArrowBtn.setAttribute('aria-expanded', 'false');
-            }
             if (qualityMenu.style.display === 'none') {
                 buildQualityMenu();
                 if (IS_IOS) {
@@ -4014,7 +3957,7 @@
             }));
             // Whole-toolbar visibility preference. It lives here because this
             // is the only settings surface Tube Cleaner has; it hides the
-            // quality, SB, and DA pills together on this device.
+            // quality and SB pills together on this device.
             sponsorMenu.appendChild(sponsorCheckboxRow(locale.hideControls, isToolbarHidden(), function (checked) {
                 setToolbarHidden(checked);
             }));
@@ -4077,22 +4020,12 @@
         sponsorBtn.addEventListener('click', function (e) {
             e.stopPropagation();
             qualityMenu.style.display = 'none';
-            if (deArrowMenu) {
-                deArrowMenu.style.display = 'none';
-                if (deArrowBtn) deArrowBtn.setAttribute('aria-expanded', 'false');
-            }
             if (sponsorMenu.style.display === 'none') {
                 buildSponsorMenu();
-                // SB sits left of DA in the service row; align its panel with
-                // the row's right edge so the wider desktop panel stays on-screen.
                 if (IS_IOS) {
                     showMobilePageOverlay(sponsorMenu, 700);
                 } else {
-                    placeDesktopAnchoredMenu(sponsorMenu, {
-                        maxHeight: '65vh',
-                        gap: '6px',
-                        upRight: deArrowWrap ? -(deArrowWrap.offsetWidth + 6) + 'px' : '0'
-                    });
+                    placeDesktopAnchoredMenu(sponsorMenu, { maxHeight: '65vh', gap: '6px' });
                 }
                 sponsorMenu.style.display = 'block';
                 sponsorBtn.setAttribute('aria-expanded', 'true');
@@ -4111,148 +4044,6 @@
         updateSponsorButton();
         sponsorWrap.appendChild(sponsorBtn); sponsorWrap.appendChild(sponsorMenu); servicesRow.appendChild(sponsorWrap);
 
-        // DeArrow settings. The small panel keeps the high-value replacement
-        // controls but leaves DeArrow's submission and formatting workflows to
-        // the full extension.
-        var deArrowWrap = document.createElement('div');
-        deArrowWrap.style.cssText = 'position:relative';
-        var deArrowBtn = document.createElement('button');
-        deArrowBtn.className = 'wblock-tc-dearrow-button';
-        deArrowBtn.type = 'button';
-        deArrowBtn.style.cssText = btnStyle;
-        deArrowBtn.textContent = 'DA';
-        deArrowBtn.setAttribute('aria-haspopup', 'dialog');
-        deArrowBtn.setAttribute('aria-expanded', 'false');
-        var deArrowMenu = document.createElement('div');
-        deArrowMenu.className = 'wblock-tc-dearrow-menu';
-        deArrowMenu.setAttribute('role', 'dialog');
-        deArrowMenu.setAttribute('aria-label', deArrowLocale().title);
-        deArrowMenu.style.cssText = 'position:absolute;bottom:100%;right:0;margin-bottom:6px;box-sizing:border-box;' +
-            'width:' + (IS_IOS ? 'min(340px,calc(100vw - 16px))' : '310px') + ';max-height:65vh;overflow:auto;' +
-            'background:rgba(22,22,24,.98);border:1px solid rgba(255,255,255,.14);border-radius:10px;' +
-            'padding:12px;color:#fff;display:none;z-index:80;font:' + (IS_IOS ? '14px' : '12px') +
-            '/1.35 -apple-system,system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);text-align:left';
-
-        function updateDeArrowButton() {
-            var settings = loadDeArrowSettings();
-            var enabled = settings.enabled && !deArrowChannelExcluded(settings, sponsorBlockChannelId());
-            deArrowBtn.style.color = enabled ? '#ffb347' : '#aaa';
-            deArrowBtn.title = deArrowLocale().title;
-            deArrowBtn.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-        }
-
-        function deArrowCheckboxRow(labelText, checked, disabled, settingName, onChange) {
-            var label = document.createElement('label');
-            label.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 0;cursor:' +
-                (disabled ? 'default;opacity:.55' : 'pointer');
-            var input = document.createElement('input');
-            input.type = 'checkbox';
-            input.checked = checked;
-            input.disabled = disabled;
-            input.style.cssText = 'width:16px;height:16px;accent-color:#ffb347';
-            if (settingName) input.setAttribute('data-dearrow-setting', settingName);
-            input.addEventListener('change', function () { onChange(input.checked); });
-            var text = document.createElement('span');
-            text.textContent = labelText;
-            label.appendChild(input); label.appendChild(text);
-            return label;
-        }
-
-        function buildDeArrowMenu() {
-            while (deArrowMenu.firstChild) deArrowMenu.removeChild(deArrowMenu.firstChild);
-            var locale = deArrowLocale();
-            var settings = loadDeArrowSettings();
-            var heading = document.createElement('div');
-            heading.textContent = 'DeArrow';
-            heading.style.cssText = 'font-size:' + (IS_IOS ? '18px' : '15px') + ';font-weight:700;margin:0 0 7px';
-            deArrowMenu.appendChild(heading);
-            deArrowMenu.appendChild(deArrowCheckboxRow(locale.enabled, settings.enabled, false, 'enabled', function (checked) {
-                settings.enabled = checked;
-                saveDeArrowSettings(settings);
-                updateDeArrowButton();
-                buildDeArrowMenu();
-            }));
-            var divider = document.createElement('div');
-            divider.style.cssText = 'height:1px;background:rgba(255,255,255,.12);margin:5px 0';
-            deArrowMenu.appendChild(divider);
-            deArrowMenu.appendChild(deArrowCheckboxRow(locale.titles, settings.replaceTitles, !settings.enabled,
-                'replaceTitles', function (checked) {
-                    settings.replaceTitles = checked; saveDeArrowSettings(settings);
-                }));
-            deArrowMenu.appendChild(deArrowCheckboxRow(locale.thumbnails, settings.replaceThumbnails, !settings.enabled,
-                'replaceThumbnails', function (checked) {
-                    settings.replaceThumbnails = checked; saveDeArrowSettings(settings);
-                }));
-            deArrowMenu.appendChild(deArrowCheckboxRow(locale.random, settings.randomThumbnails,
-                !settings.enabled || !settings.replaceThumbnails, 'randomThumbnails', function (checked) {
-                    settings.randomThumbnails = checked; saveDeArrowSettings(settings);
-                }));
-            deArrowMenu.appendChild(deArrowCheckboxRow(locale.hover, settings.showOriginalOnHover, !settings.enabled,
-                'showOriginalOnHover', function (checked) {
-                    settings.showOriginalOnHover = checked; saveDeArrowSettings(settings);
-                }));
-            var channelId = sponsorBlockChannelId();
-            if (channelId) {
-                var channelRow = deArrowCheckboxRow(locale.channel,
-                    settings.excludedChannels.indexOf(channelId) !== -1, !settings.enabled, 'channel', function (checked) {
-                        var index = settings.excludedChannels.indexOf(channelId);
-                        if (checked && index === -1) settings.excludedChannels.push(channelId);
-                        if (!checked && index !== -1) settings.excludedChannels.splice(index, 1);
-                        saveDeArrowSettings(settings);
-                        updateDeArrowButton();
-                    });
-                channelRow.setAttribute('data-dearrow-channel', channelId);
-                deArrowMenu.appendChild(channelRow);
-            }
-            var footer = document.createElement('div');
-            footer.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-top:8px;padding-top:8px;' +
-                'border-top:1px solid rgba(255,255,255,.12)';
-            var reset = document.createElement('button');
-            reset.type = 'button'; reset.textContent = locale.reset;
-            reset.style.cssText = 'background:transparent;color:#aaa;border:0;padding:3px 0;font:inherit;cursor:pointer';
-            reset.addEventListener('click', function () {
-                deArrowSettingsCache = defaultDeArrowSettings();
-                saveDeArrowSettings(deArrowSettingsCache);
-                updateDeArrowButton();
-                buildDeArrowMenu();
-            });
-            var credit = document.createElement('a');
-            credit.href = 'https://dearrow.ajay.app/'; credit.target = '_blank'; credit.rel = 'noopener noreferrer';
-            credit.textContent = locale.using; credit.style.cssText = 'color:#69a9ff;text-decoration:none';
-            footer.appendChild(reset); footer.appendChild(credit); deArrowMenu.appendChild(footer);
-        }
-
-        deArrowBtn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            qualityMenu.style.display = 'none';
-            sponsorMenu.style.display = 'none';
-            sponsorBtn.setAttribute('aria-expanded', 'false');
-            if (deArrowMenu.style.display === 'none') {
-                buildDeArrowMenu();
-                if (IS_IOS) { showMobilePageOverlay(deArrowMenu, 520); }
-                else { placeDesktopAnchoredMenu(deArrowMenu, { maxHeight: '65vh', gap: '6px' }); }
-                deArrowMenu.style.display = 'block';
-                deArrowBtn.setAttribute('aria-expanded', 'true');
-            } else {
-                deArrowMenu.style.display = 'none';
-                deArrowBtn.setAttribute('aria-expanded', 'false');
-            }
-        });
-        deArrowMenu.addEventListener('click', function (e) { e.stopPropagation(); });
-        registerCleanup(function () {
-            removeMobilePageOverlay(qualityMenu);
-            removeMobilePageOverlay(sponsorMenu);
-            removeMobilePageOverlay(deArrowMenu);
-        });
-        function onDeArrowOutsideClick() {
-            deArrowMenu.style.display = 'none';
-            deArrowBtn.setAttribute('aria-expanded', 'false');
-        }
-        document.addEventListener('click', onDeArrowOutsideClick);
-        registerCleanup(function () { document.removeEventListener('click', onDeArrowOutsideClick); });
-        updateDeArrowButton();
-        deArrowWrap.appendChild(deArrowBtn); deArrowWrap.appendChild(deArrowMenu); servicesRow.appendChild(deArrowWrap);
-
         // PiP button is intentionally omitted — Safari's native controls
         // already provide PiP. Auto PiP handles automatic PiP entry.
 
@@ -4263,7 +4054,7 @@
         var toolbarUserHidden = isToolbarHidden();
         var toolbarRevealOverride = false;
         function anyToolbarPanelOpen() {
-            var panels = [qualityMenu, sponsorMenu, deArrowMenu];
+            var panels = [qualityMenu, sponsorMenu];
             return panels.some(function (p) {
                 return p && p.style.display !== 'none' && p.style.display !== '';
             });
@@ -4292,7 +4083,7 @@
             function hideToolbar() {
                 // Never hide while a settings panel is open — the controls
                 // that opened it must remain reachable to close it again.
-                var panels = [qualityMenu, sponsorMenu, deArrowMenu];
+                var panels = [qualityMenu, sponsorMenu];
                 var anyOpen = panels.some(function (p) {
                     return p && p.style.display !== 'none' && p.style.display !== '';
                 });
@@ -4393,7 +4184,7 @@
             var _isOverToolbar = false;
 
             function desktopPanelOpen() {
-                var panels = [qualityMenu, sponsorMenu, deArrowMenu];
+                var panels = [qualityMenu, sponsorMenu];
                 return panels.some(function (p) {
                     return p && p.style.display !== 'none' && p.style.display !== '';
                 });
@@ -4934,6 +4725,14 @@
             isToolbarHidden: isToolbarHidden,
             pipCaptionPumpTicks: function () { return pipCaptionPumpTicks; },
             pinchFullscreenRequests: function () { return pinchFullscreenRequests; },
+            // Test hook: the app supplies settings as a prepended constant, so
+            // mutate that object and re-run branding the way a fresh load would.
+            setDeArrowSetting: function (key, value) {
+                if (typeof __wblockTubeCleanerDeArrow !== 'object') return false;
+                __wblockTubeCleanerDeArrow[key] = value;
+                refreshDeArrowBranding();
+                return true;
+            },
             setToolbarHidden: setToolbarHidden,
             previewSponsorNotice: function () {
                 var p = findPlayer();

@@ -30,11 +30,11 @@ mirroring (including token-gated caption metadata fallback and routing Safari’
 caption selection to YouTube’s styled renderer), and k-anonymous SponsorBlock
 skipping with a bounded session cache, precise boundary timers, persistent
 category modes, manual skip, and Undo behavior. The desktop fixture also enables
-the otherwise opt-in DeArrow integration and verifies submitted watch/card titles,
+the otherwise opt-in DeArrow integration (configured by the wBlock app through an injected constant) and verifies submitted watch/card titles,
 cached thumbnails, the opt-in random-frame fallback for videos without a submitted
 thumbnail, separate title/thumbnail settings, original-on-hover restoration,
-current-channel exclusions, bounded request reuse across SPA activation, and the
-dedicated SB/DA service row.
+bounded request reuse across SPA activation, and the SB service row with no
+DeArrow pill on the player.
 `fixture-tube-cleaner-multiple.html` models retained
 Shorts players and verifies native enhancements follow the visible playing
 video, with the toolbar kept off the subscribe row and action rail. `fixture-tube-cleaner-early.html` creates the YouTube player from a
