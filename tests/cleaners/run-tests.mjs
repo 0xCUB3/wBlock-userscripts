@@ -86,6 +86,14 @@ Object.defineProperty(Document.prototype, 'visibilityState', {
   configurable: true,
   get: function () { return window.__wblockNativeVisibility; }
 });
+Object.defineProperty(Document.prototype, 'webkitHidden', {
+  configurable: true,
+  get: function () { return window.__wblockNativeHidden; }
+});
+Object.defineProperty(Document.prototype, 'webkitVisibilityState', {
+  configurable: true,
+  get: function () { return window.__wblockNativeVisibility; }
+});
 `;
 
 // Mirrors the chapter payload currently served for the Tau test video. YouTube
@@ -3465,17 +3473,135 @@ for (const config of [
       detail: `pip=${window.__wblockPiPMode}`,
     }));
   }
-  await page.evaluate((selector) => {
-    const video = document.querySelector(selector);
-    window.__wblockPausedOnHide = false;
-    video.pause = function () { window.__wblockPausedOnHide = true; };
-    window.dispatchEvent(new Event('pagehide'));
-  }, config.selector);
-  await check(page, config.key, 'pauses the video when the tab is closing', () => ({
-    pass: window.__wblockPausedOnHide === true,
-    detail: `paused=${window.__wblockPausedOnHide}`,
-  }));
+  if (config.name === 'Tube Cleaner') {
+    await page.evaluate((selector) => {
+      const video = document.querySelector(selector);
+      window.__wblockPausedOnHide = false;
+      window.__wblockPageVisibilityHandlerRan = false;
+      video.pause = function () { window.__wblockPausedOnHide = true; };
+      document.addEventListener('visibilitychange', function pageVisibilityHandler() {
+        window.__wblockPageVisibilityHandlerRan = true;
+        video.pause();
+      }, { once: true });
+      window.__wblockNativeHidden = true;
+      window.__wblockNativeVisibility = 'hidden';
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('pagehide'));
+    }, config.selector);
+    await check(page, config.key, 'keeps page pause handlers out of hidden and pagehide transitions', () => ({
+      pass: window.__wblockPausedOnHide === false && window.__wblockPageVisibilityHandlerRan === false &&
+        document.hidden === false && document.visibilityState === 'visible' &&
+        document.webkitHidden === false && document.webkitVisibilityState === 'visible',
+      detail: `paused=${window.__wblockPausedOnHide} pageHandler=${window.__wblockPageVisibilityHandlerRan} hidden=${document.hidden} webkitHidden=${document.webkitHidden}`,
+    }));
+  } else {
+    await page.evaluate((selector) => {
+      const video = document.querySelector(selector);
+      window.__wblockPausedOnHide = false;
+      video.pause = function () { window.__wblockPausedOnHide = true; };
+      window.dispatchEvent(new Event('pagehide'));
+    }, config.selector);
+    await check(page, config.key, 'pauses the video when the tab is closing', () => ({
+      pass: window.__wblockPausedOnHide === true,
+      detail: `paused=${window.__wblockPausedOnHide}`,
+    }));
+  }
   record(config.key, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: YouTube Music keeps its own player -----------------------
+// YTM already supplies a complete responsive player and Media Session. Tube
+// Cleaner should retain only the document-start background-playback guard, or
+// WebKit controls create a second transport directly above YTM's controls.
+{
+  const musicFixture = `<!doctype html><html><head><meta name="viewport" content="width=device-width">
+    <style>
+      body { margin: 0; background: #030303; color: white; }
+      #movie_player { position: relative; width: 390px; height: 219px; }
+      video { width: 100%; height: 100%; }
+      #player-page { display: block; padding: 16px; }
+    </style></head><body>
+    <div id="movie_player" class="html5-video-player ytp-hide-controls">
+      <div class="html5-video-container"><video playsinline></video></div>
+    </div>
+    <ytmusic-player-page id="player-page">
+      <button id="ytmusic-play">Play</button>
+      <button id="ytmusic-settings">Settings</button>
+    </ytmusic-player-page>
+    <script>
+      const player = document.getElementById('movie_player');
+      player.getAvailableQualityLevels = () => ['hd1080', 'hd720', 'medium'];
+      player.getPlaybackQuality = () => 'medium';
+      player.setPlaybackQualityRange = () => {};
+      player.getVideoData = () => ({ video_id: 'dQw4w9WgXcQ', title: 'YTM-owned title', author: 'YTM-owned artist' });
+    <\/script></body></html>`;
+  const musicOwnedSession = `
+    // WebKit's YouTube-specific caption bridge queries this API as soon as the
+    // synthetic #movie_player appears. Real YTM supplies it on the player.
+    HTMLElement.prototype.getOption = function () { return []; };
+    HTMLElement.prototype.isSubtitlesOn = function () { return false; };
+    HTMLElement.prototype.setOption = function () {};
+    HTMLElement.prototype.loadModule = function () {};
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: 'YTM-owned title', artist: 'YTM-owned artist', album: 'YTM-owned album'
+    });
+    navigator.mediaSession.playbackState = 'playing';
+  `;
+  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (YouTube Music light integration)', {
+    gotoURL: 'https://music.youtube.com/watch?v=dQw4w9WgXcQ',
+    responseBody: musicFixture,
+    readySignal: '#player-page',
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    scriptSource: visibilityPrelude + '\n' + mediaSessionPrelude + '\n' + musicOwnedSession + '\n' + userscript,
+  });
+  const S = 'tube-cleaner-youtube-music';
+  await page.waitForTimeout(200);
+
+  await check(page, S, 'leaves YouTube Music as the only player surface', () => {
+    const player = document.getElementById('movie_player');
+    const video = player?.querySelector('video');
+    const transport = document.getElementById('player-page');
+    return {
+      pass: !!(player && video && transport && !video.controls &&
+        !player.classList.contains('wblock-tc-native') &&
+        !player.hasAttribute('data-wblock-tc-cleaned') &&
+        !document.querySelector('.wblock-tc-toolbar') &&
+        !document.getElementById('wblock-tc-style') &&
+        getComputedStyle(transport).display !== 'none'),
+      detail: `native=${!!player?.classList.contains('wblock-tc-native')} controls=${!!video?.controls} toolbar=${!!document.querySelector('.wblock-tc-toolbar')} stock=${getComputedStyle(transport).display}`,
+    };
+  });
+
+  await check(page, S, 'preserves YouTube Music Now Playing metadata', () => {
+    const metadata = navigator.mediaSession.metadata;
+    return {
+      pass: metadata?.title === 'YTM-owned title' && metadata?.artist === 'YTM-owned artist' &&
+        metadata?.album === 'YTM-owned album' && navigator.mediaSession.playbackState === 'playing',
+      detail: `title=${metadata?.title} artist=${metadata?.artist} state=${navigator.mediaSession.playbackState}`,
+    };
+  });
+
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    window.__wblockMusicPauseAttempted = false;
+    video.pause = function () { window.__wblockMusicPauseAttempted = true; };
+    document.addEventListener('visibilitychange', function () { video.pause(); }, { once: true });
+    window.__wblockNativeHidden = true;
+    window.__wblockNativeVisibility = 'hidden';
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('pagehide'));
+  });
+  await check(page, S, 'keeps YouTube Music playing through screen and app switches', () => ({
+    pass: window.__wblockMusicPauseAttempted === false && document.hidden === false &&
+      document.visibilityState === 'visible' && document.webkitHidden === false &&
+      document.webkitVisibilityState === 'visible',
+    detail: `paused=${window.__wblockMusicPauseAttempted} hidden=${document.hidden} webkitHidden=${document.webkitHidden}`,
+  }));
+
+  await page.screenshot({ path: join(__dirname, 'artifacts', 'tube-cleaner-youtube-music.png'), fullPage: true });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
 

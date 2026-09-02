@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.20
+// @version      0.1.21
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -91,6 +91,7 @@
     // documentElement here: production injection can run before <html> exists.
     var IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var IS_YOUTUBE_MUSIC = location.hostname === 'music.youtube.com';
     // ------------------------------------------------------------------
     // Auto PiP
     // ------------------------------------------------------------------
@@ -203,15 +204,8 @@
             }
         }
 
-        function onPageHide(e) {
-            if (e && e.persisted) return;
-            try { video.pause(); } catch (err) { /* ignore */ }
-            exitPiP(video);
-        }
-
-        document.addEventListener('visibilitychange', onVisibilityChange);
+        var removeVisibilityObserver = observeRealVisibility(onVisibilityChange);
         window.addEventListener('focus', onFocus);
-        window.addEventListener('pagehide', onPageHide);
 
         // Scroll out of view: use IntersectionObserver.
         // On mobile YouTube the watch player is normally position:fixed (sticky).
@@ -249,9 +243,8 @@
         // Release all of the above when this video is superseded, so listeners
         // and observers do not accumulate across SPA navigations.
         registerCleanup(function () {
-            document.removeEventListener('visibilitychange', onVisibilityChange);
+            removeVisibilityObserver();
             window.removeEventListener('focus', onFocus);
-            window.removeEventListener('pagehide', onPageHide);
             try { if (scrollObserver) scrollObserver.disconnect(); } catch (e) { /* ignore */ }
             video.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
             video.removeEventListener('leavepictureinpicture', onLeavePictureInPicture);
@@ -570,7 +563,7 @@
         if (!root) { return false; }
         var style = document.createElement('style');
         style.id = STYLE_ID;
-        style.textContent = CSS;
+        style.textContent = IS_YOUTUBE_MUSIC ? '' : CSS;
         root.appendChild(style);
         // Shorts pages keep YouTube's stock UI; transformPlayer() re-enables
         // the sheet when the SPA returns to a regular page.
@@ -595,8 +588,12 @@
     // Background playback
     // ------------------------------------------------------------------
 
-    // Track real visibility state separately since we override document.hidden.
+    // Track real visibility state separately since we override the values that
+    // YouTube reads. The capture listener runs before the site's listeners,
+    // notifies Tube Cleaner's own observers, and keeps the hidden transition
+    // from reaching YouTube's background-pause handler.
     var _realHidden = false;
+    var realVisibilityObservers = [];
 
     function findDocumentGetter(name) {
         try {
@@ -620,10 +617,29 @@
         } catch (e) { /* ignore */ }
     }
 
-    // Capture initially and keep using the native prototype getters after the
+    function observeRealVisibility(callback) {
+        realVisibilityObservers.push(callback);
+        return function () {
+            var index = realVisibilityObservers.indexOf(callback);
+            if (index !== -1) realVisibilityObservers.splice(index, 1);
+        };
+    }
+
+    function onRealVisibilityChange(event) {
+        updateRealVisibility();
+        var observers = realVisibilityObservers.slice();
+        for (var i = 0; i < observers.length; i++) {
+            try { observers[i](); } catch (e) { /* ignore */ }
+        }
+        if (_realHidden && event && typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+        }
+    }
+
+    // Capture initially and keep using the native prototype getter after the
     // document instance properties are shadowed for background playback.
     updateRealVisibility();
-    document.addEventListener('visibilitychange', updateRealVisibility);
+    document.addEventListener('visibilitychange', onRealVisibilityChange, true);
 
     function enableBackgroundPlayback() {
         try {
@@ -634,6 +650,18 @@
         } catch (e) { /* ignore */ }
         try {
             Object.defineProperty(document, 'visibilityState', {
+                get: function () { return 'visible'; },
+                configurable: true
+            });
+        } catch (e) { /* ignore */ }
+        try {
+            Object.defineProperty(document, 'webkitHidden', {
+                get: function () { return false; },
+                configurable: true
+            });
+        } catch (e) { /* ignore */ }
+        try {
+            Object.defineProperty(document, 'webkitVisibilityState', {
                 get: function () { return 'visible'; },
                 configurable: true
             });
@@ -3222,6 +3250,10 @@
     }
 
     function transformPlayer() {
+        // YouTube Music owns a complete responsive player and Media Session.
+        // Native controls are invisible in song mode and duplicate its transport
+        // in video mode, so the Music integration is background playback only.
+        if (IS_YOUTUBE_MUSIC) return;
         if (isShortsPath()) {
             suspendForShorts();
             return;
@@ -4695,9 +4727,10 @@
     }
 
     function boot() {
+        enableBackgroundPlayback();
+        if (IS_YOUTUBE_MUSIC) return;
         observeDocumentForPlayer();
         injectStyles();
-        enableBackgroundPlayback();
         lastUrl = location.href;
         watchNavigation();
         setupFullscreenHotkey();

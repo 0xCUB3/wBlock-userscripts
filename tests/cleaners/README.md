@@ -102,7 +102,9 @@ Player Cleaner scenarios:
   native hidden tab, proving both cleaners still enter PiP from the captured
   browser getter but not merely from window focus loss. The Tube Cleaner fixture
   also verifies its quality path keeps YouTube's settings shell hidden, selects
-  the requested option once, and closes it without an extra toggle.
+  the requested option once, and closes it without an extra toggle. The YouTube
+  Music scenario keeps YTM's responsive player and Media Session untouched while
+  retaining Tube Cleaner's background-playback guard.
 
 ```sh
 node tests/cleaners/run-tests.mjs            # exit code 1 if any check fails
