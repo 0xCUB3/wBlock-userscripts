@@ -126,7 +126,8 @@ const sponsorBlockPrelude = `
           { UUID: 'test-sponsor', category: 'sponsor', actionType: 'skip', segment: [10, 20] },
           { UUID: 'test-selfpromo', category: 'selfpromo', actionType: 'skip', segment: [30, 40] },
           { UUID: 'test-interaction', category: 'interaction', actionType: 'skip', segment: [50, 60] },
-          { UUID: 'test-timer', category: 'sponsor', actionType: 'skip', segment: [70, 80] }
+          { UUID: 'test-timer', category: 'sponsor', actionType: 'skip', segment: [70, 80] },
+          { UUID: 'test-end', category: 'sponsor', actionType: 'skip', segment: [290, 300] }
         ]
       }]); }});
     }
@@ -482,6 +483,59 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
     delete video.webkitPresentationMode;
     delete video._wblockNativeFullscreenState;
     return { pass: modes.join(',') === 'inline,fullscreen', detail: 'modes=' + modes.join(',') };
+  });
+
+  await check(page, scenario, 'C toggles the native subtitle track instead of YouTube captions', () => {
+    const video = document.querySelector('#movie_player video');
+    if (!video) return { pass: false, detail: 'no video' };
+    const tracks = Array.from(video.textTracks).filter(t => t.kind === 'subtitles');
+    if (!tracks.length) return { pass: true, detail: 'skipped: scenario installs no subtitle tracks' };
+    tracks.forEach(t => { t.mode = 'disabled'; });
+    const press = () => {
+      const event = new KeyboardEvent('keydown', { key: 'c', bubbles: true, cancelable: true, composed: true });
+      document.body.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const prevented = press();
+    const showingOn = tracks.filter(t => t.mode === 'showing').length;
+    press();
+    const showingOff = tracks.filter(t => t.mode === 'showing').length;
+    return { pass: prevented && showingOn === 1 && showingOff === 0,
+      detail: `prevented=${prevented} on=${showingOn} off=${showingOff}` };
+  });
+
+  await check(page, scenario, 'hides the YouTube caption overlay under the native player', () => {
+    const player = document.querySelector('#movie_player');
+    if (!player) return { pass: false, detail: 'no player' };
+    const overlay = document.createElement('div');
+    overlay.className = 'ytp-caption-window-container';
+    player.appendChild(overlay);
+    const display = getComputedStyle(overlay).display;
+    overlay.remove();
+    return { pass: display === 'none', detail: `display=${display}` };
+  });
+
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video.textTracks).filter(t => t.kind === 'subtitles');
+    tracks.forEach(t => { t.mode = 'disabled'; });
+    window.__wblockTrackCount = tracks.length;
+    if (tracks.length > 1) { tracks[0].mode = 'showing'; }
+  });
+  await page.waitForTimeout(50);
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video.textTracks).filter(t => t.kind === 'subtitles');
+    if (tracks.length > 1) { tracks[1].mode = 'showing'; }
+  });
+  await page.waitForTimeout(100);
+  await check(page, scenario, 'keeps only the most recently enabled native subtitle track showing', () => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video.textTracks).filter(t => t.kind === 'subtitles');
+    if (tracks.length < 2) return { pass: true, detail: `skipped: tracks=${tracks.length}` };
+    const showing = tracks.map(t => t.mode);
+    tracks.forEach(t => { t.mode = 'disabled'; });
+    return { pass: showing[0] === 'disabled' && showing[1] === 'showing', detail: `modes=${showing.join(',')}` };
   });
 
   await check(page, scenario, 'keeps unknown YouTube overlays behind the native video', () => {
@@ -1242,6 +1296,21 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'does not skip a SponsorBlock segment during an in-progress seek', () => ({
     pass: window.__wblockSeekingSponsorTime === 12,
     detail: `time=${window.__wblockSeekingSponsorTime}`,
+  }));
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    Object.defineProperty(video, 'duration', { configurable: true, get: () => 300 });
+    video.currentTime = 291;
+    video.dispatchEvent(new Event('timeupdate'));
+    window.__wblockEndSkipTime = video.currentTime;
+    delete video.duration;
+  });
+  // Seeking a WebKit media element to exactly its duration replays the video
+  // instead of firing ended, which is what Safari users saw as "restarts at
+  // the end" whenever an outro segment ran to the last frame.
+  await check(page, 'desktop', 'stops a SponsorBlock skip just short of the duration instead of seeking to the end', () => ({
+    pass: window.__wblockEndSkipTime > 299.9 && window.__wblockEndSkipTime < 300,
+    detail: `time=${window.__wblockEndSkipTime}`,
   }));
   await page.evaluate(() => {
     history.replaceState(null, '', location.pathname + '?v=dQw4w9WgXcQ&cache-check=1');

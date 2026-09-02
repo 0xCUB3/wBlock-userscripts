@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.17
+// @version      0.1.18
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -325,6 +325,11 @@
         '#movie_player .ytp-remote-button,',
         '#movie_player .ytp-size-button,',
         '#movie_player .ytp-subtitles-button,',
+        // YouTube's DOM caption overlay. Safari renders the installed VTT
+        // tracks itself, so this would only double the text once YouTube's
+        // C shortcut or its remembered caption preference turns it on.
+        '#movie_player .ytp-caption-window-container,',
+        '#movie_player .caption-window,',
         '#movie_player .ytp-autonav-endscreen-button,',
         '#movie_player .ytp-share-button,',
         '#movie_player .ytp-watch-later-button,',
@@ -1707,7 +1712,11 @@
                         return;
                     }
                     var target = item.segment[1];
-                    if (hasDuration && target > duration) target = duration;
+                    // Seeking a Safari media element to its exact duration
+                    // replays the video instead of ending it (the SponsorBlock
+                    // extension works around the same WebKit behavior). Stop
+                    // just short of the end so playback finishes on its own.
+                    if (hasDuration && target >= duration - 0.001) target = video.loop ? 0 : Math.max(0, duration - 0.001);
                     try { video.currentTime = target; } catch (e) { return; }
                     if (settings.showNotice) {
                         if (removeNotice) removeNotice();
@@ -3028,17 +3037,60 @@
         // background page delivers them late. Cycling only at boundaries
         // keeps the foreground path untouched and avoids flicker.
         var pipCueSignature = null;
+        var pipPumpRestorePending = false;
         var pipPumpRestoreTimer = null;
         var pipPumpInterval = null;
+        function restoreTrackMode(track) {
+            if (!pipPumpRestorePending) return;
+            pipPumpRestorePending = false;
+            if (pipPumpRestoreTimer !== null) { clearTimeout(pipPumpRestoreTimer); pipPumpRestoreTimer = null; }
+            if (cancelled) return;
+            try { if (track.mode === 'hidden') track.mode = 'showing'; } catch (e) { /* ignore */ }
+            // Force the layout that WebKit's PiP caption image is painted from.
+            try { void video.offsetWidth; } catch (e) { /* ignore */ }
+        }
         function cycleTrackMode(track) {
-            if (pipPumpRestoreTimer !== null) return;
+            if (pipPumpRestorePending) return;
+            pipPumpRestorePending = true;
             track.mode = 'hidden';
             pipCaptionPumpTicks++;
+            // A hidden macOS tab aligns timers to whole seconds or longer, so
+            // a setTimeout restore can leave the track hidden for a long
+            // time. Message events are ordinary tasks and are not throttled;
+            // the timer only backs them up.
+            try {
+                if (typeof MessageChannel === 'function') {
+                    var channel = new MessageChannel();
+                    channel.port1.onmessage = function () {
+                        try { channel.port1.close(); } catch (e) { /* ignore */ }
+                        restoreTrackMode(track);
+                    };
+                    channel.port2.postMessage(0);
+                }
+            } catch (e) { /* fall through to the timer */ }
             pipPumpRestoreTimer = setTimeout(function () {
                 pipPumpRestoreTimer = null;
-                if (cancelled) return;
-                try { if (track.mode === 'hidden') track.mode = 'showing'; } catch (e) { /* ignore */ }
+                restoreTrackMode(track);
             }, 0);
+        }
+        // Safari's track menu and the C shortcut both pick tracks; if two
+        // subtitle tracks end up showing at once the text renders twice.
+        // Keep only the most recently enabled one.
+        var showingBefore = [];
+        function enforceSingleSubtitleTrack() {
+            var showing = nativeSubtitleTracks(video).filter(function (track) { return track.mode === 'showing'; });
+            if (showing.length > 1) {
+                var keep = null;
+                for (var i = 0; i < showing.length; i++) {
+                    if (showingBefore.indexOf(showing[i]) === -1) { keep = showing[i]; break; }
+                }
+                if (!keep) keep = showing[showing.length - 1];
+                for (var j = 0; j < showing.length; j++) {
+                    if (showing[j] !== keep) { try { showing[j].mode = 'disabled'; } catch (e) { /* ignore */ } }
+                }
+                showing = [keep];
+            }
+            showingBefore = showing;
         }
         function activeCueSignature(track, time) {
             var cues = track.cues;
@@ -3072,6 +3124,7 @@
         video.addEventListener('timeupdate', onPiPCaptionTick);
         if (video.textTracks && typeof video.textTracks.addEventListener === 'function') {
             video.textTracks.addEventListener('addtrack', onTrackAdded);
+            video.textTracks.addEventListener('change', enforceSingleSubtitleTrack);
         }
         pipPumpInterval = setInterval(onPiPCaptionTick, 500);
 
@@ -3081,8 +3134,10 @@
             video.removeEventListener('timeupdate', onPiPCaptionTick);
             if (video.textTracks && typeof video.textTracks.removeEventListener === 'function') {
                 video.textTracks.removeEventListener('addtrack', onTrackAdded);
+                video.textTracks.removeEventListener('change', enforceSingleSubtitleTrack);
             }
             if (pipPumpInterval !== null) { clearInterval(pipPumpInterval); pipPumpInterval = null; }
+            pipPumpRestorePending = false;
             if (pipPumpRestoreTimer !== null) { clearTimeout(pipPumpRestoreTimer); pipPumpRestoreTimer = null; }
             if (controller) controller.abort();
             for (var i = 0; i < elements.length; i++) {
@@ -4608,6 +4663,65 @@
         } catch (e) { /* ignore */ }
     }
 
+    function nativeSubtitleTracks(video) {
+        var result = [];
+        var tracks = video && video.textTracks;
+        if (!tracks) return result;
+        for (var i = 0; i < tracks.length; i++) {
+            if (tracks[i].kind === 'subtitles' || tracks[i].kind === 'captions') result.push(tracks[i]);
+        }
+        return result;
+    }
+
+    function preferredSubtitleTrack(tracks) {
+        var languages = navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || 'en'];
+        for (var l = 0; l < languages.length; l++) {
+            var wanted = String(languages[l] || '').toLowerCase();
+            var base = wanted.split('-')[0];
+            for (var i = 0; i < tracks.length; i++) {
+                var language = String(tracks[i].language || '').toLowerCase();
+                if (language === wanted || language.split('-')[0] === base) return tracks[i];
+            }
+        }
+        return tracks[0];
+    }
+
+    function toggleNativeSubtitles(video) {
+        var tracks = nativeSubtitleTracks(video);
+        if (!tracks.length) return false;
+        var showing = null;
+        for (var i = 0; i < tracks.length; i++) {
+            if (tracks[i].mode === 'showing') { showing = tracks[i]; break; }
+        }
+        if (showing) {
+            video._wblockLastSubtitleTrack = showing;
+            for (var j = 0; j < tracks.length; j++) {
+                try { tracks[j].mode = 'disabled'; } catch (e) { /* ignore */ }
+            }
+            return true;
+        }
+        var last = video._wblockLastSubtitleTrack;
+        var pick = last && tracks.indexOf(last) !== -1 ? last : preferredSubtitleTrack(tracks);
+        for (var k = 0; k < tracks.length; k++) {
+            try { tracks[k].mode = tracks[k] === pick ? 'showing' : 'disabled'; } catch (e) { /* ignore */ }
+        }
+        return true;
+    }
+
+    function onCaptionHotkey(event) {
+        if (event.ctrlKey || event.metaKey || event.altKey) { return; }
+        if (event.key !== 'c' && event.key !== 'C') { return; }
+        var video = activeVideo;
+        if (!video || !video.isConnected) { return; }
+        if (isTypingTarget(event.target)) { return; }
+        // YouTube's own C shortcut turns on its DOM caption overlay, which
+        // the native player hides and which would double any Safari
+        // subtitle track. Route the key to the native tracks instead.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (!event.repeat) { toggleNativeSubtitles(video); }
+    }
+
     function onFullscreenHotkey(event) {
         if (event.ctrlKey || event.metaKey || event.altKey) { return; }
         if (event.key !== 'f' && event.key !== 'F') { return; }
@@ -4623,6 +4737,7 @@
 
     function setupFullscreenHotkey() {
         document.addEventListener('keydown', onFullscreenHotkey, true);
+        document.addEventListener('keydown', onCaptionHotkey, true);
         // Capture phase: these events do not bubble.
         document.addEventListener('webkitbeginfullscreen', onNativeFullscreenEvent, true);
         document.addEventListener('webkitendfullscreen', onNativeFullscreenEvent, true);
