@@ -866,6 +866,49 @@ async function iosAutoHideCheck(page, scenario) {
 // ladder so a tap can request a higher rendition on demand, and choosing one
 // must not be silently downgraded back to 360p. Regression guard for the
 // "only 360p shown on iOS, video is actually 1440p" report.
+// #631: a two-finger spread on the player must be swallowed before YouTube's
+// document-level capture handlers see it and must ask for native fullscreen on
+// release, while a plain two-finger tap (no spread) asks for nothing.
+async function iosPinchFullscreenCheck(page, scenario) {
+  await check(page, scenario, 'pinch-out on the player is routed to native fullscreen', () => {
+    const player = document.querySelector('#movie_player');
+    const video = player && player.querySelector('video');
+    const d = window.__wblockTubeDebug;
+    if (!player || !video || !d || typeof d.pinchFullscreenRequests !== 'function') {
+      return { pass: false, detail: 'missing player, video, or debug hook' };
+    }
+    let leaked = 0;
+    const spy = (event) => { if (event.touches && event.touches.length === 2) leaked++; };
+    document.body.addEventListener('touchstart', spy, true);
+    document.body.addEventListener('touchmove', spy, true);
+    // WebKit has no Touch constructor; use its legacy createTouch factory.
+    if (typeof document.createTouch !== 'function' || typeof document.createTouchList !== 'function') {
+      return { pass: false, detail: 'no document.createTouch in this WebKit' };
+    }
+    const touch = (id, x, y) => document.createTouch(window, video, id, x, y, x, y);
+    const fire = (type, touches) => {
+      const list = document.createTouchList(...touches);
+      const event = new TouchEvent(type, { bubbles: true, cancelable: true, composed: true });
+      for (const key of ['touches', 'targetTouches', 'changedTouches']) {
+        Object.defineProperty(event, key, { value: list });
+      }
+      video.dispatchEvent(event);
+    };
+    const before = d.pinchFullscreenRequests();
+    fire('touchstart', [touch(1, 100, 100), touch(2, 120, 100)]);
+    fire('touchmove', [touch(1, 60, 100), touch(2, 160, 100)]);
+    fire('touchend', []);
+    const afterSpread = d.pinchFullscreenRequests();
+    fire('touchstart', [touch(1, 100, 100), touch(2, 120, 100)]);
+    fire('touchend', []);
+    const afterTap = d.pinchFullscreenRequests();
+    document.body.removeEventListener('touchstart', spy, true);
+    document.body.removeEventListener('touchmove', spy, true);
+    const pass = afterSpread === before + 1 && afterTap === afterSpread && leaked === 0;
+    return { pass, detail: `spread=${afterSpread - before}, tap=${afterTap - afterSpread}, leakedToPage=${leaked}` };
+  });
+}
+
 async function iosQualityLadderCheck(page, scenario) {
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
@@ -1801,6 +1844,7 @@ async function qualityUISelectionCheck(page, scenario) {
   await iosQualityLadderCheck(page, 'iPhone');
   await iosLandscapeCheck(page, 'iPhone');
   await iosAutoHideCheck(page, 'iPhone');
+  await iosPinchFullscreenCheck(page, 'iPhone');
   await controlsSurvivalCheck(page, 'iPhone', { preserveIOSMMSRestrictions: true });
   record('iPhone', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();

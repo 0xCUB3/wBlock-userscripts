@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.18
+// @version      0.1.19
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1077,6 +1077,7 @@
         });
 
         setupVideoAspectLayout(player, video);
+        setupPinchFullscreen(player, video);
         // Keep YouTube's media listeners intact. SABR/MSE uses waiting,
         // stalled, progress, and related events to maintain the stream. The
         // iOS toolbar contains only a compact quality selector positioned above
@@ -4735,6 +4736,91 @@
         if (!event.repeat) { toggleNativeFullscreen(video); }
     }
 
+    // ------------------------------------------------------------------
+    // Pinch-out routed to native fullscreen
+    // ------------------------------------------------------------------
+
+    // Mobile YouTube turns a two-finger spread on the player into its own
+    // container fullscreen, which with the chrome hidden just scales the
+    // inline layout and leaves the page zoomed (#631). Its handlers live on
+    // the document in the capture phase, so ours must too: registered at
+    // document-start they run first, swallow the gesture, and on release
+    // present Safari's real fullscreen player the way the F key does.
+    var pinchFullscreenRequests = 0;
+
+    function setupPinchFullscreen(player, video) {
+        if (!IS_IOS || !player) return;
+        var startDistance = 0;
+        var armed = false;
+        var active = false;
+
+        function distance(touches) {
+            var dx = touches[0].clientX - touches[1].clientX;
+            var dy = touches[0].clientY - touches[1].clientY;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function insidePlayer(event) {
+            var target = event.target;
+            return target && target.nodeType === 1 && player.contains(target);
+        }
+
+        function onTouchStart(event) {
+            if (!event.touches || event.touches.length !== 2 || !insidePlayer(event)) return;
+            active = true;
+            armed = false;
+            startDistance = distance(event.touches);
+            event.stopImmediatePropagation();
+        }
+
+        function onTouchMove(event) {
+            if (!active) return;
+            if (event.touches && event.touches.length === 2 && startDistance > 0 &&
+                distance(event.touches) > startDistance * 1.25) {
+                armed = true;
+            }
+            // Non-passive: this is what keeps Safari from zooming the page.
+            if (event.cancelable) event.preventDefault();
+            event.stopImmediatePropagation();
+        }
+
+        function onTouchEnd(event) {
+            if (!active) return;
+            event.stopImmediatePropagation();
+            if (event.touches && event.touches.length) return;
+            active = false;
+            if (!armed) return;
+            armed = false;
+            pinchFullscreenRequests++;
+            // touchend carries user activation, which the presentation APIs need.
+            if (video.isConnected && !videoInNativeFullscreen(video)) toggleNativeFullscreen(video);
+        }
+
+        function onGesture(event) {
+            if (!insidePlayer(event)) return;
+            if (event.cancelable) event.preventDefault();
+            event.stopImmediatePropagation();
+        }
+
+        var options = { capture: true, passive: false };
+        document.addEventListener('touchstart', onTouchStart, options);
+        document.addEventListener('touchmove', onTouchMove, options);
+        document.addEventListener('touchend', onTouchEnd, options);
+        document.addEventListener('touchcancel', onTouchEnd, options);
+        document.addEventListener('gesturestart', onGesture, options);
+        document.addEventListener('gesturechange', onGesture, options);
+        document.addEventListener('gestureend', onGesture, options);
+        registerCleanup(function () {
+            document.removeEventListener('touchstart', onTouchStart, options);
+            document.removeEventListener('touchmove', onTouchMove, options);
+            document.removeEventListener('touchend', onTouchEnd, options);
+            document.removeEventListener('touchcancel', onTouchEnd, options);
+            document.removeEventListener('gesturestart', onGesture, options);
+            document.removeEventListener('gesturechange', onGesture, options);
+            document.removeEventListener('gestureend', onGesture, options);
+        });
+    }
+
     function setupFullscreenHotkey() {
         document.addEventListener('keydown', onFullscreenHotkey, true);
         document.addEventListener('keydown', onCaptionHotkey, true);
@@ -4847,6 +4933,7 @@
             setPreferredQuality: setPreferredQuality,
             isToolbarHidden: isToolbarHidden,
             pipCaptionPumpTicks: function () { return pipCaptionPumpTicks; },
+            pinchFullscreenRequests: function () { return pinchFullscreenRequests; },
             setToolbarHidden: setToolbarHidden,
             previewSponsorNotice: function () {
                 var p = findPlayer();
