@@ -34,7 +34,11 @@ the otherwise opt-in DeArrow integration (configured by the wBlock app through a
 fetched thumbnails (re-requested once at the server's `X-Timestamp` when it differs from the branding time), the opt-in random-frame fallback for videos without a submitted
 thumbnail, separate title/thumbnail settings, original-on-hover restoration,
 bounded request reuse across SPA activation, and the SB service row with no
-DeArrow pill on the player.
+DeArrow pill on the player, stacked above the quality row. The iPhone run also
+fills the origin with resume positions, makes the first write of the
+hide-controls preference throw QuotaExceededError, and expects the preference
+to persist after the oldest positions are pruned and the toolbar to start
+hidden on reload.
 `fixture-tube-cleaner-multiple.html` models retained
 Shorts players and verifies native enhancements follow the visible playing
 video, with the toolbar kept off the subscribe row and action rail. `fixture-tube-cleaner-early.html` creates the YouTube player from a

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.26
+// @version      0.1.27
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -109,7 +109,7 @@
     }
 
     function setAutoPiP(v) {
-        try { localStorage.setItem(AUTO_PIP_KEY, v ? '1' : '0'); } catch (e) { /* ignore */ }
+        storageSet(AUTO_PIP_KEY, v ? '1' : '0');
         autoPiPEnabled = v;
     }
 
@@ -268,29 +268,71 @@
     }
 
     function setAudioOnly(v) {
-        try { localStorage.setItem(STORAGE_AUDIO, v ? '1' : '0'); } catch (e) { /* ignore */ }
+        storageSet(STORAGE_AUDIO, v ? '1' : '0');
     }
 
     function getPreferredQuality() {
         try { return localStorage.getItem(STORAGE_QUALITY) || 'auto'; } catch (e) { return 'auto'; }
     }
 
+    // Safari's per-origin storage quota is shared with everything YouTube and
+    // the wBlock warm-start cache keep on youtube.com. When it is full,
+    // setItem throws and a silently swallowed write looks like a preference
+    // that "did not save". Tube Cleaner's own resume positions are the only
+    // thing it can make room with, so a failed write prunes the oldest of
+    // them and tries once more.
+    var POSITION_KEEP_ON_PRUNE = 40;
+
+    function prunePlaybackPositions(keep) {
+        var entries = [];
+        try {
+            for (var i = 0; i < localStorage.length; i++) {
+                var key = localStorage.key(i);
+                if (!key || key.indexOf(STORAGE_POSITION) !== 0) continue;
+                var updatedAt = 0;
+                try { updatedAt = Number(JSON.parse(localStorage.getItem(key) || 'null').updatedAt) || 0; } catch (e) { /* stale */ }
+                entries.push({ key: key, updatedAt: updatedAt });
+            }
+        } catch (e) { return 0; }
+        if (entries.length <= keep) return 0;
+        entries.sort(function (a, b) { return b.updatedAt - a.updatedAt; });
+        var removed = 0;
+        for (var j = keep; j < entries.length; j++) {
+            try { localStorage.removeItem(entries[j].key); removed++; } catch (e) { /* ignore */ }
+        }
+        return removed;
+    }
+
+    function storageSet(key, value) {
+        try { localStorage.setItem(key, value); return true; } catch (e) { /* quota or disabled */ }
+        if (!prunePlaybackPositions(POSITION_KEEP_ON_PRUNE)) return false;
+        try { localStorage.setItem(key, value); return true; } catch (e) { return false; }
+    }
+
+    function storageRemove(key) {
+        try { localStorage.removeItem(key); } catch (e) { /* ignore */ }
+    }
+
     function setPreferredQuality(q) {
-        try { localStorage.setItem(STORAGE_QUALITY, q); } catch (e) { /* ignore */ }
+        storageSet(STORAGE_QUALITY, q);
     }
 
     // Device-level preference to keep the wBlock toolbar (quality / SB)
     // off the video entirely. Double-tap or double-click the video reveals it
     // temporarily; the checkbox lives in the SponsorBlock settings panel.
+    // The in-memory mirror keeps the choice honoured for this page even when
+    // the origin's storage refuses the write.
+    var toolbarHiddenMirror = null;
+
     function isToolbarHidden() {
+        if (toolbarHiddenMirror !== null) return toolbarHiddenMirror;
         try { return localStorage.getItem(STORAGE_TOOLBAR_HIDDEN) === '1'; } catch (e) { return false; }
     }
 
     function setToolbarHidden(hidden) {
-        try {
-            if (hidden) { localStorage.setItem(STORAGE_TOOLBAR_HIDDEN, '1'); }
-            else { localStorage.removeItem(STORAGE_TOOLBAR_HIDDEN); }
-        } catch (e) { /* ignore */ }
+        toolbarHiddenMirror = !!hidden;
+        if (hidden) storageSet(STORAGE_TOOLBAR_HIDDEN, '1');
+        else storageRemove(STORAGE_TOOLBAR_HIDDEN);
         document.dispatchEvent(new CustomEvent('wblock-tc-toolbar-pref'));
     }
 
@@ -1147,7 +1189,7 @@
                 localStorage.removeItem(STORAGE_POSITION + videoId);
             } else if (isFinite(time)) {
                 if (time > 0.25) {
-                    localStorage.setItem(STORAGE_POSITION + videoId, JSON.stringify({ time: time, updatedAt: Date.now() }));
+                    storageSet(STORAGE_POSITION + videoId, JSON.stringify({ time: time, updatedAt: Date.now() }));
                 } else {
                     localStorage.removeItem(STORAGE_POSITION + videoId);
                 }
@@ -1989,7 +2031,7 @@
 
     function saveSponsorBlockSettings(settings) {
         sponsorBlockSettingsCache = settings;
-        try { localStorage.setItem(SPONSORBLOCK_SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+        storageSet(SPONSORBLOCK_SETTINGS_KEY, JSON.stringify(settings));
         document.dispatchEvent(new CustomEvent('wblock-tc-sponsor-settings'));
     }
 
@@ -4231,8 +4273,10 @@
         var servicesRow = document.createElement('div');
         servicesRow.className = 'wblock-tc-services-row';
         servicesRow.style.cssText = 'display:flex;gap:6px;align-items:center;justify-content:' + rowJustify;
-        toolbar.appendChild(playbackRow);
+        // Services (SB) sit on top; the quality picker is the row nearest the
+        // native control strip so the pill people reach for most is lowest.
         toolbar.appendChild(servicesRow);
+        toolbar.appendChild(playbackRow);
 
         // Quality selector
         var qualityBtn = document.createElement('button');

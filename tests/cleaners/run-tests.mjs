@@ -615,8 +615,9 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       const audio = playback?.querySelector('.wblock-tc-audio-button');
       const sponsor = services?.querySelector('.wblock-tc-sponsor-button');
       const deArrow = tb?.querySelector('.wblock-tc-dearrow-button');
-      return { pass: !!(quality && audio && sponsor) && !deArrow && !playback.querySelector('.wblock-tc-sponsor-button'),
-        detail: `quality=${!!quality} audio=${!!audio} sponsor=${!!sponsor} deArrow=${!!deArrow}` };
+      const servicesFirst = !!(playback && services) && !!(services.compareDocumentPosition(playback) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return { pass: !!(quality && audio && sponsor) && !deArrow && !playback.querySelector('.wblock-tc-sponsor-button') && servicesFirst,
+        detail: `quality=${!!quality} audio=${!!audio} sponsor=${!!sponsor} deArrow=${!!deArrow} servicesFirst=${servicesFirst}` };
     });
   } else {
     await check(page, scenario, 'adds separate quality and service rows beside Safari native controls on iOS', () => {
@@ -627,10 +628,11 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       const sponsor = services?.querySelector('.wblock-tc-sponsor-button');
       const deArrow = toolbar?.querySelector('.wblock-tc-dearrow-button');
       const audio = toolbar?.querySelector('.wblock-tc-audio-button');
+      const qualityBelowSB = !!(quality && sponsor) && quality.getBoundingClientRect().top > sponsor.getBoundingClientRect().bottom - 1;
       return {
-        pass: !!toolbar && !!quality && !!sponsor && !deArrow && !audio &&
+        pass: !!toolbar && !!quality && !!sponsor && !deArrow && !audio && qualityBelowSB &&
           getComputedStyle(toolbar).pointerEvents === 'auto',
-        detail: `toolbar=${!!toolbar} quality=${!!quality} sponsor=${!!sponsor} deArrow=${!!deArrow} audio=${!!audio}`,
+        detail: `toolbar=${!!toolbar} quality=${!!quality} sponsor=${!!sponsor} deArrow=${!!deArrow} audio=${!!audio} qualityBelowSB=${qualityBelowSB}`,
       };
     });
     await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
@@ -1839,6 +1841,45 @@ async function qualityUISelectionCheck(page, scenario) {
   await iosAutoHideCheck(page, 'iPhone');
   await iosPinchFullscreenCheck(page, 'iPhone');
   await controlsSurvivalCheck(page, 'iPhone', { preserveIOSMMSRestrictions: true });
+  // Safari shares one storage quota per origin. When youtube.com is full the
+  // hide preference must still stick for this page, and the next write must
+  // make room by dropping Tube Cleaner's oldest resume positions.
+  await page.evaluate(() => {
+    localStorage.removeItem('wblock.tubeCleaner.hideToolbar');
+    for (let i = 0; i < 60; i++) {
+      localStorage.setItem('wblock.tubeCleaner.position.QUOTA' + String(i).padStart(6, '0'), JSON.stringify({ time: 10 + i, updatedAt: 1000 + i }));
+    }
+    const nativeSet = Storage.prototype.setItem;
+    window.__wblockQuotaFailures = 0;
+    Storage.prototype.setItem = function (key, value) {
+      if (window.__wblockQuotaFailures === 0 && key === 'wblock.tubeCleaner.hideToolbar') {
+        window.__wblockQuotaFailures++;
+        throw new DOMException('QuotaExceededError', 'QuotaExceededError');
+      }
+      return nativeSet.call(this, key, value);
+    };
+  });
+  await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
+  await page.waitForTimeout(100);
+  const hideRow = (await page.$$('.wblock-tc-sponsor-menu label')).at(-3);
+  await (await hideRow.$('input')).tap();
+  await page.waitForTimeout(150);
+  await check(page, 'iPhone', 'keeps the hide-controls preference when the first localStorage write hits the quota', () => {
+    const stored = localStorage.getItem('wblock.tubeCleaner.hideToolbar');
+    const positions = Object.keys(localStorage).filter(k => k.startsWith('wblock.tubeCleaner.position.QUOTA')).length;
+    const newest = localStorage.getItem('wblock.tubeCleaner.position.QUOTA000059');
+    const oldest = localStorage.getItem('wblock.tubeCleaner.position.QUOTA000000');
+    return { pass: stored === '1' && window.__wblockQuotaFailures === 1 && positions === 40 && !!newest && !oldest,
+      detail: `stored=${stored} failures=${window.__wblockQuotaFailures} positions=${positions} newestKept=${!!newest} oldestDropped=${!oldest}` };
+  });
+  await page.evaluate(() => { document.querySelector('.wblock-tc-sponsor-button').click(); });
+  await page.reload();
+  await page.waitForSelector('.wblock-tc-toolbar', { timeout: 5000 });
+  await check(page, 'iPhone', 'starts hidden on the next load after the hide preference was saved', () => {
+    const toolbar = document.querySelector('.wblock-tc-toolbar');
+    return { pass: toolbar.classList.contains('wblock-tc-toolbar-hidden') && toolbar.style.opacity === '0', detail: `hidden=${toolbar.classList.contains('wblock-tc-toolbar-hidden')} opacity=${toolbar.style.opacity}` };
+  });
+  await page.evaluate(() => localStorage.removeItem('wblock.tubeCleaner.hideToolbar'));
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
     const video = player.querySelector('video');
