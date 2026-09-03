@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.22
+// @version      0.1.23
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -666,6 +666,353 @@
                 configurable: true
             });
         } catch (e) { /* ignore */ }
+    }
+
+    // ------------------------------------------------------------------
+    // YouTube Music
+    //
+    // music.youtube.com ships a complete responsive player with its own
+    // transport, settings page, and Media Session module, so Tube Cleaner never
+    // nativeizes its <video>, adds controls, or draws a toolbar there. The
+    // integration below owns only what the stock site leaves broken in Safari:
+    //
+    // - The document-start visibility shadow above. Song mode plays an
+    //   audio-only MSE source (no video track), which WebKit lets continue under
+    //   lock as long as page script does not pause it; the shadow keeps YTM's
+    //   own background check reading "visible".
+    // - The Audio quality choice. YTM's Playback settings menu (client id
+    //   MUSIC_WEB_AUDIO_QUALITY, values '2' Normal and '1' Low) applies a pick by
+    //   writing ytcfg AUDIO_QUALITY, which selects the audio itag on the next
+    //   track load. Sessions the server does not remember lose it on reload, so
+    //   the last pick is stored locally and written back before playback.
+    // - Ad breaks. While the ad player presents (getPresentingPlayerType() 2
+    //   with the ad-showing class) the <video> carries the ad media; seeking
+    //   that media to its own end finishes the ad through the player's normal
+    //   ended path and content resumes at 0. The content element is never sought.
+    // - Now Playing. YTM publishes Media Session metadata itself; when it has
+    //   not (fresh load, replaced player), the current track is published from
+    //   the player API with the player bar as fallback, and handlers keep their
+    //   stock meaning by driving the player API.
+    // ------------------------------------------------------------------
+
+    var MUSIC_AUDIO_QUALITY_KEY = 'wblock.tubeCleaner.musicAudioQuality';
+    var MUSIC_AUDIO_QUALITY_VALUES = { '1': 'AUDIO_QUALITY_LOW', '2': 'AUDIO_QUALITY_MEDIUM' };
+    var MUSIC_AD_PLAYER_TYPE = 2;
+    var musicState = { video: null, player: null, unbind: null, adEnds: 0, lastAdEnd: 0, published: null, publishedId: '', owns: false };
+
+    function musicYtcfg() {
+        var cfg = window.ytcfg;
+        return cfg && typeof cfg.get === 'function' && typeof cfg.set === 'function' ? cfg : null;
+    }
+
+    function getMusicAudioQuality() {
+        try {
+            var stored = localStorage.getItem(MUSIC_AUDIO_QUALITY_KEY);
+            return /^AUDIO_QUALITY_[A-Z]+$/.test(stored || '') ? stored : null;
+        } catch (e) { return null; }
+    }
+
+    function setMusicAudioQuality(value) {
+        try {
+            if (value) localStorage.setItem(MUSIC_AUDIO_QUALITY_KEY, value);
+            else localStorage.removeItem(MUSIC_AUDIO_QUALITY_KEY);
+        } catch (e) { /* ignore */ }
+    }
+
+    function applyMusicAudioQuality() {
+        var cfg = musicYtcfg();
+        var preferred = getMusicAudioQuality();
+        if (!cfg || !preferred) return false;
+        try {
+            if (cfg.get('AUDIO_QUALITY') === preferred) return false;
+            cfg.set('AUDIO_QUALITY', preferred);
+            log('YouTube Music audio quality restored:', preferred);
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function musicAudioQualityMenu(node) {
+        var el = null;
+        try { el = node && node.nodeType === 1 ? node.closest('ytmusic-setting-single-option-menu-renderer') : null; } catch (e) { return null; }
+        return el && el.data && el.data.itemId === 'MUSIC_WEB_AUDIO_QUALITY' ? el : null;
+    }
+
+    function rememberMusicAudioQuality(menu) {
+        try {
+            var items = menu.data && menu.data.items || [];
+            var item = items[menu.selected] && items[menu.selected].settingMenuItemRenderer;
+            var value = item && MUSIC_AUDIO_QUALITY_VALUES[String(item.value)];
+            if (!value) return;
+            setMusicAudioQuality(value);
+            var cfg = musicYtcfg();
+            if (cfg && cfg.get('AUDIO_QUALITY') !== value) cfg.set('AUDIO_QUALITY', value);
+        } catch (e) { /* ignore */ }
+    }
+
+    function onMusicSettingsClick(event) {
+        var menu = musicAudioQualityMenu(event.target);
+        if (!menu) return;
+        // The listbox updates `selected` after this capture listener; read it
+        // once the click has settled and once more after the endpoint round trip.
+        setTimeout(function () { rememberMusicAudioQuality(menu); }, 0);
+        setTimeout(function () { rememberMusicAudioQuality(menu); }, 600);
+    }
+
+    function musicPlayer() {
+        return document.getElementById('movie_player');
+    }
+
+    function musicAdShowing(player) {
+        try {
+            return !!player && player.classList.contains('ad-showing') &&
+                typeof player.getPresentingPlayerType === 'function' &&
+                player.getPresentingPlayerType() === MUSIC_AD_PLAYER_TYPE;
+        } catch (e) { return false; }
+    }
+
+    function endMusicAd(player, video) {
+        // A paused ad (preroll waiting for the first tap) does not reach its
+        // ended path from a seek; the playing listener retries once it runs.
+        if (!video || video.paused || !musicAdShowing(player)) return false;
+        var duration = Number(video.duration);
+        if (!isFinite(duration) || duration <= 0) return false;
+        // Wait for the ad media to actually progress: ending it during its own
+        // load left the ad player stuck at the end in a pod of two.
+        if (!(video.currentTime > 0.5)) return false;
+        if (video.currentTime >= duration - 0.25) return false;
+        var now = Date.now();
+        if (now - musicState.lastAdEnd < 1000) return false;
+        musicState.lastAdEnd = now;
+        try { video.currentTime = duration; } catch (e) { return false; }
+        musicState.adEnds++;
+        log('YouTube Music ad ended');
+        return true;
+    }
+
+    function musicTextOf(node) {
+        if (!node) return '';
+        if (typeof node === 'string') return node;
+        if (node.simpleText) return String(node.simpleText);
+        if (node.runs && node.runs.length) return node.runs.map(function (run) { return run.text || ''; }).join('');
+        return '';
+    }
+
+    function musicTrackData(player) {
+        var data = {}, details = {}, album = '';
+        try { data = player.getVideoData() || {}; } catch (e) { /* ignore */ }
+        try {
+            var response = typeof player.getPlayerResponse === 'function' ? player.getPlayerResponse() : null;
+            details = response && response.videoDetails || {};
+        } catch (e) { /* ignore */ }
+        try {
+            var next = typeof data.getWatchNextResponse === 'function' ? data.getWatchNextResponse() : null;
+            var overlay = next && next.playerOverlays && next.playerOverlays.playerOverlayRenderer;
+            var mediaSession = overlay && overlay.browserMediaSession && overlay.browserMediaSession.browserMediaSessionRenderer;
+            album = musicTextOf(mediaSession && mediaSession.album);
+        } catch (e) { /* ignore */ }
+        var bar = document.querySelector('ytmusic-player-bar');
+        var barTitle = bar && bar.querySelector('.title');
+        var barByline = bar && bar.querySelector('.byline');
+        if (!album && barByline) {
+            var albumLink = barByline.querySelector('a[href^="browse/"], a[href^="/browse/"]');
+            album = albumLink ? albumLink.textContent.trim() : '';
+        }
+        var artistLink = barByline && barByline.querySelector('a[href^="channel/"], a[href^="/channel/"]');
+        var thumbnails = details.thumbnail && details.thumbnail.thumbnails || [];
+        if (!thumbnails.length && bar) {
+            var image = bar.querySelector('img.image');
+            if (image && image.src) thumbnails = [{ url: image.src, width: 60, height: 60 }];
+        }
+        return {
+            id: data.video_id || details.videoId || '',
+            title: String(data.title || details.title || (barTitle && barTitle.textContent.trim()) || ''),
+            artist: String(data.author || details.author || (artistLink && artistLink.textContent.trim()) || ''),
+            album: String(album || ''),
+            artwork: thumbnails.filter(function (thumb) { return thumb && thumb.url; }).map(function (thumb) {
+                var art = { src: String(thumb.url) };
+                if (thumb.width && thumb.height) art.sizes = thumb.width + 'x' + thumb.height;
+                return art;
+            })
+        };
+    }
+
+    function setupYouTubeMusic() {
+        document.addEventListener('click', onMusicSettingsClick, true);
+        applyMusicAudioQuality();
+        document.addEventListener('yt-navigate-finish', applyMusicAudioQuality, true);
+        // ytcfg is defined by an inline head script; apply again once it exists.
+        if (!musicYtcfg()) {
+            document.addEventListener('DOMContentLoaded', applyMusicAudioQuality, { once: true });
+        }
+
+        observeMusicPlayer();
+    }
+
+    var musicPlayerObserver = null;
+    var musicClassObserver = null;
+
+    function observeMusicPlayer() {
+        if (typeof MutationObserver === 'undefined') { bindMusicPlayer(); return; }
+        musicPlayerObserver = new MutationObserver(function () { bindMusicPlayer(); });
+        var start = function () {
+            try { musicPlayerObserver.observe(document.documentElement || document, { childList: true, subtree: true }); } catch (e) { /* ignore */ }
+            bindMusicPlayer();
+        };
+        if (document.documentElement) start();
+        else document.addEventListener('DOMContentLoaded', start, { once: true });
+    }
+
+    // YTM keeps one persistent <video>; rebind only when the player or its
+    // element is actually replaced so listeners never stack.
+    function bindMusicPlayer() {
+        var player = musicPlayer();
+        var video = player && player.querySelector('video');
+        if (!player || !video) return;
+        if (musicState.player === player && musicState.video === video) return;
+        unbindMusicPlayer();
+        musicState.player = player;
+        musicState.video = video;
+
+        function onAdSignal() { endMusicAd(player, video); }
+        function onTrackSignal() { syncMusicNowPlaying(player, video); }
+        function onTimeUpdate() { endMusicAd(player, video); scheduleMusicPosition(player, video); }
+        function onNavigate() { syncMusicNowPlaying(player, video); }
+
+        video.addEventListener('loadedmetadata', onAdSignal);
+        video.addEventListener('durationchange', onAdSignal);
+        video.addEventListener('playing', onAdSignal);
+        video.addEventListener('timeupdate', onTimeUpdate);
+        video.addEventListener('loadedmetadata', onTrackSignal);
+        video.addEventListener('durationchange', onTrackSignal);
+        video.addEventListener('play', onTrackSignal);
+        video.addEventListener('pause', onTrackSignal);
+        video.addEventListener('ended', onTrackSignal);
+        document.addEventListener('yt-navigate-finish', onNavigate, true);
+
+        if (typeof MutationObserver !== 'undefined') {
+            musicClassObserver = new MutationObserver(function () {
+                endMusicAd(player, video);
+                syncMusicNowPlaying(player, video);
+            });
+            try { musicClassObserver.observe(player, { attributes: true, attributeFilter: ['class'] }); } catch (e) { /* ignore */ }
+        }
+
+        musicState.unbind = function () {
+            video.removeEventListener('loadedmetadata', onAdSignal);
+            video.removeEventListener('durationchange', onAdSignal);
+            video.removeEventListener('playing', onAdSignal);
+            video.removeEventListener('timeupdate', onTimeUpdate);
+            video.removeEventListener('loadedmetadata', onTrackSignal);
+            video.removeEventListener('durationchange', onTrackSignal);
+            video.removeEventListener('play', onTrackSignal);
+            video.removeEventListener('pause', onTrackSignal);
+            video.removeEventListener('ended', onTrackSignal);
+            document.removeEventListener('yt-navigate-finish', onNavigate, true);
+        };
+
+        endMusicAd(player, video);
+        syncMusicNowPlaying(player, video);
+    }
+
+    function unbindMusicPlayer() {
+        if (musicState.unbind) { try { musicState.unbind(); } catch (e) { /* ignore */ } }
+        musicState.unbind = null;
+        if (musicClassObserver) { try { musicClassObserver.disconnect(); } catch (e) { /* ignore */ } }
+        musicClassObserver = null;
+        if (musicPositionTimer !== null) { clearTimeout(musicPositionTimer); musicPositionTimer = null; }
+        musicState.player = null;
+        musicState.video = null;
+        musicState.owns = false;
+        musicState.published = null;
+    }
+
+    var musicPositionTimer = null;
+
+    function scheduleMusicPosition(player, video) {
+        if (!musicState.owns || musicPositionTimer !== null) return;
+        musicPositionTimer = setTimeout(function () {
+            musicPositionTimer = null;
+            publishMusicPosition(player, video);
+        }, 500);
+    }
+
+    function publishMusicPosition(player, video) {
+        var session = navigator.mediaSession;
+        if (!musicState.owns || !session || typeof session.setPositionState !== 'function') return;
+        var duration = Number(video.duration), position = Number(video.currentTime), rate = Number(video.playbackRate) || 1;
+        if (!isFinite(duration) || duration <= 0 || !isFinite(position) || position < 0 || rate <= 0) return;
+        try { session.setPositionState({ duration: duration, playbackRate: rate, position: Math.min(position, duration) }); }
+        catch (e) { /* transient media state */ }
+    }
+
+    // Publish Now Playing only when YTM has not. Its own module sets metadata
+    // on videodatachange; a matching title means it is in charge and nothing
+    // here touches the session. Ad metadata is YTM's as well.
+    function syncMusicNowPlaying(player, video) {
+        var session = navigator.mediaSession;
+        if (!session || typeof MediaMetadata === 'undefined') return;
+        if (musicAdShowing(player)) {
+            // Ad metadata and position belong to the site's own module.
+            musicState.owns = false;
+            return;
+        }
+        var track = musicTrackData(player);
+        if (!track.title) return;
+        var current = session.metadata;
+        var currentTitle = current && current.title || '';
+        var stockOwns = !!current && currentTitle === track.title && current !== musicState.published;
+        if (stockOwns) {
+            musicState.owns = false;
+            musicState.published = null;
+            return;
+        }
+        var stale = !current || currentTitle !== track.title ||
+            (current === musicState.published && musicState.publishedId !== track.id);
+        if (stale) {
+            var init = { title: track.title, artist: track.artist, album: track.album };
+            if (track.artwork.length) init.artwork = track.artwork;
+            var metadata;
+            try { metadata = new MediaMetadata(init); }
+            catch (e) {
+                delete init.artwork;
+                try { metadata = new MediaMetadata(init); } catch (ignored) { return; }
+            }
+            try { session.metadata = metadata; } catch (e) { return; }
+            musicState.published = metadata;
+            musicState.publishedId = track.id;
+            musicState.owns = true;
+            installMusicActionHandlers(player, session);
+            log('YouTube Music Now Playing published:', track.title);
+        }
+        if (!musicState.owns) return;
+        try { session.playbackState = video.ended ? 'none' : (video.paused ? 'paused' : 'playing'); } catch (e) { /* ignore */ }
+        publishMusicPosition(player, video);
+    }
+
+    // Stock meaning only: every handler forwards to the player API, and nothing
+    // resumes playback on its own, so a pause from the lock screen stays paused.
+    function installMusicActionHandlers(player, session) {
+        if (typeof session.setActionHandler !== 'function') return;
+        function call(name, args) {
+            try { if (typeof player[name] === 'function') player[name].apply(player, args || []); } catch (e) { /* ignore */ }
+        }
+        function seekBy(offset) {
+            var amount = Number(offset);
+            if (!isFinite(amount) || amount === 0) amount = 10;
+            try { call('seekTo', [Math.max(0, player.getCurrentTime() + amount)]); } catch (e) { /* ignore */ }
+        }
+        var handlers = {
+            play: function () { call('playVideo'); },
+            pause: function () { call('pauseVideo'); },
+            seekbackward: function (details) { seekBy(-(details && details.seekOffset || 10)); },
+            seekforward: function (details) { seekBy(details && details.seekOffset || 10); },
+            seekto: function (details) { if (details && isFinite(details.seekTime)) call('seekTo', [details.seekTime]); },
+            nexttrack: function () { call('nextVideo'); },
+            previoustrack: function () { call('previousVideo'); }
+        };
+        for (var action in handlers) {
+            try { session.setActionHandler(action, handlers[action]); } catch (e) { /* unsupported action */ }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -4804,7 +5151,10 @@
 
     function boot() {
         enableBackgroundPlayback();
-        if (IS_YOUTUBE_MUSIC) return;
+        if (IS_YOUTUBE_MUSIC) {
+            setupYouTubeMusic();
+            return;
+        }
         observeDocumentForPlayer();
         injectStyles();
         lastUrl = location.href;
@@ -4843,6 +5193,11 @@
                 return true;
             },
             setToolbarHidden: setToolbarHidden,
+            music: {
+                getAudioQuality: getMusicAudioQuality,
+                applyAudioQuality: applyMusicAudioQuality,
+                state: function () { return musicState; }
+            },
             previewSponsorNotice: function () {
                 var p = findPlayer();
                 if (!p || !activeVideo) return 'no player';

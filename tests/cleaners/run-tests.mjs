@@ -3643,6 +3643,228 @@ for (const config of [
   await browser.close();
 }
 
+// ---- Scenario: YouTube Music owns only the missing capabilities ---------
+// The fixture mirrors the live player API observed on music.youtube.com: one
+// persistent <video>, getPresentingPlayerType() 2 plus the ad-showing class
+// during an ad break, ytcfg AUDIO_QUALITY as the audio rendition selector,
+// and the Playback settings menu's MUSIC_WEB_AUDIO_QUALITY listbox.
+{
+  const musicFixture = `<!doctype html><html><head><meta name="viewport" content="width=device-width">
+    <script>
+      window.__cfg = { AUDIO_QUALITY: 'AUDIO_QUALITY_MEDIUM' };
+      window.ytcfg = { get: k => window.__cfg[k], set: function (k, v) { if (typeof k === 'object') Object.assign(window.__cfg, k); else window.__cfg[k] = v; } };
+    <\/script>
+    <style>
+      body { margin: 0; background: #030303; color: white; }
+      #movie_player { position: relative; width: 390px; height: 219px; }
+      video { width: 100%; height: 100%; }
+      ytmusic-player-bar { display: block; padding: 8px; }
+    </style></head><body>
+    <div id="movie_player" class="html5-video-player ytp-hide-controls ad-created ad-showing ad-interrupting playing-mode">
+      <div class="html5-video-container"><video playsinline></video></div>
+    </div>
+    <ytmusic-player-bar slot="player-bar" role="toolbar">
+      <div class="thumbnail-image-wrapper"><img class="image style-scope ytmusic-player-bar" src="https://yt3.googleusercontent.com/art=w60-h60-l90-rj"></div>
+      <yt-formatted-string class="title style-scope ytmusic-player-bar">Break My Stride</yt-formatted-string>
+      <yt-formatted-string class="byline style-scope ytmusic-player-bar complex-string"><a href="channel/UC1">Matthew Wilder</a> • <a href="browse/MPREb_1">I Don't Speak The Language</a> • <span>1983</span></yt-formatted-string>
+    </ytmusic-player-bar>
+    <div id="settings">
+      <ytmusic-setting-single-option-menu-renderer id="aq">
+        <tp-yt-paper-listbox>
+          <tp-yt-paper-item id="aq-normal">Normal</tp-yt-paper-item>
+          <tp-yt-paper-item id="aq-low">Low</tp-yt-paper-item>
+        </tp-yt-paper-listbox>
+      </ytmusic-setting-single-option-menu-renderer>
+    </div>
+    <script>
+      const player = document.getElementById('movie_player');
+      const video = player.querySelector('video');
+      const state = window.__ytm = { presenting: 2, calls: [], track: { video_id: 'UhLDA4Wr2GU', title: 'Break My Stride', author: 'Matthew Wilder' }, album: "I Don't Speak The Language" };
+      // Ad media: the same element carries the ad clip while the ad player presents.
+      let duration = 30.061, currentTime = 1.2, paused = false, ended = false;
+      Object.defineProperty(video, 'duration', { configurable: true, get: () => duration });
+      Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+      Object.defineProperty(video, 'ended', { configurable: true, get: () => ended });
+      Object.defineProperty(video, 'currentTime', { configurable: true, get: () => currentTime, set: v => {
+        state.calls.push(['seek', v, state.presenting]);
+        if (state.presenting === 2 && v >= duration) {
+          // The ad player finishes its media and hands back to content at 0.
+          state.presenting = 1; duration = 184; currentTime = 0;
+          player.classList.remove('ad-showing', 'ad-interrupting');
+          video.dispatchEvent(new Event('durationchange'));
+          video.dispatchEvent(new Event('playing'));
+        } else { currentTime = v; }
+      }});
+      video.play = () => { paused = false; video.dispatchEvent(new Event('play')); return Promise.resolve(); };
+      video.pause = () => { paused = true; video.dispatchEvent(new Event('pause')); };
+      player.getPresentingPlayerType = () => state.presenting;
+      player.getVideoData = () => state.track;
+      player.getPlayerResponse = () => ({ videoDetails: { videoId: state.track.video_id, title: state.track.title, author: state.track.author,
+        thumbnail: { thumbnails: [{ url: 'https://yt3.googleusercontent.com/art=w60-h60-l90-rj', width: 60, height: 60 }, { url: 'https://yt3.googleusercontent.com/art=w544-h544-l90-rj', width: 544, height: 544 }] } } });
+      player.getCurrentTime = () => currentTime;
+      player.playVideo = () => { state.calls.push(['playVideo']); video.play(); };
+      player.pauseVideo = () => { state.calls.push(['pauseVideo']); video.pause(); };
+      player.seekTo = t => { state.calls.push(['seekTo', t]); currentTime = t; };
+      player.nextVideo = () => { state.calls.push(['nextVideo']); };
+      player.previousVideo = () => { state.calls.push(['previousVideo']); };
+      player.getOption = () => []; player.isSubtitlesOn = () => false; player.setOption = () => {}; player.loadModule = () => {};
+      window.__ytmTick = () => { if (!paused && state.presenting === 1) currentTime += 1; video.dispatchEvent(new Event('timeupdate')); };
+      window.__ytmNextTrack = () => {
+        state.track = { video_id: 'lYBUbBu4W08', title: 'Second Song', author: 'Second Artist' };
+        state.album = 'Second Album';
+        document.querySelector('ytmusic-player-bar .title').textContent = 'Second Song';
+        currentTime = 0; duration = 201;
+        video.dispatchEvent(new Event('durationchange'));
+        video.dispatchEvent(new Event('loadedmetadata'));
+        document.dispatchEvent(new CustomEvent('yt-navigate-finish'));
+      };
+      const menu = document.getElementById('aq');
+      menu.data = { itemId: 'MUSIC_WEB_AUDIO_QUALITY', items: [
+        { settingMenuItemRenderer: { name: 'Normal', value: '2', updateServiceEndpoint: { setSettingEndpoint: { settingItemId: '304', intValue: '2', settingItemIdForClient: 'MUSIC_WEB_AUDIO_QUALITY' } } } },
+        { settingMenuItemRenderer: { name: 'Low', value: '1', updateServiceEndpoint: { setSettingEndpoint: { settingItemId: '304', intValue: '1', settingItemIdForClient: 'MUSIC_WEB_AUDIO_QUALITY' } } } }
+      ] };
+      menu.selected = 0;
+      // Polymer updates selected from the listbox after the click bubbles.
+      menu.addEventListener('click', e => { const item = e.target.closest('tp-yt-paper-item'); if (item) menu.selected = item.id === 'aq-low' ? 1 : 0; });
+    <\/script></body></html>`;
+  const musicPrelude = `
+    HTMLElement.prototype.getOption = function () { return []; };
+    HTMLElement.prototype.isSubtitlesOn = function () { return false; };
+    HTMLElement.prototype.setOption = function () {};
+    HTMLElement.prototype.loadModule = function () {};
+    try { localStorage.setItem('wblock.tubeCleaner.musicAudioQuality', 'AUDIO_QUALITY_LOW'); } catch (e) {}
+  `;
+  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (YouTube Music ads, audio quality, Now Playing)', {
+    gotoURL: 'https://music.youtube.com/watch?v=UhLDA4Wr2GU',
+    responseBody: musicFixture,
+    readySignal: 'ytmusic-player-bar',
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    scriptSource: visibilityPrelude + '\n' + mediaSessionPrelude + '\n' + musicPrelude + '\n' + userscript,
+  });
+  const S = 'tube-cleaner-youtube-music-capabilities';
+
+  await check(page, S, 'ends the presenting ad through its own media without touching content time', () => {
+    const seeks = window.__ytm.calls.filter(c => c[0] === 'seek');
+    const contentSeeks = seeks.filter(c => c[2] !== 2);
+    return {
+      pass: window.__ytm.presenting === 1 && seeks.length === 1 && seeks[0][1] >= 30 && contentSeeks.length === 0 &&
+        !document.getElementById('movie_player').classList.contains('ad-showing') &&
+        document.querySelector('#movie_player video').currentTime === 0,
+      detail: `presenting=${window.__ytm.presenting} seeks=${JSON.stringify(seeks)} ct=${document.querySelector('#movie_player video').currentTime}`,
+    };
+  });
+
+  await page.evaluate(() => { for (let i = 0; i < 5; i++) window.__ytmTick(); });
+  await check(page, S, 'never seeks content playback after the ad', () => {
+    const seeks = window.__ytm.calls.filter(c => c[0] === 'seek');
+    return { pass: seeks.length === 1 && document.querySelector('#movie_player video').currentTime === 5,
+      detail: `seeks=${seeks.length} ct=${document.querySelector('#movie_player video').currentTime}` };
+  });
+
+  await check(page, S, 'restores the stored audio quality into ytcfg before playback', () => ({
+    pass: window.ytcfg.get('AUDIO_QUALITY') === 'AUDIO_QUALITY_LOW',
+    detail: `AUDIO_QUALITY=${window.ytcfg.get('AUDIO_QUALITY')}`,
+  }));
+
+  await page.click('#aq-normal');
+  await check(page, S, 'remembers a stock Audio quality pick and applies it client-side', () => ({
+    pass: window.ytcfg.get('AUDIO_QUALITY') === 'AUDIO_QUALITY_MEDIUM' &&
+      localStorage.getItem('wblock.tubeCleaner.musicAudioQuality') === 'AUDIO_QUALITY_MEDIUM',
+    detail: `cfg=${window.ytcfg.get('AUDIO_QUALITY')} stored=${localStorage.getItem('wblock.tubeCleaner.musicAudioQuality')}`,
+  }));
+  await page.click('#aq-low');
+  await check(page, S, 'follows a second pick back to Low', () => ({
+    pass: window.ytcfg.get('AUDIO_QUALITY') === 'AUDIO_QUALITY_LOW' &&
+      localStorage.getItem('wblock.tubeCleaner.musicAudioQuality') === 'AUDIO_QUALITY_LOW',
+    detail: `cfg=${window.ytcfg.get('AUDIO_QUALITY')}`,
+  }));
+
+  await check(page, S, 'publishes Now Playing from player data when the site has not', () => {
+    const m = navigator.mediaSession.metadata;
+    const art = m && m.artwork || [];
+    return {
+      pass: !!m && m.title === 'Break My Stride' && m.artist === 'Matthew Wilder' && m.album === "I Don't Speak The Language" &&
+        art.length === 2 && /w544-h544/.test(art[1].src) && navigator.mediaSession.playbackState === 'playing' &&
+        window.__wblockMediaSessionState.positions.length > 0,
+      detail: `title=${m && m.title} album=${m && m.album} art=${art.length} state=${navigator.mediaSession.playbackState} positions=${window.__wblockMediaSessionState.positions.length}`,
+    };
+  });
+
+  await check(page, S, 'keeps stock lock-screen semantics through the player API', () => {
+    const h = window.__wblockMediaSessionState.handlers;
+    const before = window.__ytm.calls.length;
+    h.pause(); h.nexttrack(); h.previoustrack(); h.play();
+    const names = window.__ytm.calls.slice(before).map(c => c[0]);
+    return { pass: JSON.stringify(names) === JSON.stringify(['pauseVideo', 'nextVideo', 'previousVideo', 'playVideo']), detail: names.join(',') };
+  });
+
+  await page.evaluate(() => { window.__wblockMediaSessionState.handlers.pause(); });
+  await page.evaluate(() => new Promise(r => setTimeout(r, 400)));
+  await check(page, S, 'leaves an intentional pause paused', () => ({
+    pass: document.querySelector('#movie_player video').paused === true && navigator.mediaSession.playbackState === 'paused' &&
+      window.__ytm.calls.filter(c => c[0] === 'playVideo').length === 1,
+    detail: `paused=${document.querySelector('#movie_player video').paused} state=${navigator.mediaSession.playbackState}`,
+  }));
+  await page.evaluate(() => { window.__wblockMediaSessionState.handlers.play(); });
+
+  await page.evaluate(() => window.__ytmNextTrack());
+  await check(page, S, 'updates Now Playing on a track change in the same video element', () => {
+    const m = navigator.mediaSession.metadata;
+    return { pass: !!m && m.title === 'Second Song' && m.artist === 'Second Artist', detail: `title=${m && m.title} artist=${m && m.artist}` };
+  });
+
+  await page.evaluate(() => {
+    // The site publishes its own metadata for the current track: Tube Cleaner must stand down.
+    navigator.mediaSession.metadata = new MediaMetadata({ title: 'Second Song', artist: 'Site Artist', album: 'Site Album' });
+    window.__wblockMediaSessionState.positions.length = 0;
+    for (let i = 0; i < 3; i++) window.__ytmTick();
+    document.dispatchEvent(new CustomEvent('yt-navigate-finish'));
+  });
+  await page.evaluate(() => new Promise(r => setTimeout(r, 700)));
+  await check(page, S, 'defers to metadata the site publishes itself', () => {
+    const m = navigator.mediaSession.metadata;
+    return { pass: !!m && m.artist === 'Site Artist' && window.__wblockMediaSessionState.positions.length === 0,
+      detail: `artist=${m && m.artist} positions=${window.__wblockMediaSessionState.positions.length}` };
+  });
+
+  await page.evaluate(() => {
+    // Player replacement: YTM tears down #movie_player and inserts a new one with a fresh <video>.
+    const old = document.getElementById('movie_player');
+    const fresh = old.cloneNode(false);
+    fresh.className = 'html5-video-player ytp-hide-controls playing-mode';
+    fresh.innerHTML = '<div class="html5-video-container"><video playsinline></video></div>';
+    const v = fresh.querySelector('video');
+    Object.defineProperty(v, 'duration', { configurable: true, get: () => 150 });
+    Object.defineProperty(v, 'paused', { configurable: true, get: () => false });
+    Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 3, set: () => {} });
+    fresh.getPresentingPlayerType = () => 1;
+    fresh.getVideoData = () => ({ video_id: 'QAo_Ycocl1E', title: 'Replaced Player Song', author: 'Third Artist' });
+    fresh.getPlayerResponse = () => ({ videoDetails: { thumbnail: { thumbnails: [] } } });
+    fresh.getCurrentTime = () => 3;
+    fresh.playVideo = () => { window.__ytm.calls.push(['fresh.playVideo']); };
+    fresh.pauseVideo = () => {};
+    fresh.getOption = () => []; fresh.isSubtitlesOn = () => false; fresh.setOption = () => {}; fresh.loadModule = () => {};
+    navigator.mediaSession.metadata = null;
+    old.replaceWith(fresh);
+    v.dispatchEvent(new Event('loadedmetadata'));
+  });
+  await check(page, S, 'rebinds to a replaced player and republishes missing metadata', () => {
+    const m = navigator.mediaSession.metadata;
+    const art = m && m.artwork || [];
+    window.__wblockMediaSessionState.handlers.play();
+    return { pass: !!m && m.title === 'Replaced Player Song' && art.length === 1 && /art=w60/.test(art[0].src) &&
+      window.__ytm.calls.some(c => c[0] === 'fresh.playVideo') &&
+      !document.querySelector('.wblock-tc-native, .wblock-tc-toolbar') && !document.querySelector('#movie_player video').controls,
+      detail: `title=${m && m.title} art=${art.length} fresh=${window.__ytm.calls.some(c => c[0] === 'fresh.playVideo')}` };
+  });
+
+  await page.screenshot({ path: join(__dirname, 'artifacts', 'tube-cleaner-youtube-music-capabilities.png'), fullPage: true });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+
 // ---- Scenario 12: production injector starts before <html> exists -------
 // Playwright init scripts run at Safari's true document_start: readyState is
 // "loading" and document.documentElement is null. The production injector must

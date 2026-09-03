@@ -104,7 +104,14 @@ Player Cleaner scenarios:
   also verifies its quality path keeps YouTube's settings shell hidden, selects
   the requested option once, and closes it without an extra toggle. The YouTube
   Music scenario keeps YTM's responsive player and Media Session untouched while
-  retaining Tube Cleaner's background-playback guard.
+  retaining Tube Cleaner's background-playback guard. A second YouTube Music
+  scenario mirrors the live player API (`getPresentingPlayerType()` 2 with the
+  `ad-showing` class during an ad, `ytcfg` `AUDIO_QUALITY`, the
+  `MUSIC_WEB_AUDIO_QUALITY` settings listbox) and checks that an ad ends through
+  its own media with content never sought, a stored audio quality is restored
+  and a stock menu pick remembered, Now Playing is published only when the site
+  has not with album and artwork, lock-screen handlers keep stock meaning, an
+  intentional pause stays paused, and a replaced player is rebound.
 
 ```sh
 node tests/cleaners/run-tests.mjs            # exit code 1 if any check fails
