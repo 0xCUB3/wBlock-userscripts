@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.24
+// @version      0.1.25
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -3368,6 +3368,14 @@
         }).then(captionTracksFromResponse).catch(function () { return []; });
     }
 
+    // YouTube's auto-generated tracks tag every cue with "align:start
+    // position:0%", which its own renderer ignores but Safari honours, so the
+    // text hugs the bottom-left corner. Drop the cue settings so the native
+    // renderer centres each cue like the manual tracks.
+    function normalizeCaptionVtt(text) {
+        return text.replace(/^(\d{1,2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{1,2}:\d{2}:\d{2}\.\d{3})[ \t][^\r\n]*/gm, '$1');
+    }
+
     function downloadNativeSubtitleTracks(tracks, signal) {
         return Promise.all(tracks.map(function (track) {
             var url = captionUrl(track);
@@ -3378,7 +3386,7 @@
             }).then(function (text) {
                 text = String(text || '').replace(/^\uFEFF/, '');
                 if (text.slice(0, 6) !== 'WEBVTT' || text.indexOf('-->') === -1 || text.length > 5000000) return null;
-                return { definition: track, vtt: text };
+                return { definition: track, vtt: normalizeCaptionVtt(text) };
             }).catch(function () { return null; });
         })).then(function (results) {
             return results.filter(function (result) { return !!result; });
