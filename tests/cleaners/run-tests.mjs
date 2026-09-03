@@ -1839,6 +1839,26 @@ async function qualityUISelectionCheck(page, scenario) {
   await iosAutoHideCheck(page, 'iPhone');
   await iosPinchFullscreenCheck(page, 'iPhone');
   await controlsSurvivalCheck(page, 'iPhone', { preserveIOSMMSRestrictions: true });
+  await page.evaluate(() => {
+    const player = document.getElementById('movie_player');
+    const video = player.querySelector('video');
+    player.getVideoData = () => ({ video_id: 'TESTVID123', title: 'iPhone Now Playing', author: 'Test Channel' });
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => false });
+    Object.defineProperty(video, 'ended', { configurable: true, get: () => false });
+    Object.defineProperty(video, 'webkitPresentationMode', { configurable: true, writable: true, value: 'inline' });
+    video.webkitSupportsPresentationMode = mode => mode === 'picture-in-picture';
+    video.webkitSetPresentationMode = function (mode) { this.webkitPresentationMode = mode; };
+    video.dispatchEvent(new Event('play'));
+    window.dispatchEvent(new Event('blur'));
+  });
+  await check(page, 'iPhone', 'enters PiP before iPhone can suspend a backgrounded video', () => {
+    const video = document.querySelector('#movie_player video');
+    return { pass: video.webkitPresentationMode === 'picture-in-picture', detail: `pip=${video.webkitPresentationMode}` };
+  });
+  await check(page, 'iPhone', 'supplies the video title used by Safari native media UI', () => {
+    const video = document.querySelector('#movie_player video');
+    return { pass: video.getAttribute('title') === 'iPhone Now Playing', detail: `title=${video.getAttribute('title')}` };
+  });
   record('iPhone', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
@@ -3751,6 +3771,7 @@ for (const config of [
     try { localStorage.setItem('wblock.tubeCleaner.musicAudioQuality', 'AUDIO_QUALITY_LOW'); } catch (e) {}
   `;
   const { browser, page, pageErrors } = await runScenario('Tube Cleaner (YouTube Music ads, audio quality, Now Playing)', {
+    device: devices['iPhone 13'],
     gotoURL: 'https://music.youtube.com/watch?v=UhLDA4Wr2GU',
     responseBody: musicFixture,
     readySignal: 'ytmusic-player-bar',
@@ -3779,6 +3800,8 @@ for (const config of [
   });
 
   await page.evaluate(() => {
+    window.dispatchEvent(new Event('blur'));
+    window.__ytmPiPOnBlur = document.querySelector('#movie_player video').webkitPresentationMode;
     window.__wblockNativeHidden = true; window.__wblockNativeVisibility = 'hidden';
     document.dispatchEvent(new Event('visibilitychange'));
     window.__wblockNativeHidden = false; window.__wblockNativeVisibility = 'visible';
@@ -3786,8 +3809,8 @@ for (const config of [
   });
   await check(page, S, 'uses WebKit PiP to keep video-mode playback alive in the background', () => {
     const modes = window.__ytm.calls.filter(c => c[0] === 'presentation').map(c => c[1]);
-    return { pass: JSON.stringify(modes) === JSON.stringify(['picture-in-picture', 'inline']) &&
-      document.visibilityState === 'visible' && !document.querySelector('.wblock-tc-native, .wblock-tc-toolbar'),
+    return { pass: window.__ytmPiPOnBlur === 'picture-in-picture' &&
+      JSON.stringify(modes) === JSON.stringify(['picture-in-picture', 'inline']) && document.visibilityState === 'visible' && !document.querySelector('.wblock-tc-native, .wblock-tc-toolbar'),
       detail: `modes=${modes.join(',')} visibility=${document.visibilityState}` };
   });
 
@@ -3832,6 +3855,7 @@ for (const config of [
     const art = m && m.artwork || [];
     return {
       pass: !!m && m.title === 'Break My Stride' && m.artist === 'Matthew Wilder' && m.album === "I Don't Speak The Language" &&
+        document.querySelector('#movie_player video').getAttribute('title') === 'Break My Stride' &&
         art.length === 2 && /w544-h544/.test(art[1].src) && navigator.mediaSession.playbackState === 'playing' &&
         window.__wblockMediaSessionState.positions.length > 0,
       detail: `title=${m && m.title} album=${m && m.album} art=${art.length} state=${navigator.mediaSession.playbackState} positions=${window.__wblockMediaSessionState.positions.length}`,
@@ -3862,7 +3886,8 @@ for (const config of [
   await page.evaluate(() => window.__ytmNextTrack());
   await check(page, S, 'updates Now Playing on a track change in the same video element', () => {
     const m = navigator.mediaSession.metadata;
-    return { pass: !!m && m.title === 'Second Song' && m.artist === 'Second Artist', detail: `title=${m && m.title} artist=${m && m.artist}` };
+    const title = document.querySelector('#movie_player video').getAttribute('title');
+    return { pass: !!m && m.title === 'Second Song' && m.artist === 'Second Artist' && title === 'Second Song', detail: `title=${m && m.title} artist=${m && m.artist} videoTitle=${title}` };
   });
 
   await page.evaluate(() => {

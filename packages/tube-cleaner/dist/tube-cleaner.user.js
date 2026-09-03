@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.25
+// @version      0.1.26
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -91,6 +91,7 @@
     // documentElement here: production injection can run before <html> exists.
     var IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
     var IS_YOUTUBE_MUSIC = location.hostname === 'music.youtube.com';
     // ------------------------------------------------------------------
     // Auto PiP
@@ -203,9 +204,15 @@
                 exitPiP(video);
             }
         }
+        function onBlur() {
+            // iPhone can suspend a video before its hidden event is delivered.
+            // Enter while the page still owns an active playback gesture.
+            if (IS_IPHONE && !video.paused && !video.ended) enterPiP(video);
+        }
 
         var removeVisibilityObserver = observeRealVisibility(onVisibilityChange);
         window.addEventListener('focus', onFocus);
+        window.addEventListener('blur', onBlur);
 
         // Scroll out of view: use IntersectionObserver.
         // On mobile YouTube the watch player is normally position:fixed (sticky).
@@ -245,6 +252,7 @@
         registerCleanup(function () {
             removeVisibilityObserver();
             window.removeEventListener('focus', onFocus);
+            window.removeEventListener('blur', onBlur);
             try { if (scrollObserver) scrollObserver.disconnect(); } catch (e) { /* ignore */ }
             video.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
             video.removeEventListener('leavepictureinpicture', onLeavePictureInPicture);
@@ -873,6 +881,8 @@
         musicState.player = player;
         musicState.video = video;
 
+        var hadVideoTitle = video.hasAttribute('title');
+        var originalVideoTitle = video.getAttribute('title');
         var seekGesture = false, seekWasPlaying = false, seekResumeTimer = null;
         function isSeekControl(target) {
             try { return !!(target && target.closest && target.closest('tp-yt-paper-slider#progress-bar')); }
@@ -913,6 +923,9 @@
         function onFocus() {
             if (!_realHidden && isPiPActive(video)) exitPiP(video);
         }
+        function onBlur() {
+            if (IS_IPHONE && !video.paused && !video.ended) enterPiP(video);
+        }
 
         video.addEventListener('loadedmetadata', onAdSignal);
         video.addEventListener('durationchange', onAdSignal);
@@ -932,6 +945,7 @@
         document.addEventListener('touchcancel', onSeekCancel, true);
         var removeVisibilityObserver = observeRealVisibility(onVisibility);
         window.addEventListener('focus', onFocus);
+        window.addEventListener('blur', onBlur);
 
         if (typeof MutationObserver !== 'undefined') {
             musicClassObserver = new MutationObserver(function () {
@@ -960,6 +974,9 @@
             document.removeEventListener('touchcancel', onSeekCancel, true);
             removeVisibilityObserver();
             window.removeEventListener('focus', onFocus);
+            window.removeEventListener('blur', onBlur);
+            if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
+            else video.removeAttribute('title');
             if (seekResumeTimer !== null) clearTimeout(seekResumeTimer);
         };
 
@@ -1011,6 +1028,7 @@
         }
         var track = musicTrackData(player);
         if (!track.title) return;
+        if (IS_IOS) video.setAttribute('title', track.title);
         // Keep lock-screen seeking deterministic even when YTM owns metadata.
         // These handlers preserve the site's meaning and only call its player API.
         installMusicActionHandlers(player, session);
@@ -1529,6 +1547,8 @@
         var session = navigator.mediaSession;
         var positionTimer = null;
         var metadataTimer = null;
+        var hadVideoTitle = video.hasAttribute('title');
+        var originalVideoTitle = video.getAttribute('title');
 
         function meta(name) {
             var element = document.querySelector('meta[property="' + name + '"],meta[name="' + name + '"]');
@@ -1575,6 +1595,7 @@
         function refreshMetadata() {
             if (mediaSessionOwner !== video) return;
             var data = metadataData();
+            if (IS_IOS && data.title) video.setAttribute('title', data.title);
             var metadata;
             try { metadata = new MediaMetadata(data); }
             catch (e) {
@@ -1698,6 +1719,8 @@
             try { session.playbackState = 'none'; } catch (e) { /* ignore */ }
             video._wblockMediaMetadata = null;
             video._wblockMediaActions = null;
+            if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
+            else video.removeAttribute('title');
         });
     }
 

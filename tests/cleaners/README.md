@@ -100,8 +100,10 @@ Player Cleaner scenarios:
   IntersectionObservers. Every active count must remain flat.
 - Visibility scenarios shadow the page-facing document state while simulating a
   native hidden tab, proving both cleaners still enter PiP from the captured
-  browser getter but not merely from window focus loss. The Tube Cleaner fixture
-  also verifies its quality path keeps YouTube's settings shell hidden, selects
+  browser getter while desktop window focus alone does nothing. The iPhone Tube
+  Cleaner scenario enters PiP on blur before WebKit can suspend playback and
+  supplies the video title Safari uses in native media UI. The fixture also
+  verifies its quality path keeps YouTube's settings shell hidden, selects
   the requested option once, and closes it without an extra toggle. The YouTube
   Music scenario keeps YTM's responsive player and Media Session untouched while
   retaining Tube Cleaner's background-playback guard. A second YouTube Music
