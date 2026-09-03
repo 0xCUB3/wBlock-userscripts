@@ -37,7 +37,7 @@
   <!-- THEOplayer reuses the video.js class on a shell that owns its DRM and
        ad pipeline; emptying it stops playback (wBlock #635). -->
   <div id="theoplayer" class="theoplayer-container theoplayer-skin vjs-paused">
-    <video data-test-theoplayer="1" src="https://example.com/media/theo/master.m3u8"></video>
+    <video data-test-theoplayer="1" src="https://example.com/media/theo/master.m3u8" style="pointer-events: none;"></video>
     <div class="theo-ad-container"></div>
     <div class="theoplayer-controls"></div>
   </div>
@@ -54,6 +54,9 @@
       function fightControls() {
         try { v.controls = false; } catch (e) {}
         try { v.removeAttribute('controls'); } catch (e) {}
+        // THEOplayer keeps the media element out of hit testing so its own
+        // overlay owns every click; Player Cleaner must win that back.
+        try { document.querySelector('#theoplayer video').style.pointerEvents = 'none'; } catch (e) {}
       }
       setTimeout(fightControls, 800);
       setTimeout(fightControls, 2500);

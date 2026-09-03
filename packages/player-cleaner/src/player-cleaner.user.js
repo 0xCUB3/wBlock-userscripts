@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.31
+// @version      0.1.32
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1073,6 +1073,20 @@
             if (video.hasAttribute('disabled')) { video.removeAttribute('disabled'); }
             if (video.disabled) { video.disabled = false; }
         } catch (e) { /* ignore */ }
+        restoreVideoHitTesting(video);
+    }
+
+    // THEOplayer (Olympics, FIFA) pins pointer-events:none on the media element
+    // so its own overlay owns every hit. With native controls forced on, that
+    // rule leaves Safari painting a control bar nothing can click; hits land
+    // on the .vjs-tech wrapper instead. Re-enable hit testing on the video
+    // itself with an inline !important so a site stylesheet cannot win back.
+    function restoreVideoHitTesting(video) {
+        if (!video || !video.style) { return; }
+        try {
+            if (getComputedStyle(video).pointerEvents !== 'none') { return; }
+            video.style.setProperty('pointer-events', 'auto', 'important');
+        } catch (e) { /* ignore */ }
     }
 
     function isFacebookPage() {
@@ -1210,12 +1224,13 @@
                 video.setAttribute('controls', '');
             }
             applyRemotePlaybackPolicy(video);
+            restoreVideoHitTesting(video);
         }
 
         var observer = null;
         try {
             observer = new MutationObserver(restore);
-            observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay'] });
+            observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
         } catch (e) { /* ignore */ }
 
         restore();

@@ -2114,9 +2114,10 @@ async function qualityUISelectionCheck(page, scenario) {
     const v = document.querySelector('#theoplayer video');
     const ads = document.querySelector('#theoplayer .theo-ad-container');
     const chrome = document.querySelector('#theoplayer .theoplayer-controls');
+    const pe = v && getComputedStyle(v).pointerEvents;
     return { pass: !!(v && v.controls && v.hasAttribute('data-wblock-player-cleaner') && ads && chrome
-      && chrome.style.display === 'none' && window.__wblockTheoLifecycleIntact === true),
-      detail: `video=${!!v} controls=${v && v.controls} ads=${!!ads} chrome=${chrome && chrome.style.display} lifecycle=${window.__wblockTheoLifecycleIntact}` };
+      && chrome.style.display === 'none' && window.__wblockTheoLifecycleIntact === true && pe === 'auto'),
+      detail: `video=${!!v} controls=${v && v.controls} ads=${!!ads} chrome=${chrome && chrome.style.display} lifecycle=${window.__wblockTheoLifecycleIntact} pointerEvents=${pe}` };
   });
 
   record('player-cleaner', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
