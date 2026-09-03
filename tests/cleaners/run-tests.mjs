@@ -2120,6 +2120,20 @@ async function qualityUISelectionCheck(page, scenario) {
       detail: `video=${!!v} controls=${v && v.controls} ads=${!!ads} chrome=${chrome && chrome.style.display} lifecycle=${window.__wblockTheoLifecycleIntact} pointerEvents=${pe}` };
   });
 
+  // THEOplayer pauses from mousedown on its shell; a native-control tap on
+  // the video still emits that, so the guard has to stop the mouse pair too.
+  await check(page, 'player-cleaner', 'keeps mousedown/mouseup from reaching the THEOplayer shell', () => {
+    const shell = document.querySelector('#theoplayer');
+    const v = shell && shell.querySelector('video');
+    if (!shell || !v) return { pass: false, detail: 'missing shell or video' };
+    const leaked = [];
+    const record = (e) => leaked.push(e.type);
+    ['mousedown', 'mouseup', 'click'].forEach((t) => shell.addEventListener(t, record));
+    ['mousedown', 'mouseup', 'click'].forEach((t) => v.dispatchEvent(new MouseEvent(t, { bubbles: true, composed: true })));
+    ['mousedown', 'mouseup', 'click'].forEach((t) => shell.removeEventListener(t, record));
+    return { pass: leaked.length === 0, detail: leaked.length ? `leaked=${leaked.join(',')}` : 'leaked=0' };
+  });
+
   record('player-cleaner', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }

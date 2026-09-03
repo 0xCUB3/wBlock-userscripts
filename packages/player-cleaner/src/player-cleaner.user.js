@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.32
+// @version      0.1.33
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1184,11 +1184,13 @@
     // Stopping propagation in bubble phase lets native play/pause/skip run first
     // while keeping outer shells (video.js, Vimeo, Reddit) from seeing the same
     // tap and toggling playback again. iOS Reddit listens for touch/pointer on
-    // shreddit-player, so click-only was not enough.
+    // shreddit-player, so click-only was not enough. THEOplayer (Olympics,
+    // FIFA) toggles playback from mousedown on its shell, which a native
+    // control tap still emits, so the mouse pair has to stop here too.
     function blockCompetingClicks(video) {
         if (!video || video._wblockClickGuard) return;
         function stopBubble(e) { e.stopPropagation(); }
-        var types = ['click', 'pointerdown', 'pointerup', 'touchstart', 'touchend'];
+        var types = ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'];
         try {
             for (var i = 0; i < types.length; i++) {
                 video.addEventListener(types[i], stopBubble);
