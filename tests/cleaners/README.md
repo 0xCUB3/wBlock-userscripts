@@ -110,8 +110,10 @@ Player Cleaner scenarios:
   `MUSIC_WEB_AUDIO_QUALITY` settings listbox) and checks that an ad ends through
   its own media with content never sought, a stored audio quality is restored
   and a stock menu pick remembered, Now Playing is published only when the site
-  has not with album and artwork, lock-screen handlers keep stock meaning, an
-  intentional pause stays paused, and a replaced player is rebound.
+  has not with album and artwork, video mode enters WebKit PiP on a real hidden
+  transition, lock-screen handlers keep stock meaning after site-owned metadata,
+  a playing song resumes after YTM pauses it for a slider drag while an already
+  paused song stays paused, and a replaced player is rebound.
 
 ```sh
 node tests/cleaners/run-tests.mjs            # exit code 1 if any check fails

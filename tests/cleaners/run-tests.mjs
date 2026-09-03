@@ -3668,6 +3668,7 @@ for (const config of [
       <yt-formatted-string class="title style-scope ytmusic-player-bar">Break My Stride</yt-formatted-string>
       <yt-formatted-string class="byline style-scope ytmusic-player-bar complex-string"><a href="channel/UC1">Matthew Wilder</a> • <a href="browse/MPREb_1">I Don't Speak The Language</a> • <span>1983</span></yt-formatted-string>
     </ytmusic-player-bar>
+    <tp-yt-paper-slider id="progress-bar" role="progressbar" aria-label="Seek slider"></tp-yt-paper-slider>
     <div id="settings">
       <ytmusic-setting-single-option-menu-renderer id="aq">
         <tp-yt-paper-listbox>
@@ -3695,6 +3696,10 @@ for (const config of [
           video.dispatchEvent(new Event('playing'));
         } else { currentTime = v; }
       }});
+      let presentationMode = 'inline';
+      Object.defineProperty(video, 'webkitPresentationMode', { configurable: true, get: () => presentationMode });
+      video.webkitSupportsPresentationMode = mode => mode === 'picture-in-picture';
+      video.webkitSetPresentationMode = mode => { presentationMode = mode; state.calls.push(['presentation', mode]); video.dispatchEvent(new Event('webkitpresentationmodechanged')); };
       video.play = () => { paused = false; video.dispatchEvent(new Event('play')); return Promise.resolve(); };
       video.pause = () => { paused = true; video.dispatchEvent(new Event('pause')); };
       player.getPresentingPlayerType = () => state.presenting;
@@ -3709,6 +3714,17 @@ for (const config of [
       player.previousVideo = () => { state.calls.push(['previousVideo']); };
       player.getOption = () => []; player.isSubtitlesOn = () => false; player.setOption = () => {}; player.loadModule = () => {};
       window.__ytmTick = () => { if (!paused && state.presenting === 1) currentTime += 1; video.dispatchEvent(new Event('timeupdate')); };
+      window.__ytmScrub = (target, startPlaying) => {
+        paused = !startPlaying;
+        const slider = document.getElementById('progress-bar');
+        slider.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+        // YTM pauses song-mode media while its Polymer slider is dragging. iOS
+        // then emits touchstart for the same gesture after pointerdown.
+        paused = true; video.dispatchEvent(new Event('pause'));
+        slider.dispatchEvent(new TouchEvent('touchstart', { bubbles: true }));
+        currentTime = target; video.dispatchEvent(new Event('seeking')); video.dispatchEvent(new Event('seeked'));
+        slider.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+      };
       window.__ytmNextTrack = () => {
         state.track = { video_id: 'lYBUbBu4W08', title: 'Second Song', author: 'Second Artist' };
         state.album = 'Second Album';
@@ -3762,6 +3778,37 @@ for (const config of [
       detail: `seeks=${seeks.length} ct=${document.querySelector('#movie_player video').currentTime}` };
   });
 
+  await page.evaluate(() => {
+    window.__wblockNativeHidden = true; window.__wblockNativeVisibility = 'hidden';
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.__wblockNativeHidden = false; window.__wblockNativeVisibility = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await check(page, S, 'uses WebKit PiP to keep video-mode playback alive in the background', () => {
+    const modes = window.__ytm.calls.filter(c => c[0] === 'presentation').map(c => c[1]);
+    return { pass: JSON.stringify(modes) === JSON.stringify(['picture-in-picture', 'inline']) &&
+      document.visibilityState === 'visible' && !document.querySelector('.wblock-tc-native, .wblock-tc-toolbar'),
+      detail: `modes=${modes.join(',')} visibility=${document.visibilityState}` };
+  });
+
+  await page.evaluate(() => window.__ytmScrub(44, true));
+  await page.evaluate(() => new Promise(r => setTimeout(r, 150)));
+  await check(page, S, 'resumes a playing song after YTM pauses it for a scrub', () => {
+    const plays = window.__ytm.calls.filter(c => c[0] === 'playVideo').length;
+    return { pass: document.querySelector('#movie_player video').paused === false &&
+      document.querySelector('#movie_player video').currentTime === 44 && plays === 1,
+      detail: `paused=${document.querySelector('#movie_player video').paused} ct=${document.querySelector('#movie_player video').currentTime} plays=${plays}` };
+  });
+  await page.evaluate(() => window.__ytmScrub(72, false));
+  await page.evaluate(() => new Promise(r => setTimeout(r, 150)));
+  await check(page, S, 'does not resume a song that was paused before scrubbing', () => {
+    const plays = window.__ytm.calls.filter(c => c[0] === 'playVideo').length;
+    return { pass: document.querySelector('#movie_player video').paused === true &&
+      document.querySelector('#movie_player video').currentTime === 72 && plays === 1,
+      detail: `paused=${document.querySelector('#movie_player video').paused} ct=${document.querySelector('#movie_player video').currentTime} plays=${plays}` };
+  });
+  await page.evaluate(() => document.getElementById('movie_player').playVideo());
+
   await check(page, S, 'restores the stored audio quality into ytcfg before playback', () => ({
     pass: window.ytcfg.get('AUDIO_QUALITY') === 'AUDIO_QUALITY_LOW',
     detail: `AUDIO_QUALITY=${window.ytcfg.get('AUDIO_QUALITY')}`,
@@ -3799,13 +3846,17 @@ for (const config of [
     return { pass: JSON.stringify(names) === JSON.stringify(['pauseVideo', 'nextVideo', 'previousVideo', 'playVideo']), detail: names.join(',') };
   });
 
-  await page.evaluate(() => { window.__wblockMediaSessionState.handlers.pause(); });
+  await page.evaluate(() => {
+    window.__ytmPlaysBeforeIntentionalPause = window.__ytm.calls.filter(c => c[0] === 'playVideo').length;
+    window.__wblockMediaSessionState.handlers.pause();
+  });
   await page.evaluate(() => new Promise(r => setTimeout(r, 400)));
-  await check(page, S, 'leaves an intentional pause paused', () => ({
-    pass: document.querySelector('#movie_player video').paused === true && navigator.mediaSession.playbackState === 'paused' &&
-      window.__ytm.calls.filter(c => c[0] === 'playVideo').length === 1,
-    detail: `paused=${document.querySelector('#movie_player video').paused} state=${navigator.mediaSession.playbackState}`,
-  }));
+  await check(page, S, 'leaves an intentional pause paused', () => {
+    const plays = window.__ytm.calls.filter(c => c[0] === 'playVideo').length;
+    return { pass: document.querySelector('#movie_player video').paused === true && navigator.mediaSession.playbackState === 'paused' &&
+      plays === window.__ytmPlaysBeforeIntentionalPause,
+      detail: `paused=${document.querySelector('#movie_player video').paused} state=${navigator.mediaSession.playbackState} plays=${plays}` };
+  });
   await page.evaluate(() => { window.__wblockMediaSessionState.handlers.play(); });
 
   await page.evaluate(() => window.__ytmNextTrack());
@@ -3826,6 +3877,16 @@ for (const config of [
     const m = navigator.mediaSession.metadata;
     return { pass: !!m && m.artist === 'Site Artist' && window.__wblockMediaSessionState.positions.length === 0,
       detail: `artist=${m && m.artist} positions=${window.__wblockMediaSessionState.positions.length}` };
+  });
+
+  await check(page, S, 'keeps lock-screen seeking wired after the site publishes metadata', () => {
+    const h = window.__wblockMediaSessionState.handlers;
+    const before = window.__ytm.calls.length;
+    h.seekto({ seekTime: 80 }); h.seekforward({ seekOffset: 7 }); h.seekbackward({ seekOffset: 3 });
+    const calls = window.__ytm.calls.slice(before);
+    const expected = [['seekTo', 80], ['seekTo', 87], ['seekTo', 84]];
+    return { pass: JSON.stringify(calls) === JSON.stringify(expected) && navigator.mediaSession.metadata.artist === 'Site Artist',
+      detail: `calls=${JSON.stringify(calls)} artist=${navigator.mediaSession.metadata.artist}` };
   });
 
   await page.evaluate(() => {

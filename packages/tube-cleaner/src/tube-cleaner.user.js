@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.23
+// @version      0.1.24
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -873,10 +873,46 @@
         musicState.player = player;
         musicState.video = video;
 
+        var seekGesture = false, seekWasPlaying = false, seekResumeTimer = null;
+        function isSeekControl(target) {
+            try { return !!(target && target.closest && target.closest('tp-yt-paper-slider#progress-bar')); }
+            catch (e) { return false; }
+        }
+        function onSeekStart(event) {
+            if (seekGesture || !isSeekControl(event.target)) return;
+            seekGesture = true;
+            // YTM pauses while dragging its song-mode slider. Remember the state
+            // before its target listener runs so a playing song remains playing.
+            seekWasPlaying = !video.paused && !video.ended;
+        }
+        function onSeekEnd() {
+            if (!seekGesture) return;
+            seekGesture = false;
+            if (seekResumeTimer !== null) clearTimeout(seekResumeTimer);
+            seekResumeTimer = setTimeout(function () {
+                seekResumeTimer = null;
+                if (seekWasPlaying && musicState.player === player && video.paused && !video.ended && !musicAdShowing(player)) {
+                    try { if (typeof player.playVideo === 'function') player.playVideo(); else video.play(); } catch (e) { /* ignore */ }
+                }
+                seekWasPlaying = false;
+            }, 100);
+        }
+        function onSeekCancel() { seekGesture = false; seekWasPlaying = false; }
         function onAdSignal() { endMusicAd(player, video); }
         function onTrackSignal() { syncMusicNowPlaying(player, video); }
         function onTimeUpdate() { endMusicAd(player, video); scheduleMusicPosition(player, video); }
         function onNavigate() { syncMusicNowPlaying(player, video); }
+        function onVisibility() {
+            // iOS suspends a real video track under lock. PiP is WebKit's public
+            // background-video session and keeps that track alive; audio-only
+            // song mode has no PiP support and continues through the shadowed
+            // visibility state as before.
+            if (_realHidden) enterPiP(video);
+            else if (document.hasFocus() && isPiPActive(video)) exitPiP(video);
+        }
+        function onFocus() {
+            if (!_realHidden && isPiPActive(video)) exitPiP(video);
+        }
 
         video.addEventListener('loadedmetadata', onAdSignal);
         video.addEventListener('durationchange', onAdSignal);
@@ -888,6 +924,14 @@
         video.addEventListener('pause', onTrackSignal);
         video.addEventListener('ended', onTrackSignal);
         document.addEventListener('yt-navigate-finish', onNavigate, true);
+        document.addEventListener('pointerdown', onSeekStart, true);
+        document.addEventListener('touchstart', onSeekStart, true);
+        document.addEventListener('pointerup', onSeekEnd, true);
+        document.addEventListener('touchend', onSeekEnd, true);
+        document.addEventListener('pointercancel', onSeekCancel, true);
+        document.addEventListener('touchcancel', onSeekCancel, true);
+        var removeVisibilityObserver = observeRealVisibility(onVisibility);
+        window.addEventListener('focus', onFocus);
 
         if (typeof MutationObserver !== 'undefined') {
             musicClassObserver = new MutationObserver(function () {
@@ -908,6 +952,15 @@
             video.removeEventListener('pause', onTrackSignal);
             video.removeEventListener('ended', onTrackSignal);
             document.removeEventListener('yt-navigate-finish', onNavigate, true);
+            document.removeEventListener('pointerdown', onSeekStart, true);
+            document.removeEventListener('touchstart', onSeekStart, true);
+            document.removeEventListener('pointerup', onSeekEnd, true);
+            document.removeEventListener('touchend', onSeekEnd, true);
+            document.removeEventListener('pointercancel', onSeekCancel, true);
+            document.removeEventListener('touchcancel', onSeekCancel, true);
+            removeVisibilityObserver();
+            window.removeEventListener('focus', onFocus);
+            if (seekResumeTimer !== null) clearTimeout(seekResumeTimer);
         };
 
         endMusicAd(player, video);
@@ -958,6 +1011,9 @@
         }
         var track = musicTrackData(player);
         if (!track.title) return;
+        // Keep lock-screen seeking deterministic even when YTM owns metadata.
+        // These handlers preserve the site's meaning and only call its player API.
+        installMusicActionHandlers(player, session);
         var current = session.metadata;
         var currentTitle = current && current.title || '';
         var stockOwns = !!current && currentTitle === track.title && current !== musicState.published;
@@ -981,7 +1037,6 @@
             musicState.published = metadata;
             musicState.publishedId = track.id;
             musicState.owns = true;
-            installMusicActionHandlers(player, session);
             log('YouTube Music Now Playing published:', track.title);
         }
         if (!musicState.owns) return;
