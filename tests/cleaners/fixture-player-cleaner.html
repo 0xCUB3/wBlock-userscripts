@@ -34,6 +34,14 @@
     </div>
   </div>
 
+  <!-- THEOplayer reuses the video.js class on a shell that owns its DRM and
+       ad pipeline; emptying it stops playback (wBlock #635). -->
+  <div id="theoplayer" class="theoplayer-container theoplayer-skin vjs-paused">
+    <video data-test-theoplayer="1" src="https://example.com/media/theo/master.m3u8"></video>
+    <div class="theo-ad-container"></div>
+    <div class="theoplayer-controls"></div>
+  </div>
+
   <script>
     (function () {
       var container = document.querySelector('.video-js');
@@ -56,6 +64,8 @@
       setTimeout(function () {
         var inner = document.querySelector('#mediaelement-player .mejs__inner');
         window.__wblockMediaElementLifecycleIntact = inner.offsetHeight >= 0;
+        var theoAds = document.querySelector('#theoplayer .theo-ad-container');
+        window.__wblockTheoLifecycleIntact = !!theoAds && theoAds.offsetHeight >= 0;
       }, 500);
     })();
   </script>

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.30
+// @version      0.1.31
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -302,6 +302,7 @@
     var PLAYER_SELECTORS = [
         '.video-js',                 // video.js
         '.vjs-tech',                 // video.js (inner tech, handled via parent)
+        '.theoplayer-container',     // THEOplayer (also carries .video-js)
         '.jwplayer',                 // JW Player
         '.jw-wrapper',               // JW Player
         '.plyr',                     // Plyr
@@ -330,6 +331,9 @@
         '#player-videojs'            // PBS portal / station / partner player
     ];
     var PLAYER_SELECTOR = PLAYER_SELECTORS.join(',');
+    // Wrappers whose framework keeps driving the DOM after startup; nativeize
+    // the media element inside them but never empty the shell.
+    var SHELL_PRESERVE_SELECTOR = '.mejs-container,.mejs__container,.theoplayer-container';
 
     function isHttpUrl(value) {
         return typeof value === 'string' && /^https?:\/\//i.test(value);
@@ -2611,9 +2615,11 @@
             if (container.getRootNode && container.getRootNode() !== document) { return; }
             // MediaElement keeps querying its generated wrapper after startup;
             // deleting that wrapper leaves playback alive but makes its own
-            // lifecycle callbacks throw. Its controls are already hidden, so
-            // preserve the shell and nativeize the media element in place.
-            if (container.matches && container.matches('.mejs-container,.mejs__container')) { return; }
+            // lifecycle callbacks throw. THEOplayer (FIFA, Olympics) reuses the
+            // video.js class on a shell that owns its DRM and ad pipeline, and
+            // stops playback when that shell is emptied. Their controls are
+            // already hidden, so preserve the shell and nativeize in place.
+            if (container.matches && container.matches(SHELL_PRESERVE_SELECTOR)) { return; }
         } catch (e) { /* continue with the conservative light-DOM path */ }
 
         // During parser construction, never delete the wrapper DOM before the
