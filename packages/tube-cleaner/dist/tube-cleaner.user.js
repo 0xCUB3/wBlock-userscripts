@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.28
+// @version      0.1.29
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1538,7 +1538,7 @@
     function activateVideo(player, video) {
         releaseActiveVideo();
         activeVideo = video;
-        setupPlaybackPosition(player, video);
+        if (featureEnabled('resumePosition')) setupPlaybackPosition(player, video);
         registerCleanup(cancelQualityRequest);
         forceNativeControls(video);
         guardNativeControls(video);
@@ -1572,12 +1572,12 @@
         // stalled, progress, and related events to maintain the stream. The
         // iOS toolbar contains only a compact quality selector positioned above
         // Safari's native controls; playback remains owned by the video element.
-        buildToolbar(player, video);
-        setupAutoPiP(video);
+        if (featureEnabled('toolbar')) buildToolbar(player, video);
+        if (featureEnabled('pictureInPicture')) setupAutoPiP(video);
         setupMediaSession(player, video);
-        setupChapters(player, video);
-        setupNativeSubtitles(player, video);
-        setupSponsorBlock(player, video);
+        if (featureEnabled('chapters')) setupChapters(player, video);
+        if (featureEnabled('captions')) setupNativeSubtitles(player, video);
+        if (featureEnabled('sponsorBlock')) setupSponsorBlock(player, video);
     }
 
     var mediaSessionOwner = null;
@@ -2392,6 +2392,30 @@
     var deArrowScanScheduled = false;
 
     // Settings come from the wBlock app, which prepends them to the script
+    // Per-feature switches the app prepends as __wblockTubeCleanerFeatures
+    // (Userscripts page, Tube Cleaner row; wBlock #671). Everything defaults
+    // to on so older wBlock builds, which do not inject the constant, behave
+    // as before. Native controls and ad handling are not switchable: they are
+    // what the script is for.
+    var tubeCleanerFeatures = (function () {
+        var features = {
+            chapters: true,
+            captions: true,
+            pictureInPicture: true,
+            backgroundPlayback: true,
+            sponsorBlock: true,
+            resumePosition: true,
+            toolbar: true
+        };
+        var injected = typeof __wblockTubeCleanerFeatures === 'object' ? __wblockTubeCleanerFeatures : null;
+        if (!injected) return features;
+        for (var key in features) {
+            if (typeof injected[key] === 'boolean') features[key] = injected[key];
+        }
+        return features;
+    })();
+    function featureEnabled(name) { return tubeCleanerFeatures[name] !== false; }
+
     // as __wblockTubeCleanerDeArrow (Userscripts page, Tube Cleaner row).
     // Older wBlock builds do not inject the constant; DeArrow stays off there.
     function loadDeArrowSettings() {
@@ -3843,7 +3867,7 @@
         }
 
         // 7. Enable background playback
-        enableBackgroundPlayback();
+        if (featureEnabled('backgroundPlayback')) enableBackgroundPlayback();
 
         // 8. Fixed quality ranges can stall YouTube's SABR pipeline on iOS.
         // Migrate old mobile state back to adaptive and never retry it during
@@ -5299,7 +5323,7 @@
     }
 
     function boot() {
-        enableBackgroundPlayback();
+        if (featureEnabled('backgroundPlayback')) enableBackgroundPlayback();
         if (IS_YOUTUBE_MUSIC) {
             setupYouTubeMusic();
             return;

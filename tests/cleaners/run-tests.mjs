@@ -2110,6 +2110,45 @@ async function qualityUISelectionCheck(page, scenario) {
   await browser.close();
 }
 
+// ---- Scenario: per-feature switches (wBlock #671) -------------------------
+// The app prepends __wblockTubeCleanerFeatures; anything set to false must be
+// skipped while native controls keep working.
+{
+  const featuresPrelude = 'const __wblockTubeCleanerFeatures = { backgroundPlayback: false, sponsorBlock: false, pictureInPicture: false, toolbar: false, chapters: true, captions: true, resumePosition: true };';
+  const { browser, page, pageErrors } = await runScenario('tube-cleaner-features', {
+    fixture: FIXTURE_URL,
+    viewport: { width: 1280, height: 800 },
+    scriptSource: featuresPrelude + '\n' + sponsorBlockPrelude + '\n' + chapterDataPrelude + '\n' + captionDataPrelude + '\n' + mediaSessionPrelude + '\n' + deArrowPrelude + '\n' + userscript,
+  });
+  const S = 'tube-cleaner-features';
+  await page.waitForTimeout(300);
+  await check(page, S, 'keeps native controls with features switched off', () => {
+    const v = document.querySelector('#movie_player video');
+    return { pass: !!(v && v.controls === true), detail: v ? `controls=${v.controls}` : 'no video' };
+  });
+  await check(page, S, 'does not override document.hidden when background playback is off', () => {
+    const desc = Object.getOwnPropertyDescriptor(document, 'hidden');
+    return { pass: !desc || typeof desc.get !== 'function', detail: `overridden=${!!(desc && desc.get)}` };
+  });
+  await check(page, S, 'does not build the toolbar when it is off', () => {
+    return { pass: !document.querySelector('.wblock-tc-toolbar') };
+  });
+  await check(page, S, 'does not request SponsorBlock segments when it is off', () => {
+    return { pass: (window.__wblockSponsorRequestCount || 0) === 0, detail: `requests=${window.__wblockSponsorRequestCount}` };
+  });
+  await check(page, S, 'does not hook auto-PiP when it is off', () => {
+    const v = document.querySelector('#movie_player video');
+    return { pass: !!v && v._wblockAutoPiPHooked !== true };
+  });
+  await check(page, S, 'still installs chapters when they stay on', () => {
+    const v = document.querySelector('#movie_player video');
+    const tracks = v ? Array.from(v.textTracks).filter(t => t.kind === 'chapters') : [];
+    return { pass: tracks.length > 0, detail: `chapterTracks=${tracks.length}` };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario 6: Player Cleaner on a custom (video.js) player ------------
 // Verifies the ported controls guard: Player Cleaner enhances the existing
 // <video> in place (opaque blob source) and must keep native controls on even
