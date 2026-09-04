@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.27
+// @version      0.1.28
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1963,7 +1963,7 @@
         var english = {
             title: 'SponsorBlock settings', enabled: 'Enable SponsorBlock', notice: 'Show Undo after automatic skips',
             duration: 'Minimum segment length', current: 'Disable for this video', channel: 'Disable on this channel', reset: 'Reset defaults',
-            using: 'Using SponsorBlock', donate: 'Donate',
+            using: 'Using SponsorBlock', donate: 'Donate', close: 'Close',
             hideControls: 'Hide these controls (double-tap the video to show them)',
             any: 'Any length', auto: 'Auto skip', ask: 'Show skip button', off: 'Disabled',
             skipped: 'segment skipped', segment: 'segment', undo: 'Undo', skip: 'Skip',
@@ -1992,6 +1992,9 @@
             ru:'Поддержать', zh:'捐款' };
         if (!selected.using) selected.using = usingLabels[language] || english.using;
         if (!selected.donate) selected.donate = donateLabels[language] || english.donate;
+        var closeLabels = { de:'Schließen', es:'Cerrar', fr:'Fermer', it:'Chiudi', pt:'Fechar', ja:'閉じる', ko:'닫기',
+            ru:'Закрыть', zh:'关闭' };
+        if (!selected.close) selected.close = closeLabels[language] || english.close;
         var hideControlsLabels = { de:'Diese Steuerelemente ausblenden (Doppeltippen auf das Video zeigt sie)',
             es:'Ocultar estos controles (toca dos veces el vídeo para mostrarlos)',
             fr:'Masquer ces commandes (touchez deux fois la vidéo pour les afficher)',
@@ -4600,6 +4603,26 @@
             donate.textContent = locale.donate; donate.style.cssText = 'color:#69a9ff;text-decoration:none';
             credits.appendChild(credit); credits.appendChild(donate);
             footer.appendChild(reset); footer.appendChild(credits); sponsorMenu.appendChild(footer);
+
+            // Explicit dismiss control (#673): the iOS overlay covers the toolbar
+            // button that opened it, so a tap outside is the only way to close
+            // the panel and that is not obvious. Keep it last so it is the
+            // final control after scrolling.
+            var closeRow = document.createElement('div');
+            closeRow.style.cssText = 'margin-top:8px';
+            var close = document.createElement('button');
+            close.type = 'button'; close.className = 'wblock-tc-sponsor-close';
+            close.textContent = locale.close;
+            close.style.cssText = 'display:block;width:100%;box-sizing:border-box;padding:' + (IS_IOS ? '9px' : '6px') +
+                ';background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:6px;font:inherit;font-weight:600;cursor:pointer';
+            close.addEventListener('click', function () { hideSponsorMenu(); });
+            closeRow.appendChild(close);
+            sponsorMenu.appendChild(closeRow);
+        }
+
+        function hideSponsorMenu() {
+            sponsorMenu.style.display = 'none';
+            sponsorBtn.setAttribute('aria-expanded', 'false');
         }
 
         sponsorBtn.addEventListener('click', function (e) {
@@ -4615,15 +4638,11 @@
                 sponsorMenu.style.display = 'block';
                 sponsorBtn.setAttribute('aria-expanded', 'true');
             } else {
-                sponsorMenu.style.display = 'none';
-                sponsorBtn.setAttribute('aria-expanded', 'false');
+                hideSponsorMenu();
             }
         });
         sponsorMenu.addEventListener('click', function (e) { e.stopPropagation(); });
-        function onSponsorOutsideClick() {
-            sponsorMenu.style.display = 'none';
-            sponsorBtn.setAttribute('aria-expanded', 'false');
-        }
+        function onSponsorOutsideClick() { hideSponsorMenu(); }
         document.addEventListener('click', onSponsorOutsideClick);
         registerCleanup(function () { document.removeEventListener('click', onSponsorOutsideClick); });
         updateSponsorButton();

@@ -1394,6 +1394,18 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: links.includes('https://sponsor.ajay.app/|Using SponsorBlock') && links.includes('https://sponsor.ajay.app/donate/|Donate'),
       detail: links.join(' ') };
   });
+  await check(page, 'desktop', 'closes the SponsorBlock panel from its Close button (#673)', () => {
+    const panel = document.querySelector('.wblock-tc-sponsor-menu');
+    const close = panel?.querySelector('.wblock-tc-sponsor-close');
+    const isLast = !!close && panel.lastElementChild?.contains(close);
+    const before = panel?.style.display;
+    close?.click();
+    const after = panel?.style.display;
+    const expanded = document.querySelector('.wblock-tc-sponsor-button')?.getAttribute('aria-expanded');
+    return { pass: !!close && close.textContent === 'Close' && isLast && before === 'block' && after === 'none' && expanded === 'false',
+      detail: `close=${!!close} text=${close?.textContent} last=${isLast} before=${before} after=${after} expanded=${expanded}` };
+  });
+  await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
     video.currentTime = 35;
