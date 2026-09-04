@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.33
+// @version      0.1.34
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -2737,6 +2737,111 @@
         return true;
     }
 
+    // ABC AMP exposes a same-origin MRSS JSON feed for each embedded clip.
+    // Validate native playback off-DOM before retiring the Disney iframe. A
+    // failed feed or media load must leave the original play button available.
+    function prepareABCAMPPlayers() {
+        if (!/(^|\.)abcnews\.com$/i.test(location.hostname)) { return; }
+        var embeds = document.querySelectorAll('amp-video-iframe[src]');
+        for (var i = 0; i < embeds.length; i++) { prepareABCAMPPlayer(embeds[i]); }
+    }
+
+    function prepareABCAMPPlayer(host) {
+        if (host._wblockABCRequested) { return; }
+        var embed;
+        try { embed = new URL(host.getAttribute('src'), location.href); } catch (e) { return; }
+        if (embed.origin !== location.origin || embed.pathname !== '/fitt/video/amp/embed') { return; }
+        var id = embed.searchParams.get('id');
+        if (!/^\d+$/.test(id || '')) { return; }
+        host._wblockABCRequested = true;
+        var video = document.createElement('video');
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        video.poster = host.getAttribute('poster') || '';
+        var controller = new AbortController();
+        var retired = [];
+        var finished = false;
+        var installed = false;
+        var timer = setTimeout(restore, 15000);
+
+        function restore() {
+            if (finished) { return; }
+            finished = true;
+            clearTimeout(timer);
+            controller.abort();
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+            video.remove();
+            retired.forEach(function (entry) {
+                entry.node.style.cssText = entry.style;
+                if (entry.src !== null) { entry.node.setAttribute('src', entry.src); }
+            });
+        }
+
+        video.addEventListener('error', restore);
+        video.addEventListener('loadedmetadata', function () {
+            if (finished || installed || !host.isConnected) { return; }
+            clearTimeout(timer);
+            installed = true;
+            // Keep AMP's sizer so the article layout does not jump. Only retire
+            // the iframe and its poster/placeholder once the stream is usable.
+            var children = host.querySelectorAll('iframe,[placeholder],[fallback]');
+            for (var j = 0; j < children.length; j++) {
+                var node = children[j];
+                var src = node.tagName === 'IFRAME' ? node.getAttribute('src') : null;
+                retired.push({ node: node, style: node.style.cssText, src: src });
+                node.style.setProperty('display', 'none', 'important');
+                // A hidden iframe can still autoplay with audio. Blank it, but
+                // retain its URL so a later native media error can restore it.
+                if (src !== null) { node.setAttribute('src', 'about:blank'); }
+            }
+            video.style.cssText = 'position:absolute!important;inset:0!important;width:100%!important;height:100%!important;object-fit:contain!important;background:black;z-index:2';
+            video._wblockCleaned = true;
+            video._wblockEnhanced = true;
+            video.setAttribute(ATTR_DONE, '1');
+            host.appendChild(video);
+            forceNativeControls(video);
+            applyRemotePlaybackPolicy(video);
+            setupAutoPiP(video);
+            setupPlaybackPreferences(video);
+            setupMediaSession(host, video);
+            setupKeyboardShortcuts(host, video);
+            guardNativeControls(video);
+        });
+
+        fetch('/video/itemfeed?id=' + encodeURIComponent(id), { signal: controller.signal })
+            .then(function (response) {
+                if (!response.ok) { throw new Error('ABC feed unavailable'); }
+                return response.json();
+            })
+            .then(function (feed) {
+                if (finished || !host.isConnected) { restore(); return; }
+                var item = feed && feed.channel && feed.channel.item;
+                if (!item || String(item.guid) !== id || item.isLiveVideo === true ||
+                    item.temporalType !== 'vod') { restore(); return; }
+                var group = item['media-group'];
+                var sources = group && group['media-content'];
+                if (!Array.isArray(sources)) { restore(); return; }
+                var candidates = [];
+                sources.forEach(function (source) {
+                    var attrs = source && source['@attributes'];
+                    if (!attrs || attrs.medium !== 'video' || !video.canPlayType(attrs.type || '')) { return; }
+                    var url;
+                    try { url = new URL(attrs.url); } catch (e) { return; }
+                    if (url.protocol !== 'https:' ||
+                        !/^(?:service-pkgabcnews\.akamaized\.net|ondemand\.abcnews\.com)$/.test(url.hostname)) { return; }
+                    candidates.push({ url: url.href, hls: /mpegurl/i.test(attrs.type) });
+                });
+                candidates.sort(function (a, b) { return Number(b.hls) - Number(a.hls); });
+                if (!candidates.length) { restore(); return; }
+                video.title = item.title || '';
+                video.src = candidates[0].url;
+                video.load();
+            }).catch(restore);
+    }
+
     function scan(root, allowStructuralCleanup) {
         var scope = root || document;
         if (!scope || !scope.querySelectorAll) { return; }
@@ -2744,6 +2849,7 @@
         // sibling overlay. There is no <video> in that document, so chrome hide
         // has to run even when scan finds nothing. Off those hosts this is a no-op.
         hidePbsHostChrome();
+        prepareABCAMPPlayers();
         var seen = [];
 
         function addContainer(raw) {

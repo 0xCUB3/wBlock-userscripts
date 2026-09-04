@@ -8,7 +8,7 @@
     "build": "node tools/build.mjs",
     "check": "node tools/check.mjs",
     "test:dark-reader": "node tests/dark-reader.test.mjs",
-    "test:cleaners": "node tests/cleaners/run-tests.mjs",
+    "test:cleaners": "node tests/cleaners/run-tests.mjs && node tests/cleaners/abc-amp.test.mjs",
     "test": "npm run build && npm run check && npm run test:dark-reader && npm run test:dark-reader-webkit && npm run test:cleaners",
     "test:dark-reader-webkit": "node tests/dark-reader-webkit.test.mjs"
   },
