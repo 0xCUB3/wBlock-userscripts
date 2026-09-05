@@ -53,6 +53,7 @@ const FIXTURE_PLAYER_YOUTUBE_EMBED = join(__dirname, 'fixture-player-cleaner-you
 
 const userscript = readFileSync(SCRIPT_PATH, 'utf8');
 const playerUserscript = readFileSync(PLAYER_SCRIPT_PATH, 'utf8');
+const deArrowUserscript = readFileSync(join(__dirname, '..', '..', 'packages', 'dearrow', 'dist', 'dearrow.user.js'), 'utf8');
 const injectorSource = readFileSync(INJECTOR_PATH, 'utf8');
 const filter = (process.argv.find(a => a.startsWith('--filter=')) || '').split('=')[1] || '';
 // Thumbnail URLs the current scenario requested from dearrow-thumb.ajay.app.
@@ -149,7 +150,7 @@ const sponsorBlockPrelude = `
 // The app prepends this constant to the script. The prelude runs in the
 // injector's closure, so checks reach it through the debug hook.
 const deArrowPrelude = `
-const __wblockTubeCleanerDeArrow = { enabled: true, replaceTitles: true, replaceThumbnails: true,
+const __wblockDeArrowSettings = { enabled: true, replaceTitles: true, replaceThumbnails: true,
   randomThumbnails: false, showOriginalOnHover: true };
 (function () {
   var nativeFetch = window.fetch;
@@ -1063,7 +1064,7 @@ async function qualityUISelectionCheck(page, scenario) {
   const { browser, page, pageErrors } = await runScenario('desktop (macOS Safari-like)', {
     fixture: FIXTURE_URL,
     viewport: { width: 1280, height: 800 },
-    scriptSource: sponsorBlockPrelude + '\n' + chapterDataPrelude + '\n' + captionDataPrelude + '\n' + mediaSessionPrelude + '\n' + deArrowPrelude + '\n' + userscript,
+    scriptSource: sponsorBlockPrelude + '\n' + chapterDataPrelude + '\n' + captionDataPrelude + '\n' + mediaSessionPrelude + '\n' + deArrowPrelude + '\n' + userscript + '\n' + deArrowUserscript,
   });
   await commonChecks(page, 'desktop');
   await check(page, 'desktop', 'video click does not bubble to the YouTube player shell', () => {
@@ -1267,7 +1268,7 @@ async function qualityUISelectionCheck(page, scenario) {
       detail: `title=${title} thumbnail=${thumbnail}` };
   });
   await page.evaluate(() => {
-    window.__wblockTubeDebug.setDeArrowSetting('replaceTitles', false);
+    window.__wblockDeArrowDebug.setSetting('replaceTitles', false);
   });
   await check(page, 'desktop', 'applies independent DeArrow title settings from the app-injected constant', () => {
     const watchTitle = document.querySelector('#watch-metadata h1 yt-formatted-string')?.textContent;
@@ -1278,7 +1279,7 @@ async function qualityUISelectionCheck(page, scenario) {
       detail: `watch=${watchTitle} card=${cardTitle}` };
   });
   await page.evaluate(() => {
-    window.__wblockTubeDebug.setDeArrowSetting('replaceTitles', true);
+    window.__wblockDeArrowDebug.setSetting('replaceTitles', true);
   });
   await check(page, 'desktop', 'reapplies DeArrow titles from its bounded session cache', () => {
     const requests = window.__wblockDeArrowRequests || [];
@@ -1360,7 +1361,7 @@ async function qualityUISelectionCheck(page, scenario) {
     detail: `sponsorRequests=${window.__wblockSponsorRequestCount} deArrowRequests=${window.__wblockDeArrowRequests.length}`,
   }));
   await page.evaluate(() => {
-    window.__wblockTubeDebug.setDeArrowSetting('randomThumbnails', true);
+    window.__wblockDeArrowDebug.setSetting('randomThumbnails', true);
     const card = document.createElement('ytd-compact-video-renderer');
     card.setAttribute('data-video-id', 'RANDOMVID01');
     card.setAttribute('data-channel-id', 'other-channel');
@@ -2118,7 +2119,7 @@ async function qualityUISelectionCheck(page, scenario) {
   const { browser, page, pageErrors } = await runScenario('tube-cleaner-features', {
     fixture: FIXTURE_URL,
     viewport: { width: 1280, height: 800 },
-    scriptSource: featuresPrelude + '\n' + sponsorBlockPrelude + '\n' + chapterDataPrelude + '\n' + captionDataPrelude + '\n' + mediaSessionPrelude + '\n' + deArrowPrelude + '\n' + userscript,
+    scriptSource: featuresPrelude + '\n' + sponsorBlockPrelude + '\n' + chapterDataPrelude + '\n' + captionDataPrelude + '\n' + mediaSessionPrelude + '\n' + deArrowPrelude + '\n' + userscript + '\n' + deArrowUserscript,
   });
   const S = 'tube-cleaner-features';
   await page.waitForTimeout(300);

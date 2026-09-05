@@ -1,9 +1,11 @@
 import {readFile, writeFile, mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {cleanerDistribution} from './distribution.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const packages = ['tube-cleaner', 'player-cleaner'];
+const packages = ['tube-cleaner', 'player-cleaner', 'dearrow'];
+const deArrowSource = await readFile(join(root, 'packages/dearrow/src/dearrow.user.js'), 'utf8');
 const metadata = source => {
   const match = source.match(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/);
   if (!match) throw new Error('missing userscript metadata');
@@ -11,8 +13,9 @@ const metadata = source => {
 };
 await mkdir(join(root, 'packages/dark-reader/dist'), {recursive: true});
 for (const slug of packages) {
+  await mkdir(join(root, `packages/${slug}/dist`), {recursive: true});
   const source = await readFile(join(root, `packages/${slug}/src/${slug}.user.js`), 'utf8');
-  await writeFile(join(root, `packages/${slug}/dist/${slug}.user.js`), source);
+  await writeFile(join(root, `packages/${slug}/dist/${slug}.user.js`), cleanerDistribution(slug, source, deArrowSource));
   await writeFile(join(root, `packages/${slug}/dist/${slug}.meta.js`), metadata(source));
 }
 const vendor = await readFile(join(root, 'packages/dark-reader/vendor/darkreader-api.min.js'), 'utf8');

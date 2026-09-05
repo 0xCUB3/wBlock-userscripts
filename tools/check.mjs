@@ -2,11 +2,12 @@ import {readFile, readdir, stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
+import {cleanerDistribution} from './distribution.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const raw = 'https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main';
 const specs = [
-  ['tube-cleaner', '0.1.31'], ['player-cleaner', '0.1.34'], ['dark-reader', '4.9.128-wblock.7']
+  ['tube-cleaner', '0.1.32'], ['player-cleaner', '0.1.34'], ['dearrow', '0.1.0'], ['dark-reader', '4.9.128-wblock.7']
 ];
 const fail = message => { throw new Error(message); };
 const metadata = text => {
@@ -24,7 +25,8 @@ const metadata = text => {
   return {block:m[0], fields};
 };
 const all = [];
-for (const [slug, version] of specs.slice(0, 2)) {
+const deArrowSource = await readFile(join(root, 'packages/dearrow/src/dearrow.user.js'), 'utf8');
+for (const [slug, version] of specs.slice(0, -1)) {
   const source = await readFile(join(root, `packages/${slug}/src/${slug}.user.js`), 'utf8');
   const dist = await readFile(join(root, `packages/${slug}/dist/${slug}.user.js`), 'utf8');
   const meta = await readFile(join(root, `packages/${slug}/dist/${slug}.meta.js`), 'utf8');
@@ -32,7 +34,7 @@ for (const [slug, version] of specs.slice(0, 2)) {
   if (a.fields.get('version') !== version || b.fields.get('version') !== version || c.fields.get('version') !== version) fail(`${slug}: version mismatch`);
   const url = `${raw}/packages/${slug}/dist/${slug}`;
   for (const x of [a,b,c]) { if (x.fields.get('downloadURL') !== `${url}.user.js` || x.fields.get('updateURL') !== `${url}.meta.js`) fail(`${slug}: URL mismatch`); }
-  if (dist !== source) fail(`${slug}: generated userscript drift`);
+  if (dist !== cleanerDistribution(slug, source, deArrowSource)) fail(`${slug}: generated userscript drift`);
   if (meta !== `${b.block}\n`) fail(`${slug}: generated metadata drift`);
   all.push(`${b.fields.get('namespace')}\u0000${b.fields.get('name')}`);
   execFileSync(process.execPath, ['--check', join(root, `packages/${slug}/dist/${slug}.user.js`)]);
@@ -42,7 +44,7 @@ const adapter = await readFile(join(root, 'packages/dark-reader/src/adapter.user
 const dark = await readFile(join(root, 'packages/dark-reader/dist/dark-reader.user.js'), 'utf8');
 const dm = await readFile(join(root, 'packages/dark-reader/dist/dark-reader.meta.js'), 'utf8');
 const a = metadata(adapter), b = metadata(dark), c = metadata(dm);
-if (a.fields.get('version') !== specs[2][1] || b.fields.get('version') !== specs[2][1] || c.fields.get('version') !== specs[2][1]) fail('dark-reader: version mismatch');
+if (a.fields.get('version') !== specs[specs.length - 1][1] || b.fields.get('version') !== specs[specs.length - 1][1] || c.fields.get('version') !== specs[specs.length - 1][1]) fail('dark-reader: version mismatch');
 const darkUrl = `${raw}/packages/dark-reader/dist/dark-reader`;
 for (const x of [a,b,c]) if (x.fields.get('downloadURL') !== `${darkUrl}.user.js` || x.fields.get('updateURL') !== `${darkUrl}.meta.js`) fail('dark-reader: URL mismatch');
 if (dark !== `${vendor.trimEnd()}\n${adapter}`) fail('dark-reader: generated userscript drift');
@@ -50,7 +52,7 @@ if (dm !== `${b.block}\n`) fail('dark-reader: generated metadata drift');
 execFileSync(process.execPath, ['--check', join(root, 'packages/dark-reader/dist/dark-reader.user.js')]);
 all.push(`${b.fields.get('namespace')}\u0000${b.fields.get('name')}`);
 if (new Set(all).size !== all.length) fail('duplicate identities');
-for (const file of ['packages/tube-cleaner/dist/tube-cleaner.user.js','packages/player-cleaner/dist/player-cleaner.user.js','packages/dark-reader/dist/dark-reader.user.js']) {
+for (const file of ['packages/tube-cleaner/dist/tube-cleaner.user.js','packages/player-cleaner/dist/player-cleaner.user.js','packages/dark-reader/dist/dark-reader.user.js','packages/dearrow/dist/dearrow.user.js']) {
   const built = await readFile(join(root, file), 'utf8');
   if (/fetch\(['"]https?:|import\(['"]https?:/.test(built)) fail(`${file}: executable network match`);
 }
