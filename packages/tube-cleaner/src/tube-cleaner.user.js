@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.30
+// @version      0.1.31
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -4514,7 +4514,17 @@
             var settings = loadSponsorBlockSettings();
             var heading = document.createElement('div');
             heading.textContent = 'SponsorBlock';
-            heading.style.cssText = 'font-size:' + (IS_IOS ? '18px' : '15px') + ';font-weight:700;margin:0 0 7px';
+            heading.style.cssText = 'position:sticky;top:-12px;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:12px;' +
+                'background:rgb(22,22,24);margin:-12px -12px 7px;padding:4px 8px 4px 12px;font-weight:700;font-size:' + (IS_IOS ? '18px' : '15px');
+            var close = document.createElement('button');
+            close.type = 'button'; close.className = 'wblock-tc-sponsor-close';
+            close.textContent = '\u00d7';
+            close.setAttribute('aria-label', locale.close);
+            close.title = locale.close;
+            close.style.cssText = 'flex:0 0 44px;width:44px;height:44px;padding:0;background:transparent;color:#fff;' +
+                'border:0;border-radius:6px;font:28px/1 -apple-system,system-ui,sans-serif;cursor:pointer';
+            close.addEventListener('click', function () { hideSponsorMenu(); sponsorBtn.focus(); });
+            heading.appendChild(close);
             sponsorMenu.appendChild(heading);
             sponsorMenu.appendChild(sponsorCheckboxRow(locale.enabled, settings.enabled, function (checked) {
                 settings.enabled = checked;
@@ -4629,20 +4639,6 @@
             credits.appendChild(credit); credits.appendChild(donate);
             footer.appendChild(reset); footer.appendChild(credits); sponsorMenu.appendChild(footer);
 
-            // Explicit dismiss control (#673): the iOS overlay covers the toolbar
-            // button that opened it, so a tap outside is the only way to close
-            // the panel and that is not obvious. Keep it last so it is the
-            // final control after scrolling.
-            var closeRow = document.createElement('div');
-            closeRow.style.cssText = 'margin-top:8px';
-            var close = document.createElement('button');
-            close.type = 'button'; close.className = 'wblock-tc-sponsor-close';
-            close.textContent = locale.close;
-            close.style.cssText = 'display:block;width:100%;box-sizing:border-box;padding:' + (IS_IOS ? '9px' : '6px') +
-                ';background:rgba(255,255,255,.12);color:#fff;border:0;border-radius:6px;font:inherit;font-weight:600;cursor:pointer';
-            close.addEventListener('click', function () { hideSponsorMenu(); });
-            closeRow.appendChild(close);
-            sponsorMenu.appendChild(closeRow);
         }
 
         function hideSponsorMenu() {

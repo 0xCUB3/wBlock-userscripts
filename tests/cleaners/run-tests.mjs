@@ -1397,13 +1397,13 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'closes the SponsorBlock panel from its Close button (#673)', () => {
     const panel = document.querySelector('.wblock-tc-sponsor-menu');
     const close = panel?.querySelector('.wblock-tc-sponsor-close');
-    const isLast = !!close && panel.lastElementChild?.contains(close);
+    const inHeader = !!close && panel.firstElementChild?.contains(close);
     const before = panel?.style.display;
     close?.click();
     const after = panel?.style.display;
     const expanded = document.querySelector('.wblock-tc-sponsor-button')?.getAttribute('aria-expanded');
-    return { pass: !!close && close.textContent === 'Close' && isLast && before === 'block' && after === 'none' && expanded === 'false',
-      detail: `close=${!!close} text=${close?.textContent} last=${isLast} before=${before} after=${after} expanded=${expanded}` };
+    return { pass: !!close && close.textContent === '×' && close.getAttribute('aria-label') === 'Close' && inHeader && before === 'block' && after === 'none' && expanded === 'false',
+      detail: `close=${!!close} text=${close?.textContent} header=${inHeader} before=${before} after=${after} expanded=${expanded}` };
   });
   await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
   await page.evaluate(() => {
