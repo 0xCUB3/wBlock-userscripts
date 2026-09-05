@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.34
+// @version      0.1.35
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -303,6 +303,7 @@
         '.video-js',                 // video.js
         '.vjs-tech',                 // video.js (inner tech, handled via parent)
         '.theoplayer-container',     // THEOplayer (also carries .video-js)
+        '.bitmovinplayer-container', // Bitmovin / US Open inline player
         '.jwplayer',                 // JW Player
         '.jw-wrapper',               // JW Player
         '.plyr',                     // Plyr
@@ -333,7 +334,7 @@
     var PLAYER_SELECTOR = PLAYER_SELECTORS.join(',');
     // Wrappers whose framework keeps driving the DOM after startup; nativeize
     // the media element inside them but never empty the shell.
-    var SHELL_PRESERVE_SELECTOR = '.mejs-container,.mejs__container,.theoplayer-container';
+    var SHELL_PRESERVE_SELECTOR = '.mejs-container,.mejs__container,.theoplayer-container,.bitmovinplayer-container';
 
     function isHttpUrl(value) {
         return typeof value === 'string' && /^https?:\/\//i.test(value);
@@ -433,7 +434,7 @@
             for (var i = 0; i < video.textTracks.length; i++) {
                 var track = video.textTracks[i];
                 if (track.kind !== 'subtitles' && track.kind !== 'captions') continue;
-                try { track.mode = language && track.language === language ? 'showing' : 'hidden'; } catch (e) { /* ignore */ }
+                try { track.mode = language && track.language === language ? 'showing' : 'disabled'; } catch (e) { /* ignore */ }
             }
         }
 
@@ -1333,6 +1334,15 @@
         return false;
     }
 
+    function setHiddenChrome(el) {
+        try {
+            if (el.getAttribute(HIDDEN_ATTR) === '1' && el.style.display === 'none') { return; }
+            ensureHideStyle();
+            el.setAttribute(HIDDEN_ATTR, '1');
+            el.style.setProperty('display', 'none', 'important');
+        } catch (e) { /* ignore */ }
+    }
+
     function hideElement(el) {
         if (!el || el === document.documentElement || el === document.body) return;
         if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK' ||
@@ -1340,11 +1350,16 @@
             el.tagName === 'META' || el.tagName === 'TEMPLATE') return;
         if (hostsYouTubeEmbed(el)) return;
         if (containsTextEditingSurface(el)) return;
-        try {
-            ensureHideStyle();
-            el.setAttribute(HIDDEN_ATTR, '1');
-            el.style.setProperty('display', 'none', 'important');
-        } catch (e) { /* ignore */ }
+        setHiddenChrome(el);
+    }
+
+    function hideKnownPlayerChrome(el) {
+        if (!el || el === document.documentElement || el === document.body) return;
+        if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK' ||
+            el.tagName === 'STYLE' || el.tagName === 'LINK' || el.tagName === 'SLOT' ||
+            el.tagName === 'META' || el.tagName === 'TEMPLATE') return;
+        if (hostsYouTubeEmbed(el)) return;
+        setHiddenChrome(el);
     }
 
     // Node.contains() stops at a shadow boundary. Walk through ShadowRoot.host so
@@ -1849,6 +1864,112 @@
                 if (!composedRelated(redditChrome[rc], video)) { hideElement(redditChrome[rc]); }
             }
         }
+
+        hideTheoPlayerChrome(video);
+        hideBitmovinPlayerChrome(video);
+    }
+
+    function theoPlayerShell(video) {
+        if (!video || !video.closest) { return null; }
+        try {
+            return video.closest(
+                '.theoplayer-container, .theoplayer-skin, .theo-player-wrapper, .theo-player'
+            );
+        } catch (e) { return null; }
+    }
+
+    function bitmovinPlayerShell(video) {
+        if (!video || !video.closest) { return null; }
+        try {
+            var mediaBox = video.closest('.bitmovinplayer-container');
+            if (!mediaBox) { return null; }
+            return mediaBox.closest('.react-ecp, .amp_wrapper, [class*="amp_wrapper"]') || mediaBox;
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    function isTheoAdRoot(el) {
+        if (!el || !el.classList) { return false; }
+        var cls = ' ' + (el.className || '') + ' ';
+        return cls.indexOf(' theo-ad ') !== -1 || cls.indexOf(' theo-ads ') !== -1 ||
+            cls.indexOf(' theo-ad-container ') !== -1;
+    }
+
+    // THEOplayer keeps its UI in siblings of <video> and in video.js bars that
+    // remount after play (Olympics, US Open). Aggressive container hiding
+    // usually reaches them, but sites that omit .theoplayer-container or paint
+    // UI in a shadow sibling need the same explicit pass as AMP/FAVE.
+    function hideTheoPlayerChrome(video) {
+        var shell = theoPlayerShell(video);
+        if (!shell || !shell.querySelectorAll) { return; }
+        var theoChrome = shell.querySelectorAll(
+            '.theoplayer-controls,.theoplayer-ui,.theo-ui-container,.theo-topbar,' +
+            '.theo-controlbar,.theo-control-bar,.theo-secondary-ui,.theo-time-control,' +
+            '.vjs-control-bar,.vjs-big-play-button,.vjs-poster,.vjs-loading-spinner,' +
+            '.vjs-text-track-display,.vjs-title-bar,[class*="theo-"][class*="control"]'
+        );
+        for (var tc = 0; tc < theoChrome.length; tc++) {
+            if (composedRelated(theoChrome[tc], video) || isTheoAdRoot(theoChrome[tc])) { continue; }
+            hideElement(theoChrome[tc]);
+        }
+        if (shell.children) {
+            for (var tk = 0; tk < shell.children.length; tk++) {
+                var kid = shell.children[tk];
+                if (kid === video || composedRelated(kid, video) || kid.tagName === 'VIDEO') { continue; }
+                if (isTheoAdRoot(kid)) { continue; }
+                hideElement(kid);
+            }
+        }
+        if (shell.shadowRoot) { hideContainerChrome(shell.shadowRoot, video, true); }
+        var hosts = shell.querySelectorAll('theoplayer-ui, theo-ui, [class*="theoplayer"]');
+        for (var th = 0; th < hosts.length; th++) {
+            if (hosts[th].shadowRoot) { hideContainerChrome(hosts[th].shadowRoot, video, true); }
+        }
+    }
+
+    // US Open has used THEOplayer and Bitmovin. Both keep custom controls as
+    // React siblings of the media box, so a nearest-player sweep can miss them.
+    function hideBitmovinPlayerChrome(video) {
+        var shell = bitmovinPlayerShell(video);
+        if (!shell || !shell.querySelectorAll) { return; }
+        var chrome = shell.querySelectorAll(
+            '[id^="controls-"],#overlay,#toolbar,[id="unmute_overlay"],' +
+            '[class*="controls_"],.bitmovinplayer-poster,.bmpui-ui-uicontainer'
+        );
+        for (var i = 0; i < chrome.length; i++) {
+            if (composedRelated(chrome[i], video)) { continue; }
+            hideKnownPlayerChrome(chrome[i]);
+        }
+    }
+
+    // Inline players sometimes leave html/body in a fullscreen or overflow:hidden
+    // state, or paint a fixed UI layer over the page that blocks scroll even
+    // though playback is inline.
+    function releasePlayerDocumentScrollLock(video) {
+        if (!theoPlayerShell(video) && !bitmovinPlayerShell(video)) { return; }
+        try {
+            if (isTemporarilyFullscreen(video)) { return; }
+            var html = document.documentElement;
+            var body = document.body;
+            var bodyWasFullscreen = !!(body && body.classList &&
+                (body.classList.contains('theoplayer-fullscreen') ||
+                 body.classList.contains('theo-fullscreen') ||
+                 body.classList.contains('vjs-fullscreen') ||
+                 body.classList.contains('bmpui-fullscreen')));
+            var lockClasses = ['theoplayer-fullscreen', 'theo-fullscreen', 'vjs-fullscreen', 'theo-noscroll',
+                'bmpui-fullscreen', 'bitmovinplayer-fullscreen', 'no-scroll', 'noscroll'];
+            for (var i = 0; i < lockClasses.length; i++) {
+                if (html && html.classList) { html.classList.remove(lockClasses[i]); }
+                if (body && body.classList) { body.classList.remove(lockClasses[i]); }
+            }
+            if (html && html.style && html.style.overflow === 'hidden') {
+                html.style.removeProperty('overflow');
+            }
+            if (body && body.style) {
+                if (body.style.overflow === 'hidden') { body.style.removeProperty('overflow'); }
+                if (body.style.position === 'fixed' && bodyWasFullscreen) { body.style.removeProperty('position'); }
+            }
+        } catch (e) { /* ignore */ }
     }
 
     function normalizePbsHost(host) {
@@ -2201,6 +2322,7 @@
             if (!active || !video.isConnected) { return; }
             hideOverlappingChrome(video);
             hideStackedChrome(video);
+            releasePlayerDocumentScrollLock(video);
         }
         function kickAfterPaint() {
             kick();

@@ -31,6 +31,7 @@ const FIXTURE_TUBE_MULTIPLE_URL = pathToFileURL(join(__dirname, 'fixture-tube-cl
 const FIXTURE_TUBE_MULTIPLE_SOURCE = readFileSync(join(__dirname, 'fixture-tube-cleaner-multiple.html'), 'utf8');
 const FIXTURE_PLAYER_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner.html')).href;
 const FIXTURE_PLAYER_REPLACE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-replace.html')).href;
+const FIXTURE_PLAYER_CAPTIONS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-captions.html')).href;
 const FIXTURE_PLAYER_DISCOVERY_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-discovery.html')).href;
 const FIXTURE_PLAYER_JW_INIT_RACE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-jw-init-race.html')).href;
 const FIXTURE_PLAYER_LIVE_BLOB_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-live-blob.html')).href;
@@ -49,6 +50,7 @@ const FIXTURE_PLAYER_DISCORD_URL = pathToFileURL(join(__dirname, 'fixture-player
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
 const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
 const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
+const FIXTURE_PLAYER_PORTAL_CONTROLS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-portal-controls.html')).href;
 const FIXTURE_PLAYER_YOUTUBE_EMBED = join(__dirname, 'fixture-player-cleaner-youtube-embed.html');
 
 const userscript = readFileSync(SCRIPT_PATH, 'utf8');
@@ -1184,7 +1186,7 @@ async function qualityUISelectionCheck(page, scenario) {
       enumerable: descriptor.enumerable,
       get: descriptor.get,
       set(value) {
-        if (value === 'disabled') window.__chapterModeChanges.push(value);
+        if (value === 'disabled' && this.kind === 'chapters') window.__chapterModeChanges.push(value);
         return descriptor.set.call(this, value);
       },
     });
@@ -1643,6 +1645,91 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: cls && live.length === 0, detail: `hiddenClass=${cls} liveButtons=${live.length}/${buttons.length}` };
   });
   record('desktop', 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// Tube Cleaner native caption off regression
+{
+  const defaultSubtitlePrelude = `
+window.__defaultYoutubeSubtitlesOn = true;
+HTMLElement.prototype.isSubtitlesOn = function () {
+  return this.id === 'movie_player' ? !!window.__defaultYoutubeSubtitlesOn || !!window.__youtubeSubtitlesOn : false;
+};
+HTMLElement.prototype.setOption = function (module, option, value) {
+  if (this.id === 'movie_player' && module === 'captions' && option === 'track') {
+    window.__youtubeCaptionTrack = value && value.languageCode || null;
+    window.__youtubeSubtitlesOn = !!value;
+    window.__defaultYoutubeSubtitlesOn = !!value;
+  }
+};
+`;
+  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (native captions stay off)', {
+    fixture: FIXTURE_URL,
+    viewport: { width: 1280, height: 800 },
+    scriptSource: defaultSubtitlePrelude + '\n' + captionDataPrelude + '\n' + userscript,
+  });
+  const S = 'tube-cleaner-native-captions-off';
+  await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length >= 1);
+  await check(page, S, 'preserves YouTube default subtitles in Safari native tracks', () => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
+    const showing = tracks.filter(t => t.mode === 'showing');
+    const saved = localStorage.getItem('wblock.tubeCleaner.subtitles');
+    return { pass: showing.length === 1 && saved === null, detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${saved}` };
+  });
+
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    Array.from(video.textTracks).filter(t => t.kind === 'subtitles').forEach(t => { t.mode = 'disabled'; });
+  });
+  await check(page, S, 'saves explicit native subtitle off without clicking YouTube CC', () => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
+    const saved = JSON.parse(localStorage.getItem('wblock.tubeCleaner.subtitles') || 'null');
+    return {
+      pass: tracks.every(t => t.mode === 'disabled') && saved?.enabled === false && window.__subtitleClicks === 0,
+      detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${JSON.stringify(saved)} clicks=${window.__subtitleClicks}`,
+    };
+  });
+
+  await page.evaluate(() => {
+    window.__youtubeSubtitlesOn = true;
+    const video = document.querySelector('#movie_player video');
+    video.dispatchEvent(new Event('loadedmetadata'));
+    document.dispatchEvent(new Event('yt-player-state-change'));
+  });
+  await check(page, S, 'rejects YouTube caption restoration after the user turns native captions off', () => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
+    const saved = JSON.parse(localStorage.getItem('wblock.tubeCleaner.subtitles') || 'null');
+    return { pass: tracks.every(t => t.mode === 'disabled') && saved?.enabled === false,
+      detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${JSON.stringify(saved)}` };
+  });
+
+  await page.evaluate(() => {
+    const player = document.getElementById('movie_player');
+    const wrap = player.querySelector('.html5-video-container');
+    wrap.innerHTML = '<video playsinline></video>';
+    document.dispatchEvent(new Event('yt-navigate-finish'));
+  });
+  await page.waitForFunction(() => document.querySelectorAll('#movie_player video track[data-wblock-native-subtitle]').length >= 1);
+  await check(page, S, 'keeps native captions off across YouTube video remount', () => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
+    return { pass: tracks.length >= 1 && tracks.every(t => t.mode === 'disabled'), detail: `modes=${tracks.map(t => t.mode).join(',')}` };
+  });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length >= 1);
+  await check(page, S, 'keeps native captions off after refresh despite YouTube default subtitles', () => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
+    const saved = JSON.parse(localStorage.getItem('wblock.tubeCleaner.subtitles') || 'null');
+    return { pass: tracks.length >= 1 && tracks.every(t => t.mode === 'disabled') && saved?.enabled === false,
+      detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${JSON.stringify(saved)}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
 
@@ -2386,6 +2473,85 @@ async function qualityUISelectionCheck(page, scenario) {
     const hasAttr = v.hasAttribute('controls');
     return { pass: hasAttr, detail: `hasAttribute('controls')=${hasAttr} (getter=${v.controls})` };
   }, { timeout: 1500, interval: 500 });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// Player Cleaner caption preference regression
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (caption preference off)', {
+    fixture: FIXTURE_PLAYER_CAPTIONS_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#player-captions video[data-wblock-player-cleaner]',
+    viewport: { width: 900, height: 700 },
+  });
+  const S = 'player-cleaner-caption-preference-off';
+
+  await check(page, S, 'preserves the page default subtitle state without a saved preference', () => {
+    const video = document.querySelector('#player-captions video');
+    const element = video?.querySelector('track');
+    const saved = JSON.parse(localStorage.getItem('wblock.playerCleaner.preferences') || '{}');
+    return {
+      pass: element?.default === true && saved.subtitleLanguage === undefined,
+      detail: `default=${element?.default} saved=${JSON.stringify(saved)}`,
+    };
+  });
+
+  await page.evaluate(() => {
+    const video = document.querySelector('#player-captions video');
+    const track = Array.from(video.textTracks).find(t => t.kind === 'subtitles' || t.kind === 'captions');
+    track.mode = 'showing';
+    video.textTracks.dispatchEvent(new Event('change'));
+    track.mode = 'disabled';
+    video.textTracks.dispatchEvent(new Event('change'));
+  });
+  await check(page, S, 'saves an explicit subtitle-off preference from the native track menu', () => {
+    const video = document.querySelector('#player-captions video');
+    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
+    const saved = JSON.parse(localStorage.getItem('wblock.playerCleaner.preferences') || '{}');
+    return {
+      pass: track?.mode === 'disabled' && saved.subtitleLanguage === '',
+      detail: `mode=${track?.mode} saved=${JSON.stringify(saved)}`,
+    };
+  });
+
+  await page.evaluate(() => {
+    const video = document.querySelector('#player-captions video');
+    video.dispatchEvent(new Event('loadedmetadata'));
+    video.dispatchEvent(new Event('durationchange'));
+  });
+  await check(page, S, 'does not re-enable captions when preference observers replay', () => {
+    const video = document.querySelector('#player-captions video');
+    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
+    return { pass: track?.mode === 'disabled', detail: `mode=${track?.mode}` };
+  });
+
+  await page.evaluate(() => {
+    const old = document.getElementById('player-captions');
+    const fresh = document.createElement('div');
+    fresh.className = 'video-js';
+    fresh.id = 'player-captions-remount';
+    fresh.innerHTML = '<video data-test-original="1" width="640" height="360" preload="metadata"><source src="https://example.com/media/captions.mp4" type="video/mp4"><track kind="captions" src="captions-default.vtt" srclang="en" label="English" default></video><div class="vjs-control-bar"></div>';
+    old.replaceWith(fresh);
+  });
+  await check(page, S, 'keeps captions off across a player remount with a default track', () => {
+    const video = document.querySelector('#player-captions-remount video[data-wblock-player-cleaner]');
+    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
+    return { pass: !!video && track?.mode === 'disabled', detail: `video=${!!video} mode=${track?.mode}` };
+  });
+
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#player-captions video[data-wblock-player-cleaner]', { timeout: 10000 });
+  await check(page, S, 'keeps captions off after refresh even when the page track is default', () => {
+    const video = document.querySelector('#player-captions video');
+    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
+    const saved = JSON.parse(localStorage.getItem('wblock.playerCleaner.preferences') || '{}');
+    return {
+      pass: track?.mode === 'disabled' && saved.subtitleLanguage === '',
+      detail: `mode=${track?.mode} saved=${JSON.stringify(saved)}`,
+    };
+  });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
@@ -4842,6 +5008,42 @@ for (const config of [
       pass: !!(visible(field) && visible(composer) && unmarked(field) && unmarked(composer)),
       detail: `field=${field && getComputedStyle(field).display} composer=${composer && getComputedStyle(composer).display}`,
     };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// Portal controls outside the media box
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (portal controls outside media box)', {
+    fixture: FIXTURE_PLAYER_PORTAL_CONTROLS_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#portal-video[data-wblock-player-cleaner]',
+    viewport: { width: 900, height: 700 },
+  });
+  const S = 'player-cleaner-portal-controls';
+  await check(page, S, 'enhances the MSE video in place', () => {
+    const v = document.getElementById('portal-video');
+    return { pass: !!(v && v.controls && v.hasAttribute('data-wblock-player-cleaner') && !v._wblockCleaned), detail: v ? `controls=${v.controls} cleaned=${!!v._wblockCleaned}` : 'no video' };
+  });
+  await check(page, S, 'hides remounted sibling controls outside the media box', () => {
+    const controls = document.getElementById('controls-clip');
+    const toolbar = document.getElementById('toolbar');
+    const poster = document.querySelector('.bitmovinplayer-poster');
+    const hidden = el => el && (getComputedStyle(el).display === 'none' || el.hasAttribute('data-wblock-pc-hidden') || el.closest('[data-wblock-pc-hidden]'));
+    return { pass: !!(hidden(controls) && hidden(toolbar) && hidden(poster)), detail: `controls=${controls && getComputedStyle(controls).display} toolbar=${toolbar && getComputedStyle(toolbar).display} poster=${poster && getComputedStyle(poster).display}` };
+  }, { timeout: 2500, interval: 150 });
+  await page.evaluate(() => {
+    document.body.classList.add('bmpui-fullscreen');
+    document.body.style.overflow = 'hidden';
+    document.body.style.position = 'fixed';
+    document.getElementById('portal-video').dispatchEvent(new Event('play'));
+  });
+  await check(page, S, 'releases stale document scroll lock without hiding content', () => {
+    const content = document.getElementById('story-content');
+    const visible = content && getComputedStyle(content).display !== 'none' && !content.closest('[data-wblock-pc-hidden]');
+    const scrollReleased = document.body.style.overflow !== 'hidden' && document.body.style.position !== 'fixed' && !document.body.classList.contains('bmpui-fullscreen');
+    return { pass: !!(visible && scrollReleased), detail: `content=${content && getComputedStyle(content).display} overflow=${document.body.style.overflow} position=${document.body.style.position} class=${document.body.className}` };
   });
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();

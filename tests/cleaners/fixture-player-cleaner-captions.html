@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synthetic custom player — subtitle preference regression</title>
+<style>
+  body { margin: 0; background: #111; }
+  .video-js { position: relative; width: 640px; aspect-ratio: 16 / 9; margin: 24px auto; background: #000; }
+  .video-js video { width: 100%; height: 100%; background: #222; }
+  .vjs-control-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: rgba(0,0,0,.7); }
+</style>
+</head>
+<body>
+  <div class="video-js" id="player-captions">
+    <video data-test-original="1" width="640" height="360" preload="metadata">
+      <source src="https://example.com/media/captions.mp4" type="video/mp4">
+      <track kind="captions" src="captions-default.vtt" srclang="en" label="English" default>
+    </video>
+    <div class="vjs-control-bar"></div>
+  </div>
+</body>
+</html>
