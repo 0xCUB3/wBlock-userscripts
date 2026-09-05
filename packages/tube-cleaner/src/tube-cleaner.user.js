@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.29
+// @version      0.1.30
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, optional DeArrow branding, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, optionales DeArrow-Branding, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, marcas opcionales de DeArrow, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -3841,7 +3841,8 @@
 
         // Check if we already processed this video.
         var videoId = youtubeVideoIdentity(player) || '';
-        if (player.getAttribute(ATTR_CLEANED) === videoId && activeVideo === video) return;
+        var toolbarMissing = featureEnabled('toolbar') && !player.querySelector('.wblock-tc-toolbar');
+        if (player.getAttribute(ATTR_CLEANED) === videoId && activeVideo === video && !toolbarMissing) return;
         player.setAttribute(ATTR_CLEANED, videoId);
 
         log('transforming player for', videoId || '(unknown)');
@@ -4801,7 +4802,7 @@
                 video.removeEventListener('pause', onVideoPause);
             });
         } else {
-            // Start hidden on desktop — it appears with native controls
+            // Set a hidden baseline before applying the saved toolbar preference.
             toolbar.style.opacity = '0';
             toolbar.style.setProperty('pointer-events', 'none', 'important');
             toolbar.classList.add('wblock-tc-toolbar-hidden');
@@ -4871,7 +4872,8 @@
                     if (!desktopPanelOpen() && !_isOverToolbar) { scheduleHideToolbar(); }
                 }
             }
-            document.addEventListener('mousemove', onDocumentMouseMove);
+            // The video stops bubbling mouse events to protect native controls.
+            document.addEventListener('mousemove', onDocumentMouseMove, true);
 
             function onPlayerMouseEnter() {
                 _isOverPlayer = true;
@@ -4880,7 +4882,7 @@
             }
             function onPlayerMouseLeave() {
                 _isOverPlayer = false;
-                if (!_isOverToolbar) { scheduleHideToolbar(); }
+                if (!_isOverToolbar) { hideToolbar(); }
             }
             player.addEventListener('mouseenter', onPlayerMouseEnter);
             player.addEventListener('mouseleave', onPlayerMouseLeave);
@@ -4936,10 +4938,16 @@
             }
             video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
 
+            // Match the initially visible native controls without requiring movement.
+            if (!toolbarUserHidden) {
+                showToolbar();
+                scheduleHideToolbar();
+            }
+
             registerCleanup(function () {
                 clearTimeout(toolbarTimer);
                 clearTimeout(presentationTimer);
-                document.removeEventListener('mousemove', onDocumentMouseMove);
+                document.removeEventListener('mousemove', onDocumentMouseMove, true);
                 video.removeEventListener('dblclick', onVideoReveal);
                 document.removeEventListener('wblock-tc-toolbar-pref', onToolbarPref);
                 player.removeEventListener('mouseenter', onPlayerMouseEnter);
