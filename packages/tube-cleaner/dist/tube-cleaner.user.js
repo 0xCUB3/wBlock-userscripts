@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.32
+// @version      0.1.33
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -4885,14 +4885,73 @@
             replaceTitles: true,
             replaceThumbnails: true,
             randomThumbnails: false,
-            showOriginalOnHover: true
+            showOriginalOnHover: true,
+            originalThumbnailChannels: []
         };
         var injected = typeof __wblockDeArrowSettings === 'object' ? __wblockDeArrowSettings : null;
         if (!injected) return settings;
         for (var key in settings) {
             if (typeof injected[key] === 'boolean') settings[key] = injected[key];
         }
+        if (Array.isArray(injected.originalThumbnailChannels)) {
+            settings.originalThumbnailChannels = injected.originalThumbnailChannels.map(normalizedDeArrowChannel).filter(Boolean);
+        }
         return settings;
+    }
+
+    function normalizedDeArrowChannel(value) {
+        if (typeof value !== 'string') return null;
+        var candidate = value.trim().normalize('NFC');
+        if (/^UC[A-Za-z0-9_-]{22}$/.test(candidate)) return candidate;
+        if (/^@[\p{L}\p{N}\p{M}._\-·]{1,100}$/u.test(candidate)) return candidate.toLowerCase();
+        try {
+            var url = new URL(candidate.indexOf('/') === 0 ? candidate :
+                (candidate.indexOf('://') >= 0 ? candidate : 'https://' + candidate), 'https://www.youtube.com');
+            if (!/^https?:$/.test(url.protocol) ||
+                ['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'].indexOf(url.hostname) < 0) return null;
+            var parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+            candidate = parts[0] === 'channel' ? parts[1] : parts[0];
+            if (typeof candidate !== 'string') return null;
+            candidate = candidate.normalize('NFC');
+            if (/^UC[A-Za-z0-9_-]{22}$/.test(candidate)) return candidate;
+            if (/^@[\p{L}\p{N}\p{M}._\-·]{1,100}$/u.test(candidate)) return candidate.toLowerCase();
+        } catch (e) { /* Invalid channel entries do not match. */ }
+        return null;
+    }
+
+    function keepOriginalDeArrowThumbnail(card) {
+        var channels = loadDeArrowSettings().originalThumbnailChannels;
+        if (!channels.length || !card) return false;
+        function matches(value) {
+            var normalized = normalizedDeArrowChannel(value);
+            return normalized !== null && channels.indexOf(normalized) >= 0;
+        }
+        if (matches(card.getAttribute('data-channel-id'))) return true;
+        var owner = card.querySelector('#channel-name a[href], ytd-channel-name a[href], #byline-container a[href]');
+        if (!owner) owner = card.querySelector('a[href^="/@"], a[href^="/channel/"], a[href*="youtube.com/@"], a[href*="youtube.com/channel/"]');
+        if (owner && matches(owner.getAttribute('href'))) return true;
+
+        // Polymer and the newer lockup renderer expose channel IDs in owner metadata.
+        var seen = new WeakSet();
+        var budget = 256;
+        function visit(value, depth, ownerContext) {
+            if (!value || typeof value !== 'object' || depth > 12 || budget-- <= 0 || seen.has(value)) return false;
+            seen.add(value);
+            var keys = Object.keys(value);
+            for (var i = 0; i < keys.length; i++) {
+                var key = keys[i];
+                var item = value[key];
+                if ((key === 'channelId' || (ownerContext &&
+                    ['browseId', 'canonicalBaseUrl', 'url', 'channelUrl'].indexOf(key) >= 0)) && matches(item)) return true;
+                var ownsChannel = ownerContext || ['ownerText', 'shortBylineText', 'longBylineText',
+                    'owner', 'channelName', 'channelEndpoint', 'contentMetadataViewModel'].indexOf(key) >= 0;
+                if (visit(item, depth + 1, ownsChannel)) return true;
+            }
+            return false;
+        }
+        try {
+            return visit(card.data, 0, false) || visit(card.__data && card.__data.data, 0, false);
+        } catch (e) { return false; }
     }
 
     function cachedDeArrowBranding(videoId) {
@@ -5117,7 +5176,7 @@
         }
     }
 
-    function applyDeArrowThumbnailElement(element, videoId, timestamp) {
+    function applyDeArrowThumbnailElement(element, videoId, timestamp, card) {
         if (!element) return;
         var url = deArrowThumbnailUrl(videoId, timestamp);
         var currentSrc = element.getAttribute('src');
@@ -5155,7 +5214,9 @@
         releaseDeArrowThumbnail(element);
         element._wblockDeArrowRequestedUrl = url;
         fetchDeArrowThumbnail(videoId, timestamp, false).then(function (result) {
-            if (element._wblockDeArrowRequestedUrl !== url) {
+            if (element._wblockDeArrowRequestedUrl !== url || !card.isConnected ||
+                deArrowCardVideoId(card) !== videoId || keepOriginalDeArrowThumbnail(card)) {
+                if (element._wblockDeArrowRequestedUrl === url) restoreDeArrowThumbnailElement(element);
                 if (result) { try { URL.revokeObjectURL(result.objectUrl); } catch (e) { /* ignore */ } }
                 return;
             }
@@ -5172,9 +5233,12 @@
 
     function restoreDeArrowThumbnailElement(element) {
         if (!element || element._wblockDeArrowOriginalSrc === undefined) return;
-        restoreDeArrowAttribute(element, 'src', element._wblockDeArrowOriginalSrc);
-        restoreDeArrowAttribute(element, 'srcset', element._wblockDeArrowOriginalSrcset);
-        restoreDeArrowAttribute(element, 'referrerpolicy', element._wblockDeArrowOriginalReferrerPolicy);
+        var currentSrc = element.getAttribute('src');
+        if (currentSrc === element._wblockDeArrowCustomSrc || currentSrc === element._wblockDeArrowOriginalSrc) {
+            restoreDeArrowAttribute(element, 'src', element._wblockDeArrowOriginalSrc);
+            restoreDeArrowAttribute(element, 'srcset', element._wblockDeArrowOriginalSrcset);
+            restoreDeArrowAttribute(element, 'referrerpolicy', element._wblockDeArrowOriginalReferrerPolicy);
+        }
         delete element._wblockDeArrowOriginalSrc;
         delete element._wblockDeArrowOriginalSrcset;
         delete element._wblockDeArrowOriginalReferrerPolicy;
@@ -5214,7 +5278,7 @@
             }
             if (image) {
                 image._wblockDeArrowShowingOriginal = false;
-                if (settings.replaceThumbnails && image._wblockDeArrowCustomSrc &&
+                if (settings.replaceThumbnails && !keepOriginalDeArrowThumbnail(card) && image._wblockDeArrowCustomSrc &&
                     image._wblockDeArrowThumbnailFailed !== image._wblockDeArrowRequestedUrl) {
                     showDeArrowThumbnail(image);
                 }
@@ -5241,6 +5305,7 @@
         delete card._wblockDeArrowObserved;
         delete card._wblockDeArrowRequestedVideoId;
         delete card._wblockDeArrowProcessedVideoId;
+        delete card._wblockDeArrowOriginalThumbnailChannel;
         card.removeAttribute('data-wblock-dearrow-card');
     }
 
@@ -5278,9 +5343,10 @@
                 restoreDeArrowTitleElement(card._wblockDeArrowTitleElement);
                 delete card._wblockDeArrowTitleElement;
             }
-            if (currentSettings.replaceThumbnails && customTimestamp !== null) {
+            card._wblockDeArrowOriginalThumbnailChannel = keepOriginalDeArrowThumbnail(card);
+            if (currentSettings.replaceThumbnails && !card._wblockDeArrowOriginalThumbnailChannel && customTimestamp !== null) {
                 card._wblockDeArrowThumbnailElement = thumbnailElement;
-                applyDeArrowThumbnailElement(thumbnailElement, videoId, customTimestamp);
+                applyDeArrowThumbnailElement(thumbnailElement, videoId, customTimestamp, card);
             } else {
                 restoreDeArrowThumbnailElement(card._wblockDeArrowThumbnailElement);
                 delete card._wblockDeArrowThumbnailElement;
@@ -5302,7 +5368,8 @@
             var imageNeedsRepair = image && image._wblockDeArrowCustomSrc &&
                 image._wblockDeArrowThumbnailFailed !== image._wblockDeArrowRequestedUrl &&
                 image.getAttribute('src') !== image._wblockDeArrowCustomSrc;
-            if (!titleNeedsRepair && !imageNeedsRepair) return;
+            var channelPolicyChanged = card._wblockDeArrowOriginalThumbnailChannel !== keepOriginalDeArrowThumbnail(card);
+            if (!titleNeedsRepair && !imageNeedsRepair && !channelPolicyChanged) return;
             applyDeArrowCard(card);
             return;
         }
@@ -5363,6 +5430,7 @@
     }
 
     function scheduleDeArrowScan(root) {
+        if (root && root.nodeType === 3) root = root.parentElement;
         if (!loadDeArrowSettings().enabled) return;
         if (root === document) deArrowPendingScanRoots = [document];
         else if (deArrowPendingScanRoots.indexOf(document) === -1 && root && deArrowPendingScanRoots.indexOf(root) === -1) {
@@ -5423,8 +5491,8 @@
         }
     });
     brandingObserver.observe(document, {
-        childList: true, subtree: true, attributes: true,
-        attributeFilter: ['href', 'src', 'srcset', 'data-video-id']
+        childList: true, subtree: true, attributes: true, characterData: true,
+        attributeFilter: ['href', 'src', 'srcset', 'data-video-id', 'data-channel-id']
     });
     ['yt-navigate-finish', 'yt-page-data-updated'].forEach(function (event) {
         document.addEventListener(event, function () { scheduleDeArrowScan(document); }, true);

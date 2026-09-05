@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeArrow
 // @namespace    com.skula.wblock
-// @version      0.1.0
+// @version      0.1.1
 // @description  Replaces YouTube titles and thumbnails with community-submitted DeArrow alternatives.
 // @description:ar  يستبدل عناوين YouTube وصوره المصغرة ببدائل يقدمها مجتمع DeArrow.
 // @description:de  Ersetzt YouTube-Titel und Vorschaubilder durch Alternativen aus der DeArrow-Community.
