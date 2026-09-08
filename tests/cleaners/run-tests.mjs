@@ -716,14 +716,14 @@ async function iosNativeControlsChecks(page, scenario) {
       !audioStyle && video && getComputedStyle(video).visibility === 'visible',
       detail: `stored=${localStorage.getItem('wblock.tubeCleaner.audioOnly')} style=${!!audioStyle} visibility=${video && getComputedStyle(video).visibility}` };
   });
-  await check(page, scenario, 'restores adaptive quality instead of retrying fixed 1080p', () => {
+  await check(page, scenario, 'keeps saved 1080p but starts adaptively until playback advances', () => {
     const quality = localStorage.getItem('wblock.tubeCleaner.quality');
     const bias = localStorage.getItem('yt-player-quality');
     const settingsClicks = window.__settingsClicks || 0;
-    return { pass: quality === 'auto' && bias === null && settingsClicks === 0,
+    return { pass: quality === 'hd1080' && bias === null && settingsClicks === 0,
       detail: `quality=${quality} bias=${bias} settingsClicks=${settingsClicks}` };
   });
-  await check(page, scenario, 'changes iOS quality without persisting a fixed startup range', async () => {
+  await check(page, scenario, 'remembers iOS quality without writing YouTube’s fixed startup bias', async () => {
     const button = document.querySelector('.wblock-tc-quality-button');
     if (!button) return { pass: false, detail: 'missing quality button' };
     button.click();
@@ -736,7 +736,7 @@ async function iosNativeControlsChecks(page, scenario) {
     const preference = localStorage.getItem('wblock.tubeCleaner.quality');
     const bias = localStorage.getItem('yt-player-quality');
     return {
-      pass: current === 'hd1080' && preference === 'auto' && bias === null,
+      pass: current === 'hd1080' && preference === 'hd1080' && bias === null,
       detail: `current=${current} preference=${preference} bias=${bias}`,
     };
   });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.34
+// @version      0.1.35
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1562,6 +1562,7 @@
         activeVideo = video;
         if (featureEnabled('resumePosition')) setupPlaybackPosition(player, video);
         registerCleanup(cancelQualityRequest);
+        registerCleanup(cancelMobileQualityRestore);
         forceNativeControls(video);
         guardNativeControls(video);
         pinNativeControls(video);
@@ -1600,6 +1601,11 @@
         if (featureEnabled('chapters')) setupChapters(player, video);
         if (featureEnabled('captions')) setupNativeSubtitles(player, video);
         if (featureEnabled('sponsorBlock')) setupSponsorBlock(player, video);
+        if (IS_IOS) {
+            // Let SABR start adaptively; restore our preference only after progress.
+            storageRemove('yt-player-quality');
+            applyPreferredQuality();
+        }
     }
 
     var mediaSessionOwner = null;
@@ -3435,16 +3441,7 @@
         // 7. Enable background playback
         if (featureEnabled('backgroundPlayback')) enableBackgroundPlayback();
 
-        // 8. Fixed quality ranges can stall YouTube's SABR pipeline on iOS.
-        // Migrate old mobile state back to adaptive and never retry it during
-        // startup. The mobile quality selector applies choices only on demand
-        // to the current video.
-        if (IS_IOS) {
-            if (getPreferredQuality() !== 'auto') { setPreferredQuality('auto'); }
-            try { localStorage.removeItem('yt-player-quality'); } catch (e) { /* ignore */ }
-        } else {
-            applyPreferredQuality();
-        }
+        if (!IS_IOS) applyPreferredQuality();
 
         // 7. Observe for video element recreation. The player element persists
         // across SPA navigations, so disconnect any previous observer before
@@ -3504,8 +3501,8 @@
     // only response as incomplete rather than making the picker useless. iOS
     // always gets the ladder because its player commonly reports one temporary
     // rendition even after startup. Reported non-standard levels are retained.
-    // Selection stays best-effort and is never persisted at iOS startup, so a
-    // stalled choice can always be reverted to Auto from the same menu.
+    // Selection stays best-effort. Saved iOS choices wait for playback, and a
+    // stalled restoration falls back to Auto without forgetting the preference.
     function qualityMenuLevels() {
         var reported = getAvailableQualities();
         var mediumIndex = QUALITY_ORDER.indexOf('medium');
@@ -3669,6 +3666,7 @@
     }
 
     function setQuality(target, callback) {
+        cancelMobileQualityRestore();
         var player = findPlayer();
         if (!player || !activeVideo) {
             warn('setQuality: no player');
@@ -3770,8 +3768,81 @@
         return true;
     }
 
+    var mobileQualityCleanup = null;
+
+    function cancelMobileQualityRestore() {
+        if (mobileQualityCleanup) mobileQualityCleanup();
+    }
+
+    function restoreMobileQuality(preferred) {
+        cancelMobileQualityRestore();
+        var video = activeVideo;
+        var player = findPlayer();
+        if (!video || !player || QUALITY_ORDER.indexOf(preferred) === -1) return;
+        var lastTime = video.currentTime;
+        var monitor = null;
+        function stop() {
+            video.removeEventListener('timeupdate', onProgress);
+            if (monitor !== null) clearInterval(monitor);
+            monitor = null;
+            if (mobileQualityCleanup === stop) mobileQualityCleanup = null;
+        }
+        function current() {
+            return activeVideo === video && getPreferredQuality() === preferred;
+        }
+        function onProgress() {
+            if (!current()) { stop(); return; }
+            var advance = video.currentTime - lastTime;
+            lastTime = video.currentTime;
+            if (video.paused || video.seeking || video.ended || video.readyState < 2 ||
+                player.classList.contains('ad-showing') || advance <= 0 || advance > 3) return;
+            stop();
+            // Use the same bounded request as a manual choice, never pin a
+            // rendition before the stream has begun producing frames.
+            setQuality(preferred, function (worked) {
+                if (!worked || !current()) return;
+                storageRemove('yt-player-quality');
+                var previousTime = video.currentTime;
+                var previousCheck = Date.now();
+                var stalled = 0;
+                var observed = 0;
+                mobileQualityCleanup = stop;
+                monitor = setInterval(function () {
+                    if (!current() || video.ended) { stop(); return; }
+                    var now = Date.now();
+                    var elapsed = Math.min(1000, Math.max(0, now - previousCheck));
+                    previousCheck = now;
+                    if (video.paused || video.seeking || document.hidden ||
+                        player.classList.contains('ad-showing')) {
+                        stalled = 0;
+                        previousTime = video.currentTime;
+                        return;
+                    }
+                    observed += elapsed;
+                    stalled = video.currentTime !== previousTime ? 0 : stalled + elapsed;
+                    previousTime = video.currentTime;
+                    if (stalled >= 8000) {
+                        stop();
+                        // Recover this video without forgetting the user's choice
+                        // for the next one or repeatedly forcing a stalled stream.
+                        setQuality('auto');
+                    } else if (observed >= 20000) {
+                        stop();
+                    }
+                }, 500);
+            });
+        }
+        mobileQualityCleanup = stop;
+        video.addEventListener('timeupdate', onProgress);
+    }
+
     function applyPreferredQuality() {
         var preferred = getPreferredQuality();
+        if (IS_IOS) {
+            if (preferred === 'auto') cancelMobileQualityRestore();
+            else restoreMobileQuality(preferred);
+            return;
+        }
         if (preferred === 'auto') return;
         var player = findPlayer();
         if (!player || !player.setPlaybackQualityRange) return;
@@ -3951,9 +4022,7 @@
                     item.addEventListener('click', function (e) {
                         e.preventDefault();
                         e.stopPropagation();
-                        // On iOS apply the choice to this video only. Persisted
-                        // fixed ranges can wedge the next SABR stream at load.
-                        if (!IS_IOS) { setPreferredQuality(q); }
+                        setPreferredQuality(q);
                         setQuality(q);
                         updateQualityBtn();
                         qualityMenu.style.display = 'none';

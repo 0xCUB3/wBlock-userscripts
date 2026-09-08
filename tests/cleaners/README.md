@@ -21,7 +21,8 @@ userscript at `document-start` in the page world (matching `@run-at` +
 Tube Cleaner scenarios: `fixture.html` / `fixture-noplaysinline.html` cover
 macOS Safari, iPhone, legacy iPad mobile UAs, and modern iPadOS requesting the
 desktop site as `MacIntel`. Mobile checks enforce Safari-native playback with a
-non-persistent quality-only overlay, migration out of old black-screen
+persistent quality choices restored only after playback advances, recovery to
+Auto when a restored choice stalls, migration out of old black-screen
 audio-only and fixed-quality loading states, visible video in portrait and
 landscape, suppression of the separate mobile YouTube controls tree,
 restoration of inline playback, preservation of the iOS ManagedMediaSource
