@@ -162,11 +162,11 @@ const __wblockDeArrowSettings = { enabled: true, replaceTitles: true, replaceThu
     if (value.indexOf('sponsor.ajay.app/api/branding') !== -1) {
       window.__wblockDeArrowRequests.push(value);
       var watch = {
-        titles: [{ title: 'Accurate Watch Title', original: false, votes: 4, locked: false }],
+        titles: [{ title: '>Accurate >Watch Title', original: false, votes: 4, locked: false }],
         thumbnails: []
       };
       var card = {
-        titles: [{ title: 'Accurate Related Title', original: false, votes: 2, locked: false }],
+        titles: [{ title: 'Accurate >Related >Title', original: false, votes: 2, locked: false }],
         thumbnails: [{ timestamp: 12.5, original: false, votes: 3, locked: false }]
       };
       var randomFallback = { titles: [], thumbnails: [], videoDuration: 120, randomTime: 0.25 };

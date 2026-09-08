@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DeArrow
 // @namespace    com.skula.wblock
-// @version      0.1.1
+// @version      0.1.2
 // @description  Replaces YouTube titles and thumbnails with community-submitted DeArrow alternatives.
 // @description:ar  يستبدل عناوين YouTube وصوره المصغرة ببدائل يقدمها مجتمع DeArrow.
 // @description:de  Ersetzt YouTube-Titel und Vorschaubilder durch Alternativen aus der DeArrow-Community.
@@ -215,8 +215,9 @@
 
     function deArrowAcceptedTitle(branding) {
         var title = branding && branding.titles[0];
+        // A word-leading ">" preserves capitalization; it is not display text.
         return title && title.original !== true && typeof title.title === 'string' && title.title.trim() &&
-            (title.locked || Number(title.votes) >= 0) ? title.title.replace(/‹/g, '<') : null;
+            (title.locked || Number(title.votes) >= 0) ? title.title.replace(/(^|\s)>(\S)/g, '$1$2').replace(/‹/g, '<').trim() : null;
     }
 
     function deArrowAcceptedThumbnail(branding) {

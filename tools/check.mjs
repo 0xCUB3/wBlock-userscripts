@@ -7,7 +7,7 @@ import {cleanerDistribution} from './distribution.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const raw = 'https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main';
 const specs = [
-  ['tube-cleaner', '0.1.36'], ['player-cleaner', '0.1.36'], ['dearrow', '0.1.1'], ['dark-reader', '4.9.128-wblock.7']
+  ['tube-cleaner', '0.1.37'], ['player-cleaner', '0.1.36'], ['dearrow', '0.1.2'], ['dark-reader', '4.9.128-wblock.7']
 ];
 const fail = message => { throw new Error(message); };
 const metadata = text => {
