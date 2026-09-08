@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.35
+// @version      0.1.36
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -21,7 +21,8 @@
 // @match        https://youtube-nocookie.com/*
 // @run-at       document-start
 // @inject-into  page
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @downloadURL  https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/tube-cleaner/dist/tube-cleaner.user.js
 // @updateURL    https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/tube-cleaner/dist/tube-cleaner.meta.js
 // ==/UserScript==
@@ -2044,8 +2045,14 @@
     function loadSponsorBlockSettings() {
         if (sponsorBlockSettingsCache) return sponsorBlockSettingsCache;
         var settings = defaultSponsorBlockSettings();
+        var shared = null;
         try {
-            var saved = JSON.parse(localStorage.getItem(SPONSORBLOCK_SETTINGS_KEY) || '{}');
+            if (typeof GM_getValue === 'function') shared = GM_getValue(SPONSORBLOCK_SETTINGS_KEY, null);
+        } catch (e) { /* use local preferences outside wBlock */ }
+        try {
+            // The native importer writes only this allowlisted settings object.
+            // A native snapshot wins over stale, origin-local preferences.
+            var saved = shared || JSON.parse(localStorage.getItem(SPONSORBLOCK_SETTINGS_KEY) || '{}');
             if (typeof saved.enabled === 'boolean') settings.enabled = saved.enabled;
             if (typeof saved.showNotice === 'boolean') settings.showNotice = saved.showNotice;
             if (isFinite(saved.minimumDuration)) settings.minimumDuration = Math.max(0, Number(saved.minimumDuration));
@@ -2057,12 +2064,22 @@
             }
         } catch (e) { /* use defaults */ }
         sponsorBlockSettingsCache = settings;
+        if (!shared) persistSharedSponsorBlockSettings(settings);
         return settings;
+    }
+
+    function persistSharedSponsorBlockSettings(settings) {
+        // GM storage crosses the authenticated userscript bridge. Do not send
+        // arbitrary localStorage or an upstream SponsorBlock export to native.
+        if (typeof GM_setValue !== 'function') return;
+        try { GM_setValue(SPONSORBLOCK_SETTINGS_KEY, settings); }
+        catch (e) { /* local playback settings still work without the bridge */ }
     }
 
     function saveSponsorBlockSettings(settings) {
         sponsorBlockSettingsCache = settings;
         storageSet(SPONSORBLOCK_SETTINGS_KEY, JSON.stringify(settings));
+        persistSharedSponsorBlockSettings(settings);
         document.dispatchEvent(new CustomEvent('wblock-tc-sponsor-settings'));
     }
 
@@ -4221,6 +4238,12 @@
                 var option = document.createElement('option'); option.value = value[0]; option.textContent = value[1];
                 durationSelect.appendChild(option);
             });
+            if (![0, 1, 2, 5, 10].includes(settings.minimumDuration)) {
+                var importedDuration = document.createElement('option');
+                importedDuration.value = String(settings.minimumDuration);
+                importedDuration.textContent = String(settings.minimumDuration) + ' s';
+                durationSelect.appendChild(importedDuration);
+            }
             durationSelect.value = String(settings.minimumDuration);
             durationSelect.addEventListener('change', function () {
                 settings.minimumDuration = Number(durationSelect.value);
