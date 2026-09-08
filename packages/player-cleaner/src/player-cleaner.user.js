@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.35
+// @version      0.1.36
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -140,6 +140,7 @@
     document.addEventListener('visibilitychange', updateRealVisibility);
 
     function enableBackgroundPlayback() {
+        if (!featureEnabled('backgroundPlayback')) return;
         if (loadPlaybackPreferences().backgroundPlayback === false) return;
         try {
             Object.defineProperty(document, 'hidden', {
@@ -159,10 +160,25 @@
     // Auto PiP — automatic Picture-in-Picture
     // ------------------------------------------------------------------
 
+    // Per-feature switches the app prepends as __wblockPlayerCleanerFeatures
+    // (Userscripts page, Player Cleaner row). Everything defaults to on so
+    // older wBlock builds, which do not inject the constant, behave as before.
+    var playerCleanerFeatures = (function () {
+        var features = { autoPictureInPicture: true, backgroundPlayback: true };
+        var injected = typeof __wblockPlayerCleanerFeatures === 'object' ? __wblockPlayerCleanerFeatures : null;
+        if (!injected) return features;
+        for (var key in features) {
+            if (typeof injected[key] === 'boolean') features[key] = injected[key];
+        }
+        return features;
+    })();
+    function featureEnabled(name) { return playerCleanerFeatures[name] !== false; }
+
     var AUTO_PIP_KEY = 'wblock.playerCleaner.autoPiP';
     var autoPiPEnabled = true;
 
     function getAutoPiP() {
+        if (!featureEnabled('autoPictureInPicture')) return false;
         try {
             var stored = localStorage.getItem(AUTO_PIP_KEY);
             return stored === null ? true : stored === '1';
