@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.37
+// @version      0.1.38
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1992,7 +1992,7 @@
         var english = {
             title: 'SponsorBlock settings', enabled: 'Enable SponsorBlock', notice: 'Show Undo after automatic skips',
             duration: 'Minimum segment length', current: 'Disable for this video', channel: 'Disable on this channel', reset: 'Reset defaults',
-            using: 'Using SponsorBlock', donate: 'Donate', close: 'Close',
+            using: 'About SponsorBlock', donate: 'Donate', close: 'Close',
             hideControls: 'Hide these controls (double-tap the video to show them)',
             any: 'Any length', auto: 'Auto skip', ask: 'Show skip button', off: 'Disabled',
             skipped: 'segment skipped', segment: 'segment', undo: 'Undo', skip: 'Skip',
@@ -2013,9 +2013,9 @@
         var channelLabels = { de:'Auf diesem Kanal deaktivieren', es:'Desactivar en este canal',
             fr:'Désactiver sur cette chaîne', it:'Disattiva su questo canale', pt:'Desativar neste canal',
             ja:'このチャンネルでは無効にする', ko:'이 채널에서 비활성화', ru:'Отключить на этом канале', zh:'对这个频道停用' };
-        var usingLabels = { de:'Verwendet SponsorBlock', es:'Usa SponsorBlock', fr:'Utilise SponsorBlock',
-            it:'Usa SponsorBlock', pt:'Usa SponsorBlock', ja:'SponsorBlockを使用', ko:'SponsorBlock 사용',
-            ru:'Использует SponsorBlock', zh:'使用 SponsorBlock' };
+        var usingLabels = { de:'Über SponsorBlock', es:'Acerca de SponsorBlock', fr:'À propos de SponsorBlock',
+            it:'Informazioni su SponsorBlock', pt:'Sobre o SponsorBlock', ja:'SponsorBlockについて', ko:'SponsorBlock 정보',
+            ru:'О SponsorBlock', zh:'关于 SponsorBlock' };
         if (!selected.channel) selected.channel = channelLabels[language] || english.channel;
         var donateLabels = { de:'Spenden', es:'Donar', fr:'Faire un don', it:'Dona', pt:'Doar', ja:'寄付', ko:'기부',
             ru:'Поддержать', zh:'捐款' };
@@ -4273,7 +4273,7 @@
                 sponsorMenu.appendChild(channelRow);
             }
             var footer = document.createElement('div');
-            footer.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-top:8px;padding-top:8px;' +
+            footer.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;margin-top:8px;padding-top:8px;' +
                 'border-top:1px solid rgba(255,255,255,.12)';
             var reset = document.createElement('button');
             reset.type = 'button'; reset.textContent = locale.reset;
@@ -4286,10 +4286,10 @@
             });
             // SponsorBlock data is CC BY-NC-SA 4.0; the credit link is a license term.
             var credits = document.createElement('span');
-            credits.style.cssText = 'display:inline-flex;gap:10px';
+            credits.style.cssText = 'display:inline-flex;flex-wrap:wrap;gap:10px';
             var credit = document.createElement('a');
             credit.href = 'https://sponsor.ajay.app/'; credit.target = '_blank'; credit.rel = 'noopener noreferrer';
-            credit.textContent = locale.using; credit.style.cssText = 'color:#69a9ff;text-decoration:none';
+            credit.textContent = locale.using; credit.style.cssText = 'color:#69a9ff;text-decoration:underline;text-underline-offset:2px';
             var donate = document.createElement('a');
             donate.href = 'https://sponsor.ajay.app/donate/'; donate.target = '_blank'; donate.rel = 'noopener noreferrer';
             donate.textContent = locale.donate; donate.style.cssText = 'color:#69a9ff;text-decoration:none';

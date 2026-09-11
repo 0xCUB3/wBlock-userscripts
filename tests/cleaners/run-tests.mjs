@@ -1394,7 +1394,7 @@ async function qualityUISelectionCheck(page, scenario) {
   });
   await check(page, 'desktop', 'credits SponsorBlock and links its donate page from the panel footer', () => {
     const links = [...document.querySelectorAll('.wblock-tc-sponsor-menu a')].map(a => a.href + '|' + a.textContent);
-    return { pass: links.includes('https://sponsor.ajay.app/|Using SponsorBlock') && links.includes('https://sponsor.ajay.app/donate/|Donate'),
+    return { pass: links.includes('https://sponsor.ajay.app/|About SponsorBlock') && links.includes('https://sponsor.ajay.app/donate/|Donate'),
       detail: links.join(' ') };
   });
   await check(page, 'desktop', 'closes the SponsorBlock panel from its Close button (#673)', () => {
