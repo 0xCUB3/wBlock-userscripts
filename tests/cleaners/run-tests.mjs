@@ -451,6 +451,8 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
     const observer = new MutationObserver(() => {});
     observer.observe(video, { attributes: true, attributeFilter: ['controls'] });
     video.controls = false;
+    video.controls = true;
+    video.controls = true;
     video.removeAttribute('controls');
     video.setAttribute('controls', '');
     if (typeof video.toggleAttribute === 'function') video.toggleAttribute('controls');
