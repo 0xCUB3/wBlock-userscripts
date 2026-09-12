@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.38
+// @version      0.1.39
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2535,23 +2535,53 @@
         return '';
     }
 
-    // Return the object from which chapter renderers are extracted. Keeping its
-    // identity lets applyChapters reject an old SPA payload while YouTube is
-    // still swapping the persistent player to the next video.
+    function chapterSourceVideoId(data) {
+        try {
+            var endpoint = data && data.currentVideoEndpoint;
+            if (endpoint && endpoint.watchEndpoint) return endpoint.watchEndpoint.videoId || '';
+        } catch (e) { /* try the player response */ }
+        try { return data && data.videoDetails && data.videoDetails.videoId || ''; }
+        catch (e) { return ''; }
+    }
+
+    // Initial globals keep the first watch page across SPA navigation. Prefer
+    // the live watch response and reject payloads owned by a different video.
     function chapterDataSource() {
         var sources = [];
-        try { if (window.ytInitialData) sources.push(window.ytInitialData); } catch (e) { /* ignore */ }
-        try { if (window.ytInitialPlayerResponse) sources.push(window.ytInitialPlayerResponse); } catch (e) { /* ignore */ }
+        try {
+            var watch = document.querySelector('ytd-watch-flexy');
+            if (watch && watch.data) sources.push({ data: watch.data, live: true });
+        } catch (e) { /* ignore */ }
+        try {
+            var app = document.querySelector('ytd-app');
+            if (app && app.data && app.data.response) sources.push({ data: app.data.response, live: true });
+        } catch (e) { /* ignore */ }
         try {
             var player = findPlayer();
             if (player && typeof player.getPlayerResponse === 'function') {
                 var response = player.getPlayerResponse();
-                if (response) sources.push(response);
+                if (response) sources.push({ data: response });
             }
         } catch (e) { /* ignore */ }
-        if (!sources.length) return null;
-        if (sources.length === 1) return sources[0];
-        return sources;
+        try { if (window.ytInitialData) sources.push({ data: window.ytInitialData }); } catch (e) { /* ignore */ }
+        try { if (window.ytInitialPlayerResponse) sources.push({ data: window.ytInitialPlayerResponse }); } catch (e) { /* ignore */ }
+        var videoId = currentChapterVideoId();
+        var unverified = null;
+        var emptyLive = null;
+        for (var i = 0; i < sources.length; i++) {
+            var source = sources[i].data;
+            var owner = chapterSourceVideoId(source);
+            if (owner && owner !== videoId) continue;
+            if (extractChapters(source)) {
+                if (owner === videoId) return source;
+                if (!unverified) unverified = source;
+            } else if (sources[i].live && owner === videoId) {
+                emptyLive = source;
+            }
+        }
+        // An identified, chapterless watch page must not inherit an unowned
+        // initial payload. Unidentified legacy payloads retain the fingerprint guard.
+        return emptyLive || unverified;
     }
 
     // Extract YouTube's chapters for the current video as a sorted list of
@@ -2742,7 +2772,8 @@
         var source = chapterDataSource();
         var chapters = extractChapters(source);
         var fingerprint = chapters ? JSON.stringify(chapters) : '[]';
-        var sourceIsFromPreviousVideo = !!(chapters && chapters.length &&
+        var sourceIsCurrentVideo = chapterSourceVideoId(source) === videoId;
+        var sourceIsFromPreviousVideo = !sourceIsCurrentVideo && !!(chapters && chapters.length &&
             ((video._wblockChapterVideoId && video._wblockChapterVideoId !== videoId &&
                 video._wblockChapterFingerprint === fingerprint) ||
              (video._wblockRejectedChapterFingerprint === fingerprint &&
@@ -2804,33 +2835,31 @@
             }
         }
 
-        // Duration is only known once metadata loads; re-apply from the cached
-        // chapter list so the final cue ends at the real media duration.
-        function onLoadedMetadata() {
-            if (applyChapters(video)) stopRetry();
+        function refreshChapters() {
+            if (applyChapters(video)) {
+                stopRetry();
+            } else if (timer === null) {
+                // Data events can precede hydration on every navigation, not
+                // just the first activation. Restart a bounded retry window.
+                attempts = 0;
+                timer = setInterval(function () {
+                    attempts++;
+                    if (applyChapters(video) || attempts >= 40) stopRetry();
+                }, 250);
+            }
         }
-        video.addEventListener('loadedmetadata', onLoadedMetadata);
 
-        function onYouTubeData() {
-            if (applyChapters(video)) stopRetry();
-        }
-        document.addEventListener('yt-page-data-updated', onYouTubeData, true);
-        document.addEventListener('yt-navigate-finish', onYouTubeData, true);
-
-        if (!applyChapters(video)) {
-            // Watch/SPA chapter lists often land after the player is already
-            // nativeized. Keep retrying through the usual YouTube hydration
-            // window instead of giving up after a few seconds.
-            timer = setInterval(function () {
-                attempts++;
-                if (applyChapters(video) || attempts >= 40) { stopRetry(); }
-            }, 250);
-        }
+        video.addEventListener('loadedmetadata', refreshChapters);
+        video.addEventListener('durationchange', refreshChapters);
+        document.addEventListener('yt-page-data-updated', refreshChapters, true);
+        document.addEventListener('yt-navigate-finish', refreshChapters, true);
+        refreshChapters();
 
         registerCleanup(function () {
-            video.removeEventListener('loadedmetadata', onLoadedMetadata);
-            document.removeEventListener('yt-page-data-updated', onYouTubeData, true);
-            document.removeEventListener('yt-navigate-finish', onYouTubeData, true);
+            video.removeEventListener('loadedmetadata', refreshChapters);
+            video.removeEventListener('durationchange', refreshChapters);
+            document.removeEventListener('yt-page-data-updated', refreshChapters, true);
+            document.removeEventListener('yt-navigate-finish', refreshChapters, true);
             stopRetry();
             removeChapterTrack(video);
         });
