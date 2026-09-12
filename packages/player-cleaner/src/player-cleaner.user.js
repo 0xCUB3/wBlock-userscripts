@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.36
+// @version      0.1.37
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -32,6 +32,10 @@
     'use strict';
 
     if (/(^|\.)amazon\.[a-z.]+$/i.test(location.hostname)) { return; }
+
+    // Player Cleaner can hide videos and surrounding post content on X.
+    // Leave the site untouched, including document-start media mutations.
+    if (/(^|\.)(x|twitter)\.com$/i.test(location.hostname)) { return; }
 
     // National Geographic uses Disney's BAM ManagedMediaSource player. On iOS,
     // even preflight media-element mutations can leave that player on a black
