@@ -863,6 +863,40 @@ async function iosAutoHideCheck(page, scenario) {
     return { pass: o === '0', detail: `opacity=${o}` };
   });
 
+  await check(page, scenario, 'touch completion suppresses mouse emulation without losing toolbar gestures', () => {
+    const video = document.querySelector('#movie_player video');
+    const toolbar = document.querySelector('.wblock-tc-toolbar');
+    const taps = [];
+    const record = e => taps.push(e.detail.doubleTap);
+    video.addEventListener('wblock-tc-video-tap', record);
+    const point = (x, id = 1) => ({ identifier: id, clientX: x, clientY: 100 });
+    const fire = (type, touches, changedTouches = touches, target = video) => {
+      const event = new Event(type, { bubbles: true, cancelable: true, composed: true });
+      Object.defineProperties(event, { touches: { value: touches }, changedTouches: { value: changedTouches } });
+      target.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    const single = () => { fire('touchstart', [point(100)]); return fire('touchend', [], [point(100)]); };
+    const first = single();
+    const revealed = toolbar.style.opacity === '1';
+    const second = single();
+    const hidden = toolbar.style.opacity === '0';
+    fire('touchstart', [point(100)]);
+    fire('touchmove', [point(130)]);
+    const drag = fire('touchend', [], [point(130)]);
+    fire('touchstart', [point(100)]);
+    fire('touchcancel', []);
+    fire('touchend', [], [point(100)]);
+    const remainingFinger = fire('touchend', [point(200, 2)], [point(100)]);
+    const toolbarTouch = fire('touchend', [], [point(100)], toolbar);
+    const pointer = new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'touch' });
+    video.dispatchEvent(pointer);
+    video.removeEventListener('wblock-tc-video-tap', record);
+    return { pass: first && second && drag && revealed && hidden && !remainingFinger && !toolbarTouch &&
+      !pointer.defaultPrevented && taps.length === 2 && taps[0] === false && taps[1] === true,
+      detail: JSON.stringify({ first, second, drag, revealed, hidden, remainingFinger, toolbarTouch, taps }) };
+  });
+
   // Pause shows the toolbar and keeps it visible.
   await setPaused();
   await check(page, scenario, 'iOS pause reveals the toolbar', () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.40
+// @version      0.1.41
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1567,6 +1567,7 @@
         forceNativeControls(video);
         guardNativeControls(video);
         pinNativeControls(video);
+        setupNativeTouchControls(video);
 
         // Safari's controls live in WebKit's shadow tree, so let events reach
         // the video in the bubble phase but stop YouTube's outer player shell
@@ -1826,6 +1827,59 @@
                 video.removeAttribute('x-webkit-airplay');
             }
         } catch (e) { /* ignore */ }
+    }
+
+    function setupNativeTouchControls(video) {
+        if (!IS_IOS) return;
+        var touch = null;
+        var lastTap = null;
+
+        function begin(event) {
+            if (event.touches.length !== 1) { touch = null; lastTap = null; return; }
+            var point = event.touches[0];
+            touch = { id: point.identifier, x: point.clientX, y: point.clientY, time: Date.now() };
+        }
+        function move(event) {
+            if (!touch) return;
+            var point = event.touches[0];
+            if (event.touches.length !== 1 || point.identifier !== touch.id ||
+                Math.hypot(point.clientX - touch.x, point.clientY - touch.y) > 10) {
+                touch = null;
+                lastTap = null;
+            }
+        }
+        function cancel() { touch = null; lastTap = null; }
+        function end(event) {
+            if (event.target !== video || event.touches.length) { cancel(); return; }
+            // iPadOS emits compatibility mouse exits after a tap, immediately
+            // fading WebKit's native controls. Cancel their generation, not the
+            // pointer stream used by native buttons and scrubbers.
+            event.preventDefault();
+            var point = event.changedTouches[0];
+            var now = Date.now();
+            var tap = touch;
+            touch = null;
+            if (!tap || !point || point.identifier !== tap.id || now - tap.time > 500 ||
+                Math.hypot(point.clientX - tap.x, point.clientY - tap.y) > 10) {
+                lastTap = null;
+                return;
+            }
+            // Notify our toolbar without synthetic mouse events to WebKit.
+            var doubleTap = !!(lastTap && now - lastTap.time < 350 &&
+                Math.hypot(point.clientX - lastTap.x, point.clientY - lastTap.y) < 30);
+            lastTap = doubleTap ? null : { time: now, x: point.clientX, y: point.clientY };
+            video.dispatchEvent(new CustomEvent('wblock-tc-video-tap', { detail: { doubleTap: doubleTap } }));
+        }
+        video.addEventListener('touchstart', begin, { capture: true, passive: true });
+        video.addEventListener('touchmove', move, { capture: true, passive: true });
+        video.addEventListener('touchcancel', cancel, true);
+        video.addEventListener('touchend', end, { capture: true, passive: false });
+        registerCleanup(function () {
+            video.removeEventListener('touchstart', begin, true);
+            video.removeEventListener('touchmove', move, true);
+            video.removeEventListener('touchcancel', cancel, true);
+            video.removeEventListener('touchend', end, true);
+        });
     }
 
     function forceNativeControls(video) {
@@ -4384,7 +4438,7 @@
             // Safari's own control-chrome behavior. It stays visible while a
             // settings panel is open and while the video is paused. Native iOS
             // media controls occupy the bottom strip, but taps on the rest of
-            // the video bubble through to the element's own click listener.
+            // the video reach the touch-tap listener without mouse emulation.
             var toolbarTimer = null;
             var TOOLBAR_HIDE_DELAY = 3000;
 
@@ -4456,6 +4510,12 @@
             }
             document.addEventListener('wblock-tc-toolbar-pref', onToolbarPref);
 
+            function onNativeVideoTap(event) {
+                if (event.detail.doubleTap && toolbarUserHidden) onVideoReveal();
+                else onVideoTap(event);
+            }
+            video.addEventListener('wblock-tc-video-tap', onNativeVideoTap);
+
             // Keep visible while the toolbar itself is being touched.
             toolbar.addEventListener('touchstart', function () {
                 showToolbar();
@@ -4482,6 +4542,7 @@
             registerCleanup(function () {
                 clearTimeout(toolbarTimer);
                 video.removeEventListener('click', onVideoTap);
+                video.removeEventListener('wblock-tc-video-tap', onNativeVideoTap);
                 video.removeEventListener('dblclick', onVideoReveal);
                 document.removeEventListener('wblock-tc-toolbar-pref', onToolbarPref);
                 video.removeEventListener('play', onVideoPlay);
