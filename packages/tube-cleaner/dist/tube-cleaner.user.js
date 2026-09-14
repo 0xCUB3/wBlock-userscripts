@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.42
+// @version      0.1.43
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -4432,6 +4432,78 @@
             return toolbarUserHidden && !toolbarRevealOverride && !anyToolbarPanelOpen();
         }
 
+        // WebKit's AutoHideController uses a four-second idle deadline and
+        // suspends it during pointer interaction. Its shadow-tree visibility
+        // is private, so mirror the public input and playback signals.
+        var toolbarPointers = new Set();
+        var nativeControlHover = false;
+        function toolbarInteractionActive() {
+            return toolbarPointers.size > 0 || nativeControlHover || video.seeking ||
+                video.webkitCurrentPlaybackTargetIsWireless;
+        }
+        function bindNativeToolbarInteractions(show, schedule) {
+            function down(event) {
+                if (!player.contains(event.target)) return;
+                toolbarPointers.add(event.pointerId);
+                clearTimeout(toolbarTimer);
+                if (event.pointerType === 'mouse') show();
+            }
+            function up(event) {
+                if (toolbarPointers.delete(event.pointerId)) schedule();
+            }
+            function move(event) {
+                if (event.pointerType !== 'mouse') return;
+                var wasHovering = nativeControlHover;
+                var rect = video.getBoundingClientRect();
+                // Native controls do not expose their hit-test rectangles.
+                // Keep the bottom control strip reachable while hovering it.
+                nativeControlHover = event.target === video && event.clientX >= rect.left &&
+                    event.clientX <= rect.right && event.clientY <= rect.bottom &&
+                    event.clientY >= rect.bottom - Math.min(64, rect.height / 3);
+                if (player.contains(event.target)) { show(); schedule(); }
+                else if (wasHovering) schedule();
+            }
+            function leave(event) {
+                nativeControlHover = false;
+                toolbarPointers.delete(event.pointerId);
+                schedule();
+            }
+            function reset() {
+                toolbarPointers.clear();
+                nativeControlHover = false;
+                schedule();
+            }
+            function wirelessChanged() {
+                if (video.webkitCurrentPlaybackTargetIsWireless) show();
+                schedule();
+            }
+            document.addEventListener('pointerdown', down, true);
+            document.addEventListener('pointerup', up, true);
+            document.addEventListener('pointercancel', up, true);
+            document.addEventListener('pointermove', move, true);
+            player.addEventListener('pointerleave', leave);
+            window.addEventListener('blur', reset);
+            video.addEventListener('webkitpresentationmodechanged', reset);
+            video.addEventListener('seeking', show);
+            video.addEventListener('seeked', schedule);
+            video.addEventListener('ended', show);
+            video.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', wirelessChanged);
+            registerCleanup(function () {
+                toolbarPointers.clear();
+                document.removeEventListener('pointerdown', down, true);
+                document.removeEventListener('pointerup', up, true);
+                document.removeEventListener('pointercancel', up, true);
+                document.removeEventListener('pointermove', move, true);
+                player.removeEventListener('pointerleave', leave);
+                window.removeEventListener('blur', reset);
+                video.removeEventListener('webkitpresentationmodechanged', reset);
+                video.removeEventListener('seeking', show);
+                video.removeEventListener('seeked', schedule);
+                video.removeEventListener('ended', show);
+                video.removeEventListener('webkitcurrentplaybacktargetiswirelesschanged', wirelessChanged);
+            });
+        }
+
         if (IS_IOS) {
             // The mobile toolbar auto-hides a few seconds after playback
             // resumes and reappears on a tap to the video surface, mirroring
@@ -4440,7 +4512,7 @@
             // media controls occupy the bottom strip, but taps on the rest of
             // the video reach the touch-tap listener without mouse emulation.
             var toolbarTimer = null;
-            var TOOLBAR_HIDE_DELAY = 3000;
+            var TOOLBAR_HIDE_DELAY = 4000;
 
             function showToolbar() {
                 if (toolbarSuppressed()) return;
@@ -4449,20 +4521,22 @@
                 toolbar.classList.remove('wblock-tc-toolbar-hidden');
                 clearTimeout(toolbarTimer);
             }
-            function hideToolbar() {
+            function hideToolbar(force) {
                 // Never hide while a settings panel is open — the controls
                 // that opened it must remain reachable to close it again.
                 var panels = [qualityMenu, sponsorMenu];
                 var anyOpen = panels.some(function (p) {
                     return p && p.style.display !== 'none' && p.style.display !== '';
                 });
-                if (anyOpen) { scheduleHideToolbar(); return; }
+                if (anyOpen || (!force && !toolbarSuppressed() &&
+                    (toolbarInteractionActive() || video.paused || video.ended))) { scheduleHideToolbar(); return; }
                 toolbar.style.opacity = '0';
                 toolbar.style.setProperty('pointer-events', 'none', 'important');
                 toolbar.classList.add('wblock-tc-toolbar-hidden');
             }
             function scheduleHideToolbar() {
                 clearTimeout(toolbarTimer);
+                if (!toolbarUserHidden && (toolbarInteractionActive() || video.paused || video.ended)) return;
                 toolbarTimer = setTimeout(hideToolbar, TOOLBAR_HIDE_DELAY);
             }
 
@@ -4476,7 +4550,7 @@
                 // the toolbar is a sibling of the video, not a child, so this
                 // listener only fires for taps on the video itself.
                 if (isToolbarVisible()) {
-                    hideToolbar();
+                    hideToolbar(true);
                 } else {
                     showToolbar();
                     if (!video.paused && !video.ended) { scheduleHideToolbar(); }
@@ -4528,6 +4602,8 @@
             video.addEventListener('play', onVideoPlay);
             video.addEventListener('pause', onVideoPause);
 
+            bindNativeToolbarInteractions(showToolbar, scheduleHideToolbar);
+
             // Initial state: visible if paused, auto-hide once playing. The
             // hide preference starts it hidden outright.
             if (toolbarUserHidden) {
@@ -4555,7 +4631,7 @@
             toolbar.classList.add('wblock-tc-toolbar-hidden');
 
             var toolbarTimer = null;
-            var TOOLBAR_HIDE_DELAY = 3000;
+            var TOOLBAR_HIDE_DELAY = 4000;
             var _isOverPlayer = false;
             var _isOverToolbar = false;
 
@@ -4584,7 +4660,7 @@
             }
 
             function hideToolbar() {
-                if (!toolbarSuppressed() && (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended)) {
+                if (!toolbarSuppressed() && (desktopPanelOpen() || _isOverToolbar || toolbarInteractionActive() || video.paused || video.ended)) {
                     showToolbar();
                     return;
                 }
@@ -4594,7 +4670,7 @@
             }
 
             function scheduleHideToolbar() {
-                if (!toolbarSuppressed() && (desktopPanelOpen() || _isOverToolbar || video.paused || video.ended)) {
+                if (!toolbarSuppressed() && (desktopPanelOpen() || _isOverToolbar || toolbarInteractionActive() || video.paused || video.ended)) {
                     showToolbar();
                     return;
                 }
@@ -4680,10 +4756,12 @@
                 if (video.webkitPresentationMode === 'picture-in-picture') {
                     showToolbar();
                     clearTimeout(presentationTimer);
-                    presentationTimer = setTimeout(hideToolbar, 3000);
+                    presentationTimer = setTimeout(hideToolbar, TOOLBAR_HIDE_DELAY);
                 }
             }
             video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
+
+            bindNativeToolbarInteractions(showToolbar, scheduleHideToolbar);
 
             // Match the initially visible native controls without requiring movement.
             if (!toolbarUserHidden) {

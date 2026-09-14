@@ -846,7 +846,7 @@ async function iosAutoHideCheck(page, scenario) {
 
   // Auto-hide after play.
   await setPlaying();
-  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 4000 });
+  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 5000 });
   await check(page, scenario, 'iOS toolbar auto-hides after playback resumes', () => ({ pass: true, detail: 'hidden after play' }));
 
   // Tap the video to reveal.
@@ -907,7 +907,7 @@ async function iosAutoHideCheck(page, scenario) {
   // While a settings panel is open, the auto-hide timer must not hide it.
   await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
   await setPlaying();
-  await page.waitForTimeout(3200);
+  await page.waitForTimeout(4200);
   await check(page, scenario, 'iOS toolbar stays visible while a settings panel is open', () => {
     const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
     return { pass: o === '1', detail: `opacity=${o}` };
@@ -1645,7 +1645,7 @@ async function qualityUISelectionCheck(page, scenario) {
     Object.defineProperty(video, 'ended', { configurable: true, get: () => false });
     video.dispatchEvent(new Event('play'));
   });
-  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 4000 });
+  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 5000 });
   await check(page, 'desktop', 'desktop toolbar auto-hides after playback while the pointer stays over the player', () => {
     const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
     return { pass: o === '0', detail: `opacity=${o}` };
@@ -1665,7 +1665,7 @@ async function qualityUISelectionCheck(page, scenario) {
   await page.waitForTimeout(200);
   await page.mouse.move(24, 80);
   await page.mouse.move(80, 140);
-  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 4000 });
+  await page.waitForFunction(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '0', undefined, { timeout: 5000 });
   await check(page, 'desktop', 'desktop toolbar still hides after leaving the player even if the pointer keeps moving', () => {
     const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
     return { pass: o === '0', detail: `opacity=${o}` };
