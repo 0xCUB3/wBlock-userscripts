@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.41
+// @version      0.1.42
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -5406,22 +5406,35 @@
 
     function applyDeArrowTitleElement(element, customTitle) {
         if (!element) return;
-        var current = element.textContent || '';
-        if (element._wblockDeArrowOriginalText === undefined ||
-            current !== element._wblockDeArrowCustomText && current !== element._wblockDeArrowOriginalText) {
-            element._wblockDeArrowOriginalText = current;
-        }
+        var saved = element._wblockDeArrowTextNodes || new WeakMap();
+        element._wblockDeArrowTextNodes = saved;
         element._wblockDeArrowCustomText = customTitle;
         element.setAttribute('data-wblock-dearrow-title', '');
-        if (!element._wblockDeArrowShowingOriginal && current !== customTitle) element.textContent = customTitle;
+        // YouTube retains references to these nodes across SPA renders. Replacing
+        // their parent textContent strands our title when YouTube removes its runs.
+        var walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        var node;
+        var first = true;
+        while ((node = walker.nextNode())) {
+            var record = saved.get(node);
+            if (!record || node.data !== record.applied) record = { original: node.data };
+            var value = element._wblockDeArrowShowingOriginal ? record.original : (first ? customTitle : '');
+            if (node.data !== value) node.data = value;
+            record.applied = value;
+            saved.set(node, record);
+            first = false;
+        }
     }
 
     function restoreDeArrowTitleElement(element) {
-        if (!element || element._wblockDeArrowOriginalText === undefined) return;
-        if (element.textContent === element._wblockDeArrowCustomText) {
-            element.textContent = element._wblockDeArrowOriginalText;
+        if (!element || !element._wblockDeArrowTextNodes) return;
+        var walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        var node;
+        while ((node = walker.nextNode())) {
+            var record = element._wblockDeArrowTextNodes.get(node);
+            if (record && node.data === record.applied && node.data !== record.original) node.data = record.original;
         }
-        delete element._wblockDeArrowOriginalText;
+        delete element._wblockDeArrowTextNodes;
         delete element._wblockDeArrowCustomText;
         delete element._wblockDeArrowShowingOriginal;
         element.removeAttribute('data-wblock-dearrow-title');
@@ -5562,9 +5575,9 @@
             card._wblockDeArrowShowingOriginal = true;
             var title = card._wblockDeArrowTitleElement;
             var image = card._wblockDeArrowThumbnailElement;
-            if (title && title._wblockDeArrowOriginalText !== undefined) {
+            if (title && title._wblockDeArrowTextNodes) {
                 title._wblockDeArrowShowingOriginal = true;
-                title.textContent = title._wblockDeArrowOriginalText;
+                applyDeArrowTitleElement(title, title._wblockDeArrowCustomText);
             }
             if (image && image._wblockDeArrowOriginalSrc !== undefined) {
                 image._wblockDeArrowShowingOriginal = true;
@@ -5581,7 +5594,7 @@
             var image = card._wblockDeArrowThumbnailElement;
             if (title) {
                 title._wblockDeArrowShowingOriginal = false;
-                if (settings.replaceTitles && title._wblockDeArrowCustomText) title.textContent = title._wblockDeArrowCustomText;
+                if (settings.replaceTitles && title._wblockDeArrowCustomText) applyDeArrowTitleElement(title, title._wblockDeArrowCustomText);
             }
             if (image) {
                 image._wblockDeArrowShowingOriginal = false;
@@ -5711,9 +5724,11 @@
             var currentSettings = loadDeArrowSettings();
             if (!currentSettings.enabled || !currentSettings.replaceTitles || currentDeArrowVideoId() !== videoId) return;
             var customTitle = deArrowAcceptedTitle(branding);
-            if (!customTitle) return;
             var titles = document.querySelectorAll(DEARROW_WATCH_TITLE_SELECTOR);
-            for (var i = 0; i < titles.length; i++) applyDeArrowTitleElement(titles[i], customTitle);
+            for (var i = 0; i < titles.length; i++) {
+                if (customTitle) applyDeArrowTitleElement(titles[i], customTitle);
+                else restoreDeArrowTitleElement(titles[i]);
+            }
         });
     }
 
