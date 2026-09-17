@@ -5241,6 +5241,10 @@
     // server-provided random timestamp when a video has no accepted thumbnail.
 
     var DEARROW_API = 'https://sponsor.ajay.app/api/branding';
+    // Stand-in video length, in seconds, for branding responses that leave
+    // videoDuration null. Only scales the random fraction; any positive value
+    // yields a valid frame.
+    var DEARROW_FALLBACK_DURATION = 300;
     var DEARROW_THUMBNAIL_API = 'https://dearrow-thumb.ajay.app/api/v1/getThumbnail';
     var DEARROW_CARD_SELECTOR = [
         'ytd-rich-grid-media', 'ytd-video-renderer', 'ytd-compact-video-renderer',
@@ -5258,6 +5262,7 @@
     var deArrowBrandingCache = {};
     var deArrowBrandingCacheOrder = [];
     var deArrowActiveRequests = {};
+    var deArrowActiveRequestCount = 0;
     var deArrowIntersectionObserver = null;
     var deArrowPendingScanRoots = [];
     var deArrowScanScheduled = false;
@@ -5369,6 +5374,7 @@
         if (cached !== undefined) return Promise.resolve(cached);
         if (deArrowActiveRequests[videoId]) return deArrowActiveRequests[videoId];
         if (!window.fetch) return Promise.resolve(null);
+        deArrowActiveRequestCount++;
 
         var request;
         if (hashLookup && window.crypto && crypto.subtle && window.TextEncoder) {
@@ -5418,9 +5424,12 @@
 
     // DeArrow supplies a stable randomTime when it has one. The deterministic
     // fallback avoids a thumbnail changing on every scan for older responses.
+    // The branding endpoint reports videoDuration as null for many videos, so
+    // the fraction is scaled by a fixed length when the server does not say.
     function deArrowRandomThumbnailTimestamp(videoId, branding) {
-        if (!branding || !isFinite(branding.videoDuration) || branding.videoDuration <= 0) return null;
-        var fraction = branding.randomTime;
+        var duration = Number(branding && branding.videoDuration);
+        if (!isFinite(duration) || duration <= 0) duration = DEARROW_FALLBACK_DURATION;
+        var fraction = branding && branding.randomTime;
         if (!isFinite(fraction) || fraction < 0) {
             var hash = 2166136261;
             for (var i = 0; i < videoId.length; i++) {
@@ -5431,7 +5440,7 @@
         }
         // Match DeArrow's policy of keeping fallback frames out of the ending.
         fraction = Math.min(Math.max(Number(fraction), 0), 0.9);
-        return fraction * branding.videoDuration;
+        return fraction * duration;
     }
 
     function deArrowVideoIdFromUrl(value) {
@@ -5904,6 +5913,17 @@
 
     window.__wblockDeArrowDebug = {
         refresh: refreshDeArrowBranding,
+        // Lets a page-console probe inspect the effective configuration and the
+        // branding the script holds for a video without reaching into closures.
+        state: function (videoId) {
+            var branding = videoId ? cachedDeArrowBranding(videoId) : undefined;
+            return {
+                settings: JSON.parse(JSON.stringify(loadDeArrowSettings())),
+                branding: branding === undefined ? 'not-fetched' : branding,
+                watchVideoId: currentDeArrowVideoId(),
+                requests: deArrowActiveRequestCount
+            };
+        },
         setSetting: function (key, value) {
             if (typeof __wblockDeArrowSettings !== 'object') return false;
             __wblockDeArrowSettings[key] = value;

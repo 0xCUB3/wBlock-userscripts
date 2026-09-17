@@ -170,8 +170,10 @@ const __wblockDeArrowSettings = { enabled: true, replaceTitles: true, replaceThu
         thumbnails: [{ timestamp: 12.5, original: false, votes: 3, locked: false }]
       };
       var randomFallback = { titles: [], thumbnails: [], videoDuration: 120, randomTime: 0.25 };
+      var nullDurationFallback = { titles: [], thumbnails: [], videoDuration: null, randomTime: 0.5 };
       var payload = value.indexOf('videoID=CARDVID1234') !== -1 ? card :
-        value.indexOf('videoID=RANDOMVID01') !== -1 ? randomFallback : { dQw4w9WgXcQ: watch };
+        value.indexOf('videoID=RANDOMVID01') !== -1 ? randomFallback :
+        value.indexOf('videoID=NULLDURV012') !== -1 ? nullDurationFallback : { dQw4w9WgXcQ: watch };
       return Promise.resolve({ ok: true, status: 200, json: function () { return Promise.resolve(payload); } });
     }
     return nativeFetch.apply(this, arguments);
@@ -1411,6 +1413,19 @@ async function qualityUISelectionCheck(page, scenario) {
     const image = document.querySelector('[data-video-id="RANDOMVID01"] img');
     const requested = image?.getAttribute('data-wblock-dearrow-thumbnail') || '';
     return { pass: requested.includes('dearrow-thumb.ajay.app/api/v1/getThumbnail') && requested.includes('time=30'), detail: `requested=${requested}` };
+  });
+  await page.evaluate(() => {
+    const card = document.createElement('ytd-compact-video-renderer');
+    card.setAttribute('data-video-id', 'NULLDURV012');
+    card.setAttribute('data-channel-id', 'other-channel');
+    card.innerHTML = '<a id="thumbnail" href="/watch?v=NULLDURV012"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="></a><a id="video-title" href="/watch?v=NULLDURV012">Original null-duration video</a>';
+    document.getElementById('recommendations').appendChild(card);
+  });
+  await page.waitForFunction(() => document.querySelector('[data-video-id="NULLDURV012"] img')?.getAttribute('src')?.startsWith('blob:'));
+  await check(page, 'desktop', 'still offers a random frame when branding leaves videoDuration null', () => {
+    const image = document.querySelector('[data-video-id="NULLDURV012"] img');
+    const requested = image?.getAttribute('data-wblock-dearrow-thumbnail') || '';
+    return { pass: requested.includes('time=150'), detail: `requested=${requested}` };
   });
   await page.evaluate(() => {
     document.querySelector('.wblock-tc-sponsor-button').click();
