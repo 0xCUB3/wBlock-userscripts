@@ -611,6 +611,24 @@
         '{ background: rgba(255,255,255,0.15) !important; }',
         '.wblock-tc-quality-menu button:focus',
         '{ outline: none; }',
+
+        // YouTube reuses #movie_player for its floating miniplayer. Keep its
+        // close button and compact transport visible even while the watch
+        // player is nativeized. transformPlayer() releases the native mode
+        // when this class appears; these rules cover the paint transition.
+        '#movie_player.ytp-small-mode .ytp-chrome-top,',
+        '#movie_player.ytp-small-mode .ytp-chrome-bottom,',
+        '#movie_player.ytp-small-mode .ytp-gradient-top,',
+        '#movie_player.ytp-small-mode .ytp-gradient-bottom,',
+        '#movie_player.ytp-small-mode .ytp-chrome-controls,',
+        '#movie_player.ytp-small-mode .ytp-miniplayer-close-button,',
+        '#movie_player.ytp-miniplayer .ytp-chrome-top,',
+        '#movie_player.ytp-miniplayer .ytp-chrome-bottom,',
+        '#movie_player.ytp-miniplayer .ytp-gradient-top,',
+        '#movie_player.ytp-miniplayer .ytp-gradient-bottom,',
+        '#movie_player.ytp-miniplayer .ytp-chrome-controls,',
+        '#movie_player.ytp-miniplayer .ytp-miniplayer-close-button',
+        '{ display: revert !important; pointer-events: auto !important; }',
     ].join(' ');
 
     // On mobile YouTube, html5-video-container is the positioned box that
@@ -3453,6 +3471,13 @@
         return best;
     }
 
+    function isMiniPlayer(player) {
+        if (!player || !player.classList) return false;
+        return player.classList.contains('ytp-small-mode') ||
+            player.classList.contains('ytp-miniplayer') ||
+            !!document.querySelector('ytd-miniplayer #movie_player, ytm-miniplayer #movie_player');
+    }
+
     function isShortsPath() {
         return /^\/shorts(?:\/|$)/.test(location.pathname);
     }
@@ -3509,6 +3534,18 @@
 
         var player = findPlayer();
         if (!player) return;
+
+        if (isMiniPlayer(player)) {
+            if (playerObserver) {
+                try { playerObserver.disconnect(); } catch (e) { /* ignore */ }
+                playerObserver = null;
+            }
+            if (activeVideo) { releaseActiveVideo(); }
+            player.classList.remove('wblock-tc-native');
+            player.removeAttribute(ATTR_CLEANED);
+            setAudioOnlyStyles(false);
+            return;
+        }
 
         var video = player.querySelector('video');
         if (!video) return;

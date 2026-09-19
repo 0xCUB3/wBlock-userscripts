@@ -2216,6 +2216,39 @@ HTMLElement.prototype.setOption = function (module, option, value) {
   await browser.close();
 }
 
+// ---- Scenario: Tube Cleaner releases YouTube miniplayer ------------------
+// The floating player owns its close button and compact custom transport.
+// Nativeizing that persistent player hides the only way to dismiss it.
+{
+  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (miniplayer)', {
+    fixture: FIXTURE_URL,
+    readySignal: '#movie_player.wblock-tc-native',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'tube-cleaner-miniplayer';
+  await page.evaluate(() => {
+    const player = document.querySelector('#movie_player');
+    const close = document.createElement('button');
+    close.className = 'ytp-miniplayer-close-button';
+    close.textContent = 'close';
+    player.querySelector('.ytp-chrome-bottom').append(close);
+    player.classList.add('ytp-small-mode');
+  });
+  await page.waitForTimeout(80);
+  await check(page, S, 'releases native mode when miniplayer starts', () => {
+    const player = document.querySelector('#movie_player');
+    return { pass: !!player && !player.classList.contains('wblock-tc-native') &&
+      !player.hasAttribute('data-wblock-tc-cleaned'), detail: player && player.className };
+  });
+  await check(page, S, 'keeps the miniplayer close button visible', () => {
+    const close = document.querySelector('.ytp-miniplayer-close-button');
+    return { pass: !!close && getComputedStyle(close).display !== 'none',
+      detail: close ? `display=${getComputedStyle(close).display}` : 'no close button' };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario 5: Tube Cleaner resource lifecycle ------------------------
 {
   const { browser, page, pageErrors } = await runScenario('Tube Cleaner (resource lifecycle)', {
