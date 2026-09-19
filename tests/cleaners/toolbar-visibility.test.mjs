@@ -33,6 +33,15 @@ try {
         pointerType: mobile ? 'touch' : 'mouse', clientX: rect.left + rect.width / 2,
         clientY: bottom ? rect.bottom - 20 : rect.top + rect.height / 2 }));
     }, { type, bottom, mobile });
+    const mouse = async (type, selector = '#movie_player', relatedTarget = null) => page.evaluate(({ type, selector, relatedTarget }) => {
+      const target = document.querySelector(selector);
+      const video = document.querySelector('#movie_player video');
+      const rect = video.getBoundingClientRect();
+      target.dispatchEvent(new MouseEvent(type, {
+        bubbles: true, composed: true, relatedTarget: relatedTarget ? document.querySelector(relatedTarget) : null,
+        clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2
+      }));
+    }, { type, selector, relatedTarget });
     await state({ paused: false, ended: false }, 'play');
     await page.clock.runFor(3100);
     assert.equal(await visible(), true, 'custom controls must not fade a second before WebKit’s four-second idle deadline');
@@ -50,6 +59,18 @@ try {
     await state({ seeking: false }, 'seeked');
     await page.clock.runFor(4100);
     assert.equal(await visible(), false, 'idle hide resumes after seeking');
+    if (!mobile) {
+      await pointer('pointermove', true);
+      await mouse('mouseleave');
+      await page.clock.runFor(50);
+      assert.equal(await visible(), false, 'leaving the player hides controls immediately');
+      await mouse('mousemove');
+      await page.clock.runFor(50);
+      assert.equal(await visible(), true, 're-entering the player shows controls immediately');
+      await mouse('mouseout', '#movie_player', null);
+      await page.clock.runFor(50);
+      assert.equal(await visible(), false, 'leaving the window hides controls immediately');
+    }
     await state({ webkitCurrentPlaybackTargetIsWireless: true }, 'webkitcurrentplaybacktargetiswirelesschanged');
     await page.clock.runFor(4100);
     assert.equal(await visible(), true, 'AirPlay controls must stay visible like WebKit’s');

@@ -4671,6 +4671,9 @@
             var TOOLBAR_HIDE_DELAY = 4000;
             var _isOverPlayer = false;
             var _isOverToolbar = false;
+            function clearNativeControlHover() {
+                nativeControlHover = false;
+            }
 
             function desktopPanelOpen() {
                 var panels = [qualityMenu, sponsorMenu];
@@ -4729,11 +4732,15 @@
                 }
                 if (_isOverPlayer || _isOverToolbar) {
                     _isOverPlayer = false;
-                    if (!desktopPanelOpen() && !_isOverToolbar) { scheduleHideToolbar(); }
+                    if (!_isOverToolbar) {
+                        clearNativeControlHover();
+                        hideToolbar();
+                    }
                 }
             }
             // The video stops bubbling mouse events to protect native controls.
             document.addEventListener('mousemove', onDocumentMouseMove, true);
+            document.addEventListener('mouseout', onDocumentMouseOut, true);
 
             function onPlayerMouseEnter() {
                 _isOverPlayer = true;
@@ -4742,7 +4749,16 @@
             }
             function onPlayerMouseLeave() {
                 _isOverPlayer = false;
-                if (!_isOverToolbar) { hideToolbar(); }
+                if (!_isOverToolbar) {
+                    clearNativeControlHover();
+                    hideToolbar();
+                }
+            }
+            function onDocumentMouseOut(e) {
+                if (e.relatedTarget) return;
+                _isOverPlayer = false;
+                clearNativeControlHover();
+                if (!_isOverToolbar) hideToolbar();
             }
             player.addEventListener('mouseenter', onPlayerMouseEnter);
             player.addEventListener('mouseleave', onPlayerMouseLeave);
@@ -4810,6 +4826,7 @@
                 clearTimeout(toolbarTimer);
                 clearTimeout(presentationTimer);
                 document.removeEventListener('mousemove', onDocumentMouseMove, true);
+                document.removeEventListener('mouseout', onDocumentMouseOut, true);
                 video.removeEventListener('dblclick', onVideoReveal);
                 document.removeEventListener('wblock-tc-toolbar-pref', onToolbarPref);
                 player.removeEventListener('mouseenter', onPlayerMouseEnter);
