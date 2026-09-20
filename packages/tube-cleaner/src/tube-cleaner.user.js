@@ -4757,8 +4757,9 @@
             function onDocumentMouseOut(e) {
                 if (e.relatedTarget) return;
                 _isOverPlayer = false;
+                _isOverToolbar = false;
                 clearNativeControlHover();
-                if (!_isOverToolbar) hideToolbar();
+                hideToolbar();
             }
             player.addEventListener('mouseenter', onPlayerMouseEnter);
             player.addEventListener('mouseleave', onPlayerMouseLeave);

@@ -67,9 +67,21 @@ try {
       await mouse('mousemove');
       await page.clock.runFor(50);
       assert.equal(await visible(), true, 're-entering the player shows controls immediately');
-      await mouse('mouseout', '#movie_player', null);
+      await mouse('mouseenter', '.wblock-tc-toolbar');
       await page.clock.runFor(50);
-      assert.equal(await visible(), false, 'leaving the window hides controls immediately');
+      assert.equal(await visible(), true, 'hovering the custom toolbar keeps controls visible');
+      await mouse('mouseout', '.wblock-tc-toolbar', null);
+      await page.clock.runFor(50);
+      assert.equal(await visible(), false, 'leaving the window while hovering the toolbar hides controls immediately');
+
+      await mouse('mouseenter', '.wblock-tc-toolbar');
+      await page.evaluate(() => document.querySelector('.wblock-tc-quality-button').click());
+      assert.equal(await page.evaluate(() => document.querySelector('.wblock-tc-quality-menu')?.style.display), 'block', 'quality settings should open');
+      await mouse('mouseout', '.wblock-tc-toolbar', null);
+      await page.clock.runFor(50);
+      assert.equal(await visible(), true, 'leaving the window must not hide an open settings panel');
+      assert.equal(await page.evaluate(() => document.querySelector('.wblock-tc-quality-menu')?.style.display), 'block', 'open quality settings must remain reachable');
+      await page.evaluate(() => document.querySelector('.wblock-tc-quality-button').click());
     }
     await state({ webkitCurrentPlaybackTargetIsWireless: true }, 'webkitcurrentplaybacktargetiswirelesschanged');
     await page.clock.runFor(4100);
