@@ -67,6 +67,9 @@ try {
       await mouse('mousemove');
       await page.clock.runFor(50);
       assert.equal(await visible(), true, 're-entering the player shows controls immediately');
+      await mouse('mouseout', '#movie_player', null);
+      await page.clock.runFor(50);
+      assert.equal(await visible(), false, 'leaving the window from the player hides controls immediately');
       await mouse('mouseenter', '.wblock-tc-toolbar');
       await page.clock.runFor(50);
       assert.equal(await visible(), true, 'hovering the custom toolbar keeps controls visible');
