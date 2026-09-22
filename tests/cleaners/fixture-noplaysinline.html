@@ -51,7 +51,7 @@
       player.getAvailableQualityLevels = function () { return available.slice(); };
       player.getPlaybackQuality = function () { return current; };
       player.setPlaybackQuality = function (q) { current = q; };
-      player.setPlaybackQualityRange = function (lo, hi) { /* SABR: no-op */ };
+      player.setPlaybackQualityRange = function (lo, hi) { if (lo === hi) current = lo; }; // SABR switches only on an exact pin
       player.getVideoData = function () { return { video_id: 'TESTVID123' }; };
       player.getPlayerState = function () { return state; };
 

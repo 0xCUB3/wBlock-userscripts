@@ -68,6 +68,7 @@
       window.__qualityRangeCalls = [];
       player.setPlaybackQualityRange = function (lo, hi) {
         window.__qualityRangeCalls.push([lo, hi]);
+        if (lo === hi) current = lo; // SABR switches only on an exact pin
       };
       player.getVideoData = function () { return { video_id: 'TESTVID123' }; };
       player.getPlayerState = function () { return state; };

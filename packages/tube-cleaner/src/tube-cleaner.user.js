@@ -3856,27 +3856,17 @@
             closeSettingsPanel(player);
             var worked = false;
             try {
-                if (target === 'auto') {
-                    if (player.setPlaybackQualityRange) {
-                        player.setPlaybackQualityRange('tiny', 'hd2160');
-                        worked = true;
-                    }
-                    if (getCurrentQuality() !== 'auto' && player.setPlaybackQuality) {
-                        player.setPlaybackQuality('auto');
-                        worked = true;
-                    }
-                    if (worked) localStorage.removeItem('yt-player-quality');
-                } else if (player.setPlaybackQualityRange) {
-                    // Cap the ladder at the chosen quality instead of pinning
-                    // a single rendition. Pinning 4K while SABR is still on a
-                    // lower startup stream forces a hard reload.
-                    player.setPlaybackQualityRange('tiny', target);
+                if (player.setPlaybackQualityRange) {
+                    // Pin one rendition like YouTube's own menu. SABR ignores a
+                    // capped ladder and setPlaybackQuality(), so only 144p used
+                    // to switch, and nothing but 'auto','auto' releases the pin.
+                    player.setPlaybackQualityRange(target, target);
                     worked = true;
-                    if (player.setPlaybackQuality) { player.setPlaybackQuality(target); }
                 } else if (player.setPlaybackQuality) {
                     player.setPlaybackQuality(target);
                     worked = true;
                 }
+                if (worked && target === 'auto') localStorage.removeItem('yt-player-quality');
             } catch (e) { log('quality API fallback failed', e); }
             if (worked && target !== 'auto' && !IS_IOS) {
                 try {
