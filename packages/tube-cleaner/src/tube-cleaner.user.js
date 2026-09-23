@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.46
+// @version      0.1.47
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -496,13 +496,13 @@
         '{ pointer-events: none !important; }',
         '.wblock-tc-native video,',
         '.wblock-tc-native .ytp-unmute,',
-        '.wblock-tc-native .wblock-tc-toolbar,',
-        '.wblock-tc-native .wblock-tc-toolbar *,',
+        // The toolbar box itself stays transparent to the pointer: its empty
+        // corners overlap Safari's volume slider, which closes on mouseleave.
+        '.wblock-tc-toolbar *,',
         '.wblock-tc-native .wblock-tc-sponsor-notice,',
         '.wblock-tc-native .wblock-tc-sponsor-notice *',
         '{ pointer-events: auto !important; }',
-        // A faded-out toolbar must not swallow taps. pointer-events does not
-        // cascade, so the buttons need their own rule while it is hidden.
+        // A faded-out toolbar must not swallow taps.
         '.wblock-tc-toolbar.wblock-tc-toolbar-hidden,',
         '.wblock-tc-toolbar.wblock-tc-toolbar-hidden *,',
         '.wblock-tc-native .wblock-tc-toolbar.wblock-tc-toolbar-hidden,',
@@ -4019,11 +4019,13 @@
     function toolbarBoxStyle() {
         var opacity = IS_IOS ? '1' : '0.75';
         var font = IS_IOS ? '14px' : '11px';
-        var bottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : '42px';
+        // On macOS, clear Safari's volume slider, which rises about 125px
+        // above the video's bottom edge and closes when a pill covers it.
+        var bottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : '130px';
         var right = IS_IOS ? 'max(8px, env(safe-area-inset-right, 0px))' : '8px';
         var edges = 'bottom:' + bottom + ';right:' + right + ';top:auto;left:auto';
         return 'position:absolute;' + edges + ';z-index:2147483646;display:flex;flex-direction:column;gap:6px;align-items:flex-end' +
-            ';pointer-events:auto;font:' + font + '/1.2 -apple-system,system-ui,sans-serif;opacity:' +
+            ';pointer-events:none;font:' + font + '/1.2 -apple-system,system-ui,sans-serif;opacity:' +
             opacity + ';transition:opacity 0.15s';
     }
 
@@ -4543,7 +4545,6 @@
             function showToolbar() {
                 if (toolbarSuppressed()) return;
                 toolbar.style.opacity = '1';
-                toolbar.style.setProperty('pointer-events', 'auto', 'important');
                 toolbar.classList.remove('wblock-tc-toolbar-hidden');
                 clearTimeout(toolbarTimer);
             }
@@ -4557,7 +4558,6 @@
                 if (anyOpen || (!force && !toolbarSuppressed() &&
                     (toolbarInteractionActive() || video.paused || video.ended))) { scheduleHideToolbar(); return; }
                 toolbar.style.opacity = '0';
-                toolbar.style.setProperty('pointer-events', 'none', 'important');
                 toolbar.classList.add('wblock-tc-toolbar-hidden');
             }
             function scheduleHideToolbar() {
@@ -4634,7 +4634,6 @@
             // hide preference starts it hidden outright.
             if (toolbarUserHidden) {
                 toolbar.style.opacity = '0';
-                toolbar.style.setProperty('pointer-events', 'none', 'important');
                 toolbar.classList.add('wblock-tc-toolbar-hidden');
             } else {
                 showToolbar();
@@ -4653,7 +4652,6 @@
         } else {
             // Set a hidden baseline before applying the saved toolbar preference.
             toolbar.style.opacity = '0';
-            toolbar.style.setProperty('pointer-events', 'none', 'important');
             toolbar.classList.add('wblock-tc-toolbar-hidden');
 
             var toolbarTimer = null;
@@ -4683,7 +4681,6 @@
             function showToolbar() {
                 if (toolbarSuppressed()) return;
                 toolbar.style.opacity = '1';
-                toolbar.style.setProperty('pointer-events', 'auto', 'important');
                 toolbar.classList.remove('wblock-tc-toolbar-hidden');
                 clearTimeout(toolbarTimer);
             }
@@ -4694,7 +4691,6 @@
                     return;
                 }
                 toolbar.style.opacity = '0';
-                toolbar.style.setProperty('pointer-events', 'none', 'important');
                 toolbar.classList.add('wblock-tc-toolbar-hidden');
             }
 

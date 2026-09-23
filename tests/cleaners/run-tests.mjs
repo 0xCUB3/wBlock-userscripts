@@ -638,7 +638,7 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       const qualityBelowSB = !!(quality && sponsor) && quality.getBoundingClientRect().top > sponsor.getBoundingClientRect().bottom - 1;
       return {
         pass: !!toolbar && !!quality && !!sponsor && !deArrow && !audio && qualityBelowSB &&
-          getComputedStyle(toolbar).pointerEvents === 'auto',
+          getComputedStyle(quality).pointerEvents === (toolbar.classList.contains('wblock-tc-toolbar-hidden') ? 'none' : 'auto'),
         detail: `toolbar=${!!toolbar} quality=${!!quality} sponsor=${!!sponsor} deArrow=${!!deArrow} audio=${!!audio} qualityBelowSB=${qualityBelowSB}`,
       };
     });
@@ -1673,8 +1673,9 @@ async function qualityUISelectionCheck(page, scenario) {
   await page.mouse.move(playerBox.x + 12, playerBox.y + 8);
   await check(page, 'desktop', 'desktop toolbar reappears on movement while already hovering the player', () => {
     const o = document.querySelector('.wblock-tc-toolbar')?.style.opacity;
-    const pe = document.querySelector('.wblock-tc-toolbar')?.style.pointerEvents;
-    return { pass: o === '1' && pe === 'auto', detail: `opacity=${o} pointerEvents=${pe}` };
+    const toolbar = document.querySelector('.wblock-tc-toolbar');
+    const pe = toolbar && getComputedStyle(toolbar).pointerEvents + '/' + getComputedStyle(toolbar.querySelector('button')).pointerEvents;
+    return { pass: o === '1' && pe === 'none/auto', detail: `opacity=${o} pointerEvents=${pe}` };
   });
   await page.mouse.move(20, 20);
   await page.waitForTimeout(200);
