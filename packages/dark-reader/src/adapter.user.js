@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dark Reader
 // @namespace    com.skula.wblock
-// @version      4.9.128-wblock.7
+// @version      4.9.128-wblock.8
 // @description  Dark Reader's MIT-licensed API engine for wBlock (beta; without the full site-fix database).
 // @author       Dark Reader Ltd. and wBlock
 // @match        http://*/*
@@ -9,6 +9,7 @@
 // @run-at       document-start
 // @inject-into  content
 // @grant        GM_xmlhttpRequest
+// @connect      *
 // @downloadURL  https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/dark-reader/dist/dark-reader.user.js
 // @updateURL    https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/dark-reader/dist/dark-reader.meta.js
 // ==/UserScript==
