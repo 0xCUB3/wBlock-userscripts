@@ -3639,9 +3639,9 @@
 
     // SABR can initially report only the rendition buffered so far (often
     // 360p), on both mobile and desktop Safari. Treat a standard-definition-
-    // only response as incomplete rather than making the picker useless. iOS
-    // always gets the ladder because its player commonly reports one temporary
-    // rendition even after startup. Reported non-standard levels are retained.
+    // only response as incomplete rather than making the picker useless. Once
+    // a real ladder is reported, offer only it, so choosing above a video's
+    // maximum steps down instead of pinning a rendition that does not exist.
     // Selection stays best-effort. Saved iOS choices wait for playback, and a
     // stalled restoration falls back to Auto without forgetting the preference.
     function qualityMenuLevels() {
@@ -3651,8 +3651,7 @@
             var index = QUALITY_ORDER.indexOf(quality);
             return index !== -1 && index < mediumIndex;
         });
-        var needsCanonicalLadder = IS_IOS || !hasHigherRendition;
-        if (!needsCanonicalLadder) { return reported; }
+        if (hasHigherRendition) { return reported; }
 
         var seen = {};
         var levels = [];
