@@ -1336,7 +1336,8 @@
     function releaseActiveVideo() {
         var previousVideo = activeVideo;
         if (previousVideo && previousVideo._wblockPlaybackState) {
-            previousVideo._wblockPlaybackState.paused = previousVideo.paused;
+            // An emptied element is YouTube swapping streams, not a user pause.
+            previousVideo._wblockPlaybackState.paused = previousVideo.paused && previousVideo.readyState > 0;
             playbackCarry = previousVideo._wblockPlaybackState;
         }
         if (qualityRequest) cancelQualityRequest();
