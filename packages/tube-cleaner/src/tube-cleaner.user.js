@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.48
+// @version      0.1.49
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -648,6 +648,23 @@
         '{ visibility: hidden !important; }'
     ].join(' ');
 
+    // Opt-in (#884): hide Shorts shelves, feed tiles, and navigation entries.
+    // A separate sheet so /shorts pages, which suspend the player sheet, still
+    // keep Shorts out of the sidebar and tab bar. Tag and attribute hooks were
+    // taken from live desktop and mobile YouTube; none depend on the UI language
+    // except the "Shorts" titles, which YouTube does not translate.
+    var HIDE_SHORTS_CSS = [
+        'ytd-reel-shelf-renderer', 'ytm-reel-shelf-renderer', 'ytd-rich-shelf-renderer[is-shorts]',
+        'grid-shelf-view-model:has(ytm-shorts-lockup-view-model)',
+        'ytd-rich-section-renderer:has(ytd-rich-shelf-renderer[is-shorts])',
+        'ytd-rich-item-renderer:has(ytm-shorts-lockup-view-model)',
+        'ytm-shorts-lockup-view-model-v2', 'ytm-shorts-lockup-view-model',
+        'ytd-video-renderer:has(a[href^="/shorts/"])', 'ytd-grid-video-renderer:has(a[href^="/shorts/"])',
+        'ytm-video-with-context-renderer:has(a[href^="/shorts/"])', 'ytm-compact-video-renderer:has(a[href^="/shorts/"])',
+        'ytd-guide-entry-renderer:has(a[title="Shorts"])', 'ytd-mini-guide-entry-renderer[aria-label="Shorts"]',
+        'ytm-pivot-bar-item-renderer:has(.pivot-shorts)', 'yt-tab-shape[tab-title="Shorts"]'
+    ].join(',') + ' { display: none !important; }';
+
     function injectStyles() {
         if (document.getElementById(STYLE_ID)) { return true; }
         var root = document.head || document.documentElement;
@@ -656,6 +673,12 @@
         style.id = STYLE_ID;
         style.textContent = IS_YOUTUBE_MUSIC ? '' : CSS;
         root.appendChild(style);
+        if (!IS_YOUTUBE_MUSIC && featureEnabled('hideShorts')) {
+            var shorts = document.createElement('style');
+            shorts.id = STYLE_ID + '-shorts';
+            shorts.textContent = HIDE_SHORTS_CSS;
+            root.appendChild(shorts);
+        }
         // Shorts pages keep YouTube's stock UI; transformPlayer() re-enables
         // the sheet when the SPA returns to a regular page.
         if (isShortsPath()) { style.disabled = true; }
@@ -2482,9 +2505,9 @@
 
     // ------------------------------------------------------------------
     // Per-feature switches the app prepends as __wblockTubeCleanerFeatures
-    // (Userscripts page, Tube Cleaner row; wBlock #671). Everything defaults
-    // to on so older wBlock builds, which do not inject the constant, behave
-    // as before. Native controls and ad handling are not switchable: they are
+    // (Userscripts page, Tube Cleaner row; wBlock #671). Everything except the
+    // opt-in Shorts filter (#884) defaults to on so older wBlock builds, which
+    // do not inject the constant, behave as before. Native controls and ad handling are not switchable: they are
     // what the script is for.
     var tubeCleanerFeatures = (function () {
         var features = {
@@ -2494,7 +2517,8 @@
             backgroundPlayback: true,
             sponsorBlock: true,
             resumePosition: true,
-            toolbar: true
+            toolbar: true,
+            hideShorts: false
         };
         var injected = typeof __wblockTubeCleanerFeatures === 'object' ? __wblockTubeCleanerFeatures : null;
         if (!injected) return features;
