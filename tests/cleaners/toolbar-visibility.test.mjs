@@ -100,6 +100,26 @@ try {
       await page.clock.runFor(4100);
       assert.equal(await visible(), false, 'moving off controls restores idle hiding');
     }
+    if (mobile) {
+      const tap = bottom => page.evaluate(bottom => {
+        const video = document.querySelector('#movie_player video');
+        const rect = video.getBoundingClientRect();
+        video.dispatchEvent(new CustomEvent('wblock-tc-video-tap', { detail: { doubleTap: false,
+          clientX: rect.left + rect.width / 2, clientY: bottom ? rect.bottom - 20 : rect.top + rect.height / 2 } }));
+      }, bottom);
+      await tap(false);
+      assert.equal(await visible(), true, 'tapping the video reveals hidden controls');
+      await tap(true);
+      assert.equal(await visible(), true, 'tapping native controls must not hide ours while they stay up');
+      await tap(false);
+      assert.equal(await visible(), false, 'tapping the video hides controls together with native ones');
+      await tap(false);
+      await state({ paused: true }, 'pause');
+      await tap(false);
+      assert.equal(await visible(), true, 'native controls stay up while paused, so taps must not hide ours');
+      await state({ paused: false }, 'play');
+      await page.clock.runFor(4100);
+    }
     await state({ paused: true }, 'pause');
     await page.clock.runFor(4100);
     assert.equal(await visible(), true, 'pause cancels pending hides');

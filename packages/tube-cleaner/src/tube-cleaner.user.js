@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.49
+// @version      0.1.50
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1910,7 +1910,9 @@
             var doubleTap = !!(lastTap && now - lastTap.time < 350 &&
                 Math.hypot(point.clientX - lastTap.x, point.clientY - lastTap.y) < 30);
             lastTap = doubleTap ? null : { time: now, x: point.clientX, y: point.clientY };
-            video.dispatchEvent(new CustomEvent('wblock-tc-video-tap', { detail: { doubleTap: doubleTap } }));
+            video.dispatchEvent(new CustomEvent('wblock-tc-video-tap', {
+                detail: { doubleTap: doubleTap, clientX: point.clientX, clientY: point.clientY }
+            }));
         }
         video.addEventListener('touchstart', begin, { capture: true, passive: true });
         video.addEventListener('touchmove', move, { capture: true, passive: true });
@@ -4494,6 +4496,13 @@
             return toolbarPointers.size > 0 || nativeControlHover || video.seeking ||
                 video.webkitCurrentPlaybackTargetIsWireless;
         }
+        // Native controls do not expose their hit-test rectangles.
+        // Treat the bottom control strip as native chrome.
+        function overNativeControlStrip(x, y) {
+            var rect = video.getBoundingClientRect();
+            return x >= rect.left && x <= rect.right && y <= rect.bottom &&
+                y >= rect.bottom - Math.min(64, rect.height / 3);
+        }
         function bindNativeToolbarInteractions(show, schedule) {
             function down(event) {
                 if (!player.contains(event.target)) return;
@@ -4507,12 +4516,7 @@
             function move(event) {
                 if (event.pointerType !== 'mouse') return;
                 var wasHovering = nativeControlHover;
-                var rect = video.getBoundingClientRect();
-                // Native controls do not expose their hit-test rectangles.
-                // Keep the bottom control strip reachable while hovering it.
-                nativeControlHover = event.target === video && event.clientX >= rect.left &&
-                    event.clientX <= rect.right && event.clientY <= rect.bottom &&
-                    event.clientY >= rect.bottom - Math.min(64, rect.height / 3);
+                nativeControlHover = event.target === video && overNativeControlStrip(event.clientX, event.clientY);
                 if (player.contains(event.target)) { show(); schedule(); }
                 else if (wasHovering) schedule();
             }
@@ -4595,12 +4599,15 @@
                 return toolbar.style.opacity === '1';
             }
 
-            // Tap the video surface to toggle the toolbar.
+            // Tap the video surface to toggle the toolbar. Safari's native
+            // controls stay up while paused and taps on their own buttons never
+            // hide them, so those taps only reveal; toggling on them would leave
+            // every later tap inverted against the native controls.
             function onVideoTap(e) {
-                // Let taps on the toolbar's own buttons reach their handlers;
-                // the toolbar is a sibling of the video, not a child, so this
-                // listener only fires for taps on the video itself.
-                if (isToolbarVisible()) {
+                var point = e.type === 'click' ? e : e.detail;
+                var nativeChrome = video.paused || video.ended ||
+                    overNativeControlStrip(point.clientX, point.clientY);
+                if (isToolbarVisible() && !nativeChrome) {
                     hideToolbar(true);
                 } else {
                     showToolbar();
