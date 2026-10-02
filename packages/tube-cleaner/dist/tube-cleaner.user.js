@@ -2008,6 +2008,16 @@
                     return nativeToggleAttribute.apply(this, arguments);
                 };
             }
+            // YouTube answers every PiP presentation change by exiting
+            // fullscreen on the video (#919). After its swipe-down player that
+            // tears PiP down, and with it background playback. Exiting
+            // fullscreen never applies to a video that is in PiP.
+            if (typeof video.webkitExitFullscreen === 'function') {
+                video.webkitExitFullscreen = function () {
+                    if (this.webkitPresentationMode === 'picture-in-picture') return;
+                    return Object.getPrototypeOf(this).webkitExitFullscreen.apply(this, arguments);
+                };
+            }
             var descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'controls');
             if (descriptor && descriptor.get && descriptor.set) {
                 Object.defineProperty(video, 'controls', {
@@ -2027,6 +2037,7 @@
             try { delete video.removeAttribute; } catch (e) { /* ignore */ }
             try { delete video.setAttribute; } catch (e) { /* ignore */ }
             try { delete video.toggleAttribute; } catch (e) { /* ignore */ }
+            try { delete video.webkitExitFullscreen; } catch (e) { /* ignore */ }
             try { delete video.controls; } catch (e) { /* ignore */ }
         });
     }

@@ -2048,6 +2048,22 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     const video = document.querySelector('#movie_player video');
     return { pass: video.webkitPresentationMode === 'picture-in-picture', detail: `pip=${video.webkitPresentationMode}` };
   });
+  await check(page, 'iPhone', 'ignores YouTube exiting fullscreen on a video in PiP', () => {
+    const video = document.querySelector('#movie_player video');
+    let exits = 0;
+    const native = HTMLVideoElement.prototype.webkitExitFullscreen;
+    HTMLVideoElement.prototype.webkitExitFullscreen = function () { exits++; };
+    try {
+      video.webkitExitFullscreen();
+      const inPiP = exits;
+      video.webkitPresentationMode = 'inline';
+      video.webkitExitFullscreen();
+      return { pass: inPiP === 0 && exits === 1, detail: `inPiP=${inPiP} inline=${exits - inPiP}` };
+    } finally {
+      HTMLVideoElement.prototype.webkitExitFullscreen = native;
+      video.webkitPresentationMode = 'picture-in-picture';
+    }
+  });
   await check(page, 'iPhone', 'supplies the video title used by Safari native media UI', () => {
     const video = document.querySelector('#movie_player video');
     return { pass: video.getAttribute('title') === 'iPhone Now Playing', detail: `title=${video.getAttribute('title')}` };
