@@ -4228,6 +4228,7 @@
         document.addEventListener('click', onDocumentClick);
         registerCleanup(function () {
             document.removeEventListener('click', onDocumentClick);
+            removeMobilePageOverlay(qualityMenu);
         });
 
         var qualityWrap = document.createElement('div');
@@ -4475,7 +4476,10 @@
         sponsorMenu.addEventListener('click', function (e) { e.stopPropagation(); });
         function onSponsorOutsideClick() { hideSponsorMenu(); }
         document.addEventListener('click', onSponsorOutsideClick);
-        registerCleanup(function () { document.removeEventListener('click', onSponsorOutsideClick); });
+        registerCleanup(function () {
+            document.removeEventListener('click', onSponsorOutsideClick);
+            removeMobilePageOverlay(sponsorMenu);
+        });
         updateSponsorButton();
         sponsorWrap.appendChild(sponsorBtn); sponsorWrap.appendChild(sponsorMenu); servicesRow.appendChild(sponsorWrap);
 
