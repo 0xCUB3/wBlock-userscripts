@@ -1862,6 +1862,41 @@ HTMLElement.prototype.setOption = function (module, option, value) {
   await browser.close();
 }
 
+// ---- Scenario: YouTube live seeks stay at the live edge (wBlock #934) ----
+{
+  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (live seek guard)', {
+    fixture: FIXTURE_URL,
+    scriptSource: userscript,
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'tube-cleaner-live-seek';
+  await page.evaluate(() => {
+    const player = document.getElementById('movie_player');
+    const video = player.querySelector('video');
+    window.__wblockLiveTime = 100;
+    window.__wblockIsLive = true;
+    player.getVideoData = () => ({ video_id: 'LIVESTREAM1', isLive: window.__wblockIsLive });
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => window.__wblockLiveTime, set: value => { window.__wblockLiveTime = value; video.dispatchEvent(new Event('seeking')); } });
+    Object.defineProperty(video, 'duration', { configurable: true, get: () => 800000 });
+    Object.defineProperty(video, 'buffered', { configurable: true, get: () => ({ length: 1, start: () => 0, end: () => 120 }) });
+  });
+  await page.evaluate(() => { document.querySelector('#movie_player video').currentTime = 799999; });
+  await check(page, S, 'pulls a seek past the live edge back behind it', () => ({
+    pass: window.__wblockLiveTime > 110 && window.__wblockLiveTime <= 120,
+    detail: `time=${window.__wblockLiveTime}`,
+  }));
+  await page.evaluate(() => { document.querySelector('#movie_player video').currentTime = 60; });
+  await check(page, S, 'leaves a seek into the buffered past alone', () => ({
+    pass: window.__wblockLiveTime === 60, detail: `time=${window.__wblockLiveTime}`,
+  }));
+  await page.evaluate(() => { window.__wblockIsLive = false; document.querySelector('#movie_player video').currentTime = 500; });
+  await check(page, S, 'does not touch seeks once the stream is not live', () => ({
+    pass: window.__wblockLiveTime === 500, detail: `time=${window.__wblockLiveTime}`,
+  }));
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario 2: non-standard watch-page aspect ratios ------------------
 {
   const { browser, page, pageErrors } = await runScenario('Tube Cleaner (square video layout)', {

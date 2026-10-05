@@ -1224,6 +1224,41 @@
         } catch (e) { return null; }
     }
 
+    // YouTube's live player reports isLive only while the stream is airing;
+    // an archived stream plays as an ordinary video.
+    function isYouTubeLive(player) {
+        try {
+            var data = player && typeof player.getVideoData === 'function' ? player.getVideoData() : null;
+            return !!(data && data.isLive);
+        } catch (e) { return false; }
+    }
+
+    // On a live stream WebKit's scrubber spans YouTube's synthetic duration,
+    // days past the newest media, so a drag or skip lands where nothing has
+    // been broadcast and playback stalls (#934). Any seek past the buffered
+    // live edge is pulled back to just behind it; YouTube's own seekToLiveHead
+    // does not recover once the element has jumped that far.
+    function setupLiveSeekGuard(player, video) {
+        var correcting = false;
+        function liveEdge() {
+            try {
+                var ranges = video.buffered;
+                return ranges && ranges.length ? ranges.end(ranges.length - 1) : null;
+            } catch (e) { return null; }
+        }
+        function onSeeking() {
+            if (correcting || !isYouTubeLive(player)) return;
+            var edge = liveEdge();
+            if (edge === null || !(video.currentTime > edge + 1)) return;
+            correcting = true;
+            try { video.currentTime = Math.max(0, edge - 0.5); }
+            catch (e) { /* leave the stream where YouTube puts it */ }
+            setTimeout(function () { correcting = false; }, 0);
+        }
+        video.addEventListener('seeking', onSeeking);
+        registerCleanup(function () { video.removeEventListener('seeking', onSeeking); });
+    }
+
     function youtubeUrlVideoId() {
         try {
             var pathMatch = location.pathname.match(/^\/(?:shorts|embed)\/([A-Za-z0-9_-]{11})(?:\/|$)/);
@@ -1264,6 +1299,8 @@
     function setupPlaybackPosition(player, video) {
         var videoId = youtubeVideoIdentity(player);
         if (!videoId) { playbackCarry = null; return; }
+        // A live stream has no stable position to come back to.
+        if (isYouTubeLive(player)) { playbackCarry = null; return; }
         var previousIdentity = playbackCarry && playbackCarry.identity;
         var carried = playbackCarry && playbackCarry.identity === videoId ? playbackCarry : null;
         playbackCarry = null;
@@ -1642,6 +1679,7 @@
         if (featureEnabled('toolbar')) buildToolbar(player, video);
         if (featureEnabled('pictureInPicture')) setupAutoPiP(video);
         setupMediaSession(player, video);
+        setupLiveSeekGuard(player, video);
         if (featureEnabled('chapters')) setupChapters(player, video);
         if (featureEnabled('captions')) setupNativeSubtitles(player, video);
         if (featureEnabled('sponsorBlock')) setupSponsorBlock(player, video);
@@ -1744,6 +1782,12 @@
             positionTimer = setTimeout(function () {
                 positionTimer = null;
                 if (mediaSessionOwner !== video) return;
+                // A live stream's duration is synthetic; Now Playing would show
+                // a days-long scrubber, so publish no position at all.
+                if (isYouTubeLive(container)) {
+                    try { session.setPositionState(); } catch (e) { /* ignore */ }
+                    return;
+                }
                 var duration = Number(video.duration), position = Number(video.currentTime), rate = Number(video.playbackRate) || 1;
                 if (!isFinite(duration) || duration <= 0 || !isFinite(position) || position < 0 || !isFinite(rate) || rate <= 0) return;
                 try { session.setPositionState({ duration: duration, playbackRate: rate, position: Math.min(position, duration) }); }
