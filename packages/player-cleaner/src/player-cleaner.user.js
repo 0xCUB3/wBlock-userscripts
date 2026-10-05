@@ -33,9 +33,12 @@
 
     if (/(^|\.)amazon\.[a-z.]+$/i.test(location.hostname)) { return; }
 
-    // Player Cleaner can hide videos and surrounding post content on X.
-    // Leave the site untouched, including document-start media mutations.
-    if (/(^|\.)(x|twitter)\.com$/i.test(location.hostname)) { return; }
+    // Player Cleaner can hide videos and surrounding post content on X, and
+    // Google Drive's YouTube-based player re-asserts its own controls over
+    // native ones, leaving neither usable. Leave these sites untouched,
+    // including document-start media mutations.
+    if (/(^|\.)(x|twitter)\.com$/i.test(location.hostname) ||
+        /^(drive\.google|docs\.google|youtube\.googleapis)\.com$/i.test(location.hostname)) { return; }
 
     // National Geographic uses Disney's BAM ManagedMediaSource player. On iOS,
     // even preflight media-element mutations can leave that player on a black

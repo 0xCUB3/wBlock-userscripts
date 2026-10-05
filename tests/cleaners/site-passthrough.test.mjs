@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import { webkit, devices } from 'playwright';
 
 const source = readFileSync(new URL('../../packages/player-cleaner/dist/player-cleaner.user.js', import.meta.url), 'utf8');
-const hosts = ['x.com', 'www.x.com', 'twitter.com', 'mobile.twitter.com', 'platform.twitter.com'];
-const otherHosts = ['example.com', 'notx.com', 'nottwitter.com', 'x.com.example.com'];
+const hosts = ['x.com', 'www.x.com', 'twitter.com', 'mobile.twitter.com', 'platform.twitter.com', 'drive.google.com', 'docs.google.com', 'youtube.googleapis.com'];
+const otherHosts = ['example.com', 'notx.com', 'nottwitter.com', 'x.com.example.com', 'mail.google.com', 'drive.google.com.example.com'];
 const browser = await webkit.launch();
 try {
   for (const device of [null, devices['iPhone 13']]) {
