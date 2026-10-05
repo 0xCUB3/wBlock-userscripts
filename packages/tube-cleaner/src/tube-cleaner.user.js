@@ -4072,20 +4072,27 @@
     // The player establishes a containing/stacking context on mobile Safari,
     // which can clip even position:fixed children to its small inline frame.
     // Portal open menus to <body> so they are genuine page overlays and can use
-    // the whole YouTube viewport.
-    function showMobilePageOverlay(menu, maxHeight) {
+    // the whole YouTube viewport. The portal still opens right above its
+    // button (or below it when there is more room there), not at the screen
+    // edge, so the menu reads as belonging to the pill that opened it.
+    function showMobilePageOverlay(menu, anchor, maxHeight, gap) {
         if (!IS_IOS || !menu || !document.body) { return; }
         if (menu.parentNode !== document.body) { document.body.appendChild(menu); }
+        var rect = anchor.getBoundingClientRect();
+        var viewHeight = window.innerHeight;
+        var above = rect.top - gap - 8;
+        var below = viewHeight - rect.bottom - gap - 8;
+        var openUp = above >= Math.min(maxHeight, 240) || above >= below;
         menu.style.position = 'fixed';
-        menu.style.top = 'auto';
-        menu.style.right = '8px';
-        menu.style.bottom = 'max(8px, env(safe-area-inset-bottom, 0px))';
+        menu.style.right = Math.max(8, window.innerWidth - rect.right) + 'px';
+        menu.style.top = openUp ? 'auto' : (rect.bottom + gap) + 'px';
+        menu.style.bottom = openUp ? (viewHeight - rect.top + gap) + 'px' : 'auto';
+        menu.style.marginTop = '0';
         menu.style.marginBottom = '0';
         // Let short menus end at their final control. max-height reserves
-        // scrolling only for a panel that genuinely exceeds the viewport.
+        // scrolling only for a panel that genuinely exceeds the room.
         menu.style.height = 'auto';
-        menu.style.maxHeight = 'min(' + maxHeight + 'px, calc(100vh - 16px))';
-        menu.style.maxHeight = 'min(' + maxHeight + 'px, calc(100dvh - 16px))';
+        menu.style.maxHeight = Math.max(120, Math.min(maxHeight, openUp ? above : below)) + 'px';
         // A short/landscape phone can still be smaller than a full panel.
         // Keep scrolling inside the overlay rather than growing it off-screen.
         menu.style.overflowY = 'auto';
@@ -4255,7 +4262,7 @@
             if (qualityMenu.style.display === 'none') {
                 buildQualityMenu();
                 if (IS_IOS) {
-                    showMobilePageOverlay(qualityMenu, 520);
+                    showMobilePageOverlay(qualityMenu, qualityBtn, 520, 4);
                 } else {
                     placeDesktopAnchoredMenu(qualityMenu, { maxHeight: '60vh', gap: '4px' });
                 }
@@ -4507,7 +4514,7 @@
             if (sponsorMenu.style.display === 'none') {
                 buildSponsorMenu();
                 if (IS_IOS) {
-                    showMobilePageOverlay(sponsorMenu, 700);
+                    showMobilePageOverlay(sponsorMenu, sponsorBtn, 700, 6);
                 } else {
                     placeDesktopAnchoredMenu(sponsorMenu, { maxHeight: '65vh', gap: '6px' });
                 }

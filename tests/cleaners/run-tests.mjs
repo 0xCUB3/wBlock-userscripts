@@ -650,8 +650,11 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
       const maxScroll = panel ? Math.max(0, panel.scrollHeight - panel.clientHeight) : 0;
       if (panel) panel.scrollTop = panel.scrollHeight;
       const allControlsReachable = !!panel && (maxScroll === 0 || panel.scrollTop >= maxScroll - 1);
-      return { pass: !!rect && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && allControlsReachable && pageOverlay,
-        detail: rect ? `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)} content=${panel.scrollHeight}/${panel.clientHeight} scroll=${panel.scrollTop}/${maxScroll} pageOverlay=${pageOverlay}` : 'no panel' };
+      // The panel opens against its SB pill, not at the screen edge (#936).
+      const button = document.querySelector('.wblock-tc-sponsor-button').getBoundingClientRect();
+      const gap = rect ? Math.min(Math.abs(button.top - rect.bottom), Math.abs(rect.top - button.bottom)) : Infinity;
+      return { pass: !!rect && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && allControlsReachable && pageOverlay && gap <= 8,
+        detail: rect ? `${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)} gap=${Math.round(gap)} content=${panel.scrollHeight}/${panel.clientHeight} scroll=${panel.scrollTop}/${maxScroll} pageOverlay=${pageOverlay}` : 'no panel' };
     });
     await page.evaluate(() => document.querySelector('.wblock-tc-sponsor-button').click());
   }
