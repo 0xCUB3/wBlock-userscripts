@@ -2233,7 +2233,8 @@
         // hide the bar rather than the inner control, which the caller sees.
         var bar = el;
         for (var i = 0; i < 6 && bar && bar !== document.body; i++) {
-            if (bar !== video && !composedRelated(bar, video) && isControlBar(bar, vr)) {
+            if (bar !== video && !composedRelated(bar, video) && isControlBar(bar, vr) &&
+                sharesPlayerBox(bar, video, vr)) {
                 hideElement(bar);
                 return;
             }
@@ -2242,11 +2243,25 @@
         if (!isPlayerOverlay(el, vr)) { return; }
         try {
             var pos = getComputedStyle(el).position;
-            if (pos !== 'absolute' && pos !== 'fixed' && pos !== 'sticky' && !isVideoCover(el, vr)) {
+            if (pos !== 'absolute' && pos !== 'fixed' && pos !== 'sticky' &&
+                (!isVideoCover(el, vr) || !sharesPlayerBox(el, video, vr))) {
                 return;
             }
         } catch (e) { return; }
         hideElement(el);
+    }
+
+    // In-flow chrome lives in the player: its nearest common ancestor with the
+    // video is about player-sized. Page content that scrolls over a parallax
+    // hero video (US Open carousels) only meets the video in the page layout,
+    // and hiding it collapses the page under the reader's scroll.
+    function sharesPlayerBox(el, video, vr) {
+        var anc = composedParent(el);
+        while (anc && anc !== document && !composedRelated(anc, video)) { anc = composedParent(anc); }
+        if (!anc || anc === document || anc === document.body || anc === document.documentElement) { return false; }
+        var r;
+        try { r = anc.getBoundingClientRect(); } catch (e) { return false; }
+        return r.height <= vr.height * 1.55 + 48;
     }
 
     // Hit-test the pixels over the video and hide anything painted above it.
