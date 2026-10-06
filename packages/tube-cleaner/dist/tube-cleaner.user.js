@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.53
+// @version      0.1.54
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -94,6 +94,7 @@
     var IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
         (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     var IS_IPHONE = /iPhone|iPod/.test(navigator.userAgent);
+    var SAFARI_MAJOR = Number((/Version\/(\d+)/.exec(navigator.userAgent) || [])[1]) || 0;
     var IS_YOUTUBE_MUSIC = location.hostname === 'music.youtube.com';
     // ------------------------------------------------------------------
     // Auto PiP
@@ -4108,9 +4109,12 @@
     function toolbarBoxStyle() {
         var opacity = IS_IOS ? '1' : '0.75';
         var font = IS_IOS ? '14px' : '11px';
-        // On macOS, clear Safari's volume slider, which rises about 125px
-        // above the video's bottom edge and closes when a pill covers it.
-        var bottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : '130px';
+        // Sit just above Safari's control bar, which reaches 52px above the
+        // video's bottom edge. Before Safari 27 the macOS volume slider rose
+        // about 125px out of that bar and closed when a pill covered it; 27
+        // moved volume to the top corner.
+        var bottom = IS_IOS ? 'calc(56px + env(safe-area-inset-bottom, 0px))'
+            : (SAFARI_MAJOR >= 27 ? '58px' : '130px');
         var right = IS_IOS ? 'max(8px, env(safe-area-inset-right, 0px))' : '8px';
         var edges = 'bottom:' + bottom + ';right:' + right + ';top:auto;left:auto';
         return 'position:absolute;' + edges + ';z-index:2147483646;display:flex;flex-direction:column;gap:6px;align-items:flex-end' +
