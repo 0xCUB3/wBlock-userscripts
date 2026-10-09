@@ -5069,6 +5069,13 @@ for (const config of [
     return { pass, detail: video ? 'controls=' + video.controls + ' enhanced=' + !!video._wblockEnhanced + ' src=' + (video.currentSrc || video.src) + ' chrome=' + (controls && getComputedStyle(controls).display) : 'no video' };
   });
 
+  await check(page, S, 'does not promote a non-media React URL such as the article link', () => {
+    const video = document.getElementById('linked-video');
+    const src = video && (video.currentSrc || video.src || '');
+    const pass = !!(video && src.indexOf('blob:') === 0 && !video._wblockIOSNativeSrc);
+    return { pass, detail: video ? 'src=' + src + ' native=' + (video._wblockIOSNativeSrc || '') : 'no video' };
+  });
+
   await check(page, S, 'does not replace a blob with a classic video.js API fallback', () => {
     const video = document.getElementById('classic-video');
     const controls = document.getElementById('classic-controls');

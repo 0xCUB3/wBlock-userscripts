@@ -41,6 +41,13 @@
     <div class="media-controls" id="reload-controls">Play</div>
   </div>
 
+  <!-- Hearst (wisn.com): blob pipeline whose React ancestors only carry
+       non-media URLs (an article link, a poster). Must stay on the blob. -->
+  <div id="linked" class="media-default-skin">
+    <video id="linked-video" playsinline></video>
+    <div class="media-controls" id="linked-controls">Play</div>
+  </div>
+
   <!-- Classic video.js API fallback beside a working blob. Must stay put. -->
   <div id="classic" class="video-js">
     <video id="classic-video" playsinline></video>
@@ -71,6 +78,14 @@
       attachBlob('opaque-video');
       attachBlob('fave-video');
       attachBlob('classic-video');
+      attachBlob('linked-video');
+      document.getElementById('linked-video').__reactFiber$fixture = {
+        memoizedProps: { className: 'player' },
+        return: {
+          memoizedProps: { poster: { src: '/images/poster.jpg' } },
+          return: { memoizedProps: { url: 'https://www.wisn.com/article/road-rage-video/74083320' }, return: null }
+        }
+      };
       plantFiber('hero-video', 'https://stream.mux.com/demo.m3u8');
       plantFiber('fave-video', 'https://stream.mux.com/should-not-promote.m3u8');
       plantFiber('reload-video', 'https://stream.mux.com/reload.m3u8');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.39
+// @version      0.1.40
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -891,6 +891,10 @@
         return null;
     }
 
+    // React ancestors also carry page links and images (Hearst's article
+    // url). Only a media path may replace the site's blob.
+    var MEDIA_PATH = /\.(m3u8|mp4|m4v|mov|webm)$/i;
+
     function firstPlayableUrl(values) {
         if (!values) { return null; }
         for (var i = 0; i < values.length; i++) {
@@ -906,7 +910,7 @@
             }
             if (typeof value !== 'string') { continue; }
             var url = toAbsoluteUrl(value);
-            if (isPlayableUrl(url)) { return url; }
+            if (isPlayableUrl(url) && MEDIA_PATH.test(new URL(url).pathname)) { return url; }
         }
         return null;
     }
