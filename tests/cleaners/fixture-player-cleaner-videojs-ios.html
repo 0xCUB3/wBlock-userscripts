@@ -48,6 +48,12 @@
     <div class="media-controls" id="linked-controls">Play</div>
   </div>
 
+  <!-- Hearst with its rendition list: promote the tallest progressive MP4. -->
+  <div id="hearst" class="media-default-skin">
+    <video id="hearst-video" playsinline></video>
+    <div class="media-controls" id="hearst-controls">Play</div>
+  </div>
+
   <!-- Classic video.js API fallback beside a working blob. Must stay put. -->
   <div id="classic" class="video-js">
     <video id="classic-video" playsinline></video>
@@ -79,6 +85,19 @@
       attachBlob('fave-video');
       attachBlob('classic-video');
       attachBlob('linked-video');
+      attachBlob('hearst-video');
+      var cdn = 'https://streaming.hearstdigitalstudios.com/b20d/';
+      document.getElementById('hearst-video').__reactFiber$fixture = {
+        memoizedProps: { className: 'player' },
+        return: {
+          memoizedProps: { video: { transcodings: [
+            { key: 'b20d/video_16x9_240p_h264_sd.mp4', full_url: cdn + 'video_16x9_240p_h264_sd.mp4' },
+            { key: 'b20d/video_16x9_720p_h264_hd.mp4', full_url: cdn + 'video_16x9_720p_h264_hd.mp4' },
+            { key: 'b20d/master_e.4c61.mp4', full_url: cdn + 'master_e.4c61.mp4' }
+          ] } },
+          return: { memoizedProps: { url: 'https://www.wisn.com/article/road-rage-video/74083320' }, return: null }
+        }
+      };
       document.getElementById('linked-video').__reactFiber$fixture = {
         memoizedProps: { className: 'player' },
         return: {

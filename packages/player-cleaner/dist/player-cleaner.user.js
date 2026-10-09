@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.40
+// @version      0.1.41
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -906,13 +906,29 @@
                 continue;
             }
             if (typeof value === 'object') {
-                value = value.src || value.href || value.url || value.file || '';
+                value = value.src || value.href || value.url || value.file || value.full_url || '';
             }
             if (typeof value !== 'string') { continue; }
             var url = toAbsoluteUrl(value);
             if (isPlayableUrl(url) && MEDIA_PATH.test(new URL(url).pathname)) { return url; }
         }
         return null;
+    }
+
+    // Hearst stations list progressive MP4s (240p…720p plus the master) on
+    // props.video.transcodings. Take the tallest labeled rendition.
+    function bestRendition(list) {
+        if (!Array.isArray(list)) { return null; }
+        var best = null;
+        var bestHeight = -1;
+        for (var i = 0; i < list.length; i++) {
+            var url = firstPlayableUrl([list[i]]);
+            if (!url) { continue; }
+            var match = url.match(/(\d{3,4})p(?=[_.\/-])/);
+            var height = match ? +match[1] : 0;
+            if (height > bestHeight) { best = url; bestHeight = height; }
+        }
+        return best;
     }
 
     // video.js v10 / Media Chrome keep the real HLS or MP4 on React props
@@ -938,7 +954,10 @@
                 var found = firstPlayableUrl([fiber.memoizedProps, fiber.pendingProps]);
                 if (!found) {
                     var props = fiber.memoizedProps || fiber.pendingProps;
-                    if (props) { found = firstPlayableUrl([props.src, props.source, props.hls, props.file, props.sources]); }
+                    if (props) {
+                        found = firstPlayableUrl([props.src, props.source, props.hls, props.file, props.sources]) ||
+                            bestRendition(props.video && props.video.transcodings);
+                    }
                 }
                 if (found) { return found; }
                 fiber = fiber.return;

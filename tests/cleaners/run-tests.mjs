@@ -5076,6 +5076,14 @@ for (const config of [
     return { pass, detail: video ? 'src=' + src + ' native=' + (video._wblockIOSNativeSrc || '') : 'no video' };
   });
 
+  await check(page, S, 'promotes the tallest Hearst rendition from React props', () => {
+    const video = document.getElementById('hearst-video');
+    const src = video && (video.currentSrc || video.src || '');
+    const pass = !!(video && video.controls &&
+      src === 'https://streaming.hearstdigitalstudios.com/b20d/video_16x9_720p_h264_hd.mp4');
+    return { pass, detail: video ? 'src=' + src + ' controls=' + video.controls : 'no video' };
+  });
+
   await check(page, S, 'does not replace a blob with a classic video.js API fallback', () => {
     const video = document.getElementById('classic-video');
     const controls = document.getElementById('classic-controls');
