@@ -3069,6 +3069,12 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     return { pass: ok, detail: v ? `controls=${v.controls}` : 'no video' };
   });
 
+  await check(page, S, 'keeps the site remote-playback lock before ManagedMediaSource attaches', () => {
+    const v = document.querySelector('#bare-mms video');
+    const ok = !!(v && v.controls && v.disableRemotePlayback && v.hasAttribute('disableremoteplayback'));
+    return { pass: ok, detail: v ? `controls=${v.controls} drp=${v.disableRemotePlayback}` : 'no video' };
+  });
+
   // Case 2: bare video with a clean source -> enhanced in place, source kept.
   await check(page, S, 'enhances bare clean-source video (controls on, src kept)', () => {
     const v = document.querySelector('#bare-clean video');

@@ -43,6 +43,13 @@
     <video></video>
   </div>
 
+  <!-- Case 6: Paramount (VH1/MTV) locks remote playback before it attaches
+       ManagedMediaSource; there is no direct file yet. Expected: enhanced,
+       lock kept so WebKit will accept the later attachment. -->
+  <div class="custom-wrap" id="bare-mms">
+    <video disableremoteplayback><source type="video/mp4"></video>
+  </div>
+
   <script>
     (function () {
       // Give the blob-source players an opaque MSE-style source so Player

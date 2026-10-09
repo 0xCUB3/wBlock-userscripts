@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.41
+// @version      0.1.42
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1219,7 +1219,10 @@
                 }
                 return;
             }
-            if (!opaque) {
+            // Paramount's player (VH1, MTV) sets the lock, plays a data:
+            // primer, then attaches ManagedMediaSource, which WebKit refuses
+            // while remote playback is on. Lift it only for a direct file.
+            if (sourceFromVideoElement(video)) {
                 video.removeAttribute('disableremoteplayback');
                 video.disableRemotePlayback = false;
             }
