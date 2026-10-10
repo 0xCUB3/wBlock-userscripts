@@ -5815,7 +5815,19 @@
                 restoreDeArrowAttribute(image, 'referrerpolicy', image._wblockDeArrowOriginalReferrerPolicy);
             }
         };
-        card._wblockDeArrowMouseLeave = function () {
+        card._wblockDeArrowMouseLeave = function (event) {
+            // YouTube's inline preview covers the hovered thumbnail from a shared
+            // overlay outside the card. Keep the original until the pointer
+            // leaves that overlay for somewhere other than this card.
+            var to = event && event.relatedTarget;
+            var preview = to && to.closest && to.closest('ytd-video-preview');
+            if (preview) {
+                preview.addEventListener('mouseleave', function onPreviewLeave(e) {
+                    preview.removeEventListener('mouseleave', onPreviewLeave);
+                    if (!(e.relatedTarget && card.contains(e.relatedTarget))) card._wblockDeArrowMouseLeave(e);
+                });
+                return;
+            }
             card._wblockDeArrowShowingOriginal = false;
             var settings = loadDeArrowSettings();
             if (!settings.enabled) return;

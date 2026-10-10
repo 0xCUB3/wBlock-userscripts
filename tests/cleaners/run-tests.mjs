@@ -1303,7 +1303,21 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: title === 'Original Related Title' && thumbnail.startsWith('data:image/gif'),
       detail: `title=${title} thumbnail=${thumbnail}` };
   });
-  await page.evaluate(() => document.querySelector('ytd-compact-video-renderer').dispatchEvent(new MouseEvent('mouseleave')));
+  // YouTube's inline preview plays in a shared overlay outside the card.
+  await page.evaluate(() => {
+    const preview = document.body.appendChild(document.createElement('ytd-video-preview'));
+    const video = preview.appendChild(document.createElement('video'));
+    document.querySelector('ytd-compact-video-renderer').dispatchEvent(new MouseEvent('mouseleave', { relatedTarget: video }));
+  });
+  await check(page, 'desktop', 'keeps original DeArrow card branding while the inline preview plays', () => {
+    const title = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
+    return { pass: title === 'Original Related Title', detail: `title=${title}` };
+  });
+  await page.evaluate(() => {
+    const preview = document.querySelector('ytd-video-preview');
+    preview.dispatchEvent(new MouseEvent('mouseleave', { relatedTarget: document.body }));
+    preview.remove();
+  });
   await check(page, 'desktop', 'restores custom DeArrow card branding after hover', () => {
     const title = document.querySelector('ytd-compact-video-renderer #video-title')?.textContent;
     const thumbnail = document.querySelector('ytd-compact-video-renderer img')?.getAttribute('src') || '';
