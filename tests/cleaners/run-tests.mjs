@@ -2702,7 +2702,11 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     fresh.id = 'player-captions-remount';
     fresh.innerHTML = '<video data-test-original="1" width="640" height="360" preload="metadata"><source src="https://example.com/media/captions.mp4" type="video/mp4"><track kind="captions" src="captions-default.vtt" srclang="en" label="English" default></video><div class="vjs-control-bar"></div>';
     old.replaceWith(fresh);
+    // A click-mounted player: WebKit's automatic pick lands while the
+    // mount's user activation is still live.
+    setTimeout(() => { fresh.querySelector('track[default]').track.mode = 'showing'; }, 300);
   });
+  await page.waitForTimeout(600);
   await check(page, S, 'keeps captions off across a player remount with a default track', () => {
     const video = document.querySelector('#player-captions-remount video[data-wblock-player-cleaner]');
     const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');

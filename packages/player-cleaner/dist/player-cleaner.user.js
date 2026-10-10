@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.44
+// @version      0.1.45
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -505,11 +505,15 @@
             savePlaybackPreference('muted', video.muted);
         }
         // WebKit shows a <track default> on its own, sometimes several times
-        // as the track loads. That is the page's choice, not the user's; the
-        // native caption menu always follows a click or key press.
+        // as the track loads. That is the page's choice, not the user's. A
+        // pick from Safari's caption menu carries user activation, but so can
+        // an automatic pick when a click mounted the player, so a default
+        // track turning on within moments of appearing is automatic too.
+        var tracksSeenAt = Date.now();
+        if (video.textTracks) video.textTracks.addEventListener('addtrack', function () { tracksSeenAt = Date.now(); });
         function isAutomaticSelection(track) {
             var activation = navigator.userActivation;
-            if (!activation || activation.isActive) return false;
+            if (activation && activation.isActive && Date.now() - tracksSeenAt > 3000) return false;
             var elements = video.querySelectorAll('track[default]');
             for (var i = 0; i < elements.length; i++) if (elements[i].track === track) return true;
             return false;
