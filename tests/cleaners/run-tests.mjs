@@ -313,6 +313,15 @@ function record(scenario, name, pass, detail = '') {
 // A frame is ~16 ms; shared CI Macs stall the main thread far longer.
 const FRAME_BUDGET_MS = process.env.CI ? 100 : 50;
 
+// WebKit selects a <track default> on its own, with no user activation.
+// Playwright's evaluate grants a 5 s activation, so fire after it lapses.
+async function autoSelectDefaultTrack(page, videoSelector) {
+  await page.evaluate(sel => setTimeout(() => {
+    document.querySelector(sel + ' track[default]').track.mode = 'showing';
+  }, 5500), videoSelector);
+  await page.waitForTimeout(5800);
+}
+
 async function check(page, scenario, name, fn, { timeout = 6000, interval = 150, arg } = {}) {
   const start = Date.now();
   let last = { pass: false, detail: 'timeout' };
@@ -2645,12 +2654,8 @@ HTMLElement.prototype.setOption = function (module, option, value) {
   const S = 'player-cleaner-caption-preference-off';
 
   // On a slow machine WebKit shows the default track after Player Cleaner
-  // starts listening. Replay that automatic selection deterministically.
-  await page.evaluate(() => {
-    const video = document.querySelector('#player-captions video');
-    video.querySelector('track[default]').track.mode = 'showing';
-  });
-  await page.waitForTimeout(100);
+  // starts listening.
+  await autoSelectDefaultTrack(page, '#player-captions video');
   await check(page, S, 'preserves the page default subtitle state without a saved preference', () => {
     const video = document.querySelector('#player-captions video');
     const element = video?.querySelector('track');
@@ -2706,6 +2711,7 @@ HTMLElement.prototype.setOption = function (module, option, value) {
 
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#player-captions video[data-wblock-player-cleaner]', { timeout: 10000 });
+  await autoSelectDefaultTrack(page, '#player-captions video');
   await check(page, S, 'keeps captions off after refresh even when the page track is default', () => {
     const video = document.querySelector('#player-captions video');
     const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
@@ -2714,6 +2720,18 @@ HTMLElement.prototype.setOption = function (module, option, value) {
       pass: track?.mode === 'disabled' && saved.subtitleLanguage === '',
       detail: `mode=${track?.mode} saved=${JSON.stringify(saved)}`,
     };
+  });
+
+  // Picking the default track from Safari's menu follows a user gesture.
+  await page.click('#player-captions video');
+  await page.evaluate(() => {
+    document.querySelector('#player-captions video track[default]').track.mode = 'showing';
+  });
+  await check(page, S, 'saves a user pick of the default track', () => {
+    const video = document.querySelector('#player-captions video');
+    const saved = JSON.parse(localStorage.getItem('wblock.playerCleaner.preferences') || '{}');
+    return { pass: video.textTracks[0].mode === 'showing' && saved.subtitleLanguage === 'en',
+      detail: `mode=${video.textTracks[0].mode} saved=${JSON.stringify(saved)} activation=${navigator.userActivation && navigator.userActivation.isActive}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));

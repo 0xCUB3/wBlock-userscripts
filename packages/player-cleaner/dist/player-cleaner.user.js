@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.43
+// @version      0.1.44
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -504,8 +504,12 @@
             savePlaybackPreference('volume', video.volume);
             savePlaybackPreference('muted', video.muted);
         }
-        var autoShownTracks = [];
-        function isDefaultTrack(track) {
+        // WebKit shows a <track default> on its own, sometimes several times
+        // as the track loads. That is the page's choice, not the user's; the
+        // native caption menu always follows a click or key press.
+        function isAutomaticSelection(track) {
+            var activation = navigator.userActivation;
+            if (!activation || activation.isActive) return false;
             var elements = video.querySelectorAll('track[default]');
             for (var i = 0; i < elements.length; i++) if (elements[i].track === track) return true;
             return false;
@@ -514,11 +518,7 @@
             for (var i = 0; i < video.textTracks.length; i++) {
                 var track = video.textTracks[i];
                 if ((track.kind === 'subtitles' || track.kind === 'captions') && track.mode === 'showing') {
-                    // WebKit shows a <track default> once on its own. That is
-                    // the page's choice, not the user's, so apply the saved
-                    // preference instead of overwriting it.
-                    if (autoShownTracks.indexOf(track) === -1 && isDefaultTrack(track)) {
-                        autoShownTracks.push(track);
+                    if (isAutomaticSelection(track)) {
                         applySubtitlePreference();
                         return;
                     }
