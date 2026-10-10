@@ -3085,8 +3085,10 @@ HTMLElement.prototype.setOption = function (module, option, value) {
 
   await check(page, S, 'keeps the site remote-playback lock before ManagedMediaSource attaches', () => {
     const v = document.querySelector('#bare-mms video');
-    const ok = !!(v && v.controls && v.disableRemotePlayback && v.hasAttribute('disableremoteplayback'));
-    return { pass: ok, detail: v ? `controls=${v.controls} drp=${v.disableRemotePlayback}` : 'no video' };
+    // Linux WebKit lacks the disableRemotePlayback property; the attribute is
+    // what WebKit reflects it from.
+    const ok = !!(v && v.controls && v.hasAttribute('disableremoteplayback'));
+    return { pass: ok, detail: v ? `controls=${v.controls} drpAttr=${v.hasAttribute('disableremoteplayback')}` : 'no video' };
   });
 
   // Case 2: bare video with a clean source -> enhanced in place, source kept.
