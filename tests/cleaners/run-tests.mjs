@@ -2330,6 +2330,60 @@ HTMLElement.prototype.setOption = function (module, option, value) {
   await browser.close();
 }
 
+// ---- Scenario: Tube Cleaner releases the mobile feed preview -------------
+// On the home feed, m.youtube.com loads a muted preview <video> into the still
+// hidden watch player and only then moves #movie_player into a preview
+// container (both shapes below ship live). The preview must end up stock, and
+// the next watch video must be hooked again.
+for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
+  const { browser, page, pageErrors } = await runScenario(`Tube Cleaner (mobile feed preview, ${shape})`, {
+    fixture: FIXTURE_URL,
+    readySignal: '#movie_player.wblock-tc-native',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = `tube-cleaner-feed-preview-${shape}`;
+  await page.evaluate((shape) => {
+    const player = document.querySelector('#movie_player');
+    window.__watchParent = player.parentElement;
+    const preview = document.createElement(shape);
+    const slot = document.createElement('div');
+    slot.className = shape === 'ytm-video-preview' ? 'ytmVideoPreviewPlayer' : 'video-preview-shim';
+    preview.append(slot);
+    document.body.append(preview);
+    const video = document.createElement('video');
+    video.className = 'video-stream html5-main-video';
+    video.muted = true;
+    player.querySelector('video').replaceWith(video);
+  }, shape);
+  await page.waitForTimeout(80);
+  await page.evaluate((shape) => {
+    document.querySelector(shape).firstChild.append(document.querySelector('#movie_player'));
+  }, shape);
+  await page.waitForTimeout(80);
+  await check(page, S, 'leaves the feed preview stock', () => {
+    const player = document.querySelector('#movie_player');
+    const video = player.querySelector('video');
+    return { pass: !player.classList.contains('wblock-tc-native') && !player.hasAttribute('data-wblock-tc-cleaned') &&
+      !video.hasAttribute('controls') && video._wblockAutoPiPHooked !== true && !player.querySelector('.wblock-tc-toolbar'),
+      detail: `class=${player.className} controls=${video.hasAttribute('controls')} hooked=${video._wblockAutoPiPHooked}` };
+  });
+  await page.evaluate((shape) => {
+    const player = document.querySelector('#movie_player');
+    window.__watchParent.append(player);
+    document.querySelector(shape).remove();
+    const video = document.createElement('video');
+    video.className = 'video-stream html5-main-video';
+    player.querySelector('video').replaceWith(video);
+  }, shape);
+  await check(page, S, 'hooks auto-PiP on the next watch video', () => {
+    const player = document.querySelector('#movie_player');
+    const video = player.querySelector('video');
+    return { pass: player.classList.contains('wblock-tc-native') && video.hasAttribute('controls') && video._wblockAutoPiPHooked === true,
+      detail: `class=${player.className} hooked=${video._wblockAutoPiPHooked}` };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
 // ---- Scenario 5: Tube Cleaner resource lifecycle ------------------------
 {
   const { browser, page, pageErrors } = await runScenario('Tube Cleaner (resource lifecycle)', {

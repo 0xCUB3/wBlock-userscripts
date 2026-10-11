@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.55
+// @version      0.1.56
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -3479,7 +3479,8 @@
         if (!node || node.nodeType !== 1) return false;
         try {
             if (node.closest && node.closest(
-                'ytd-video-preview, ytd-thumbnail, ytd-moving-thumbnail-renderer, ' +
+                'ytd-video-preview, ytm-video-preview, .video-preview-shim, yt-thumbnail-view-model, ' +
+                'ytd-thumbnail, ytd-moving-thumbnail-renderer, ' +
                 '#video-preview, #preview, #preview-player, .ytp-inline-preview-ui'
             )) {
                 return true;
@@ -3603,6 +3604,23 @@
         }
     }
 
+    // Hand a nativeized player back to YouTube when it becomes a miniplayer or
+    // feed preview, so neither keeps native controls or auto-PiP hooks.
+    function releasePlayer(player) {
+        if (playerObserver) {
+            try { playerObserver.disconnect(); } catch (e) { /* ignore */ }
+            playerObserver = null;
+        }
+        if (activeVideo) { releaseActiveVideo(); }
+        player.classList.remove('wblock-tc-native');
+        player.removeAttribute(ATTR_CLEANED);
+        if (isHoverPreviewPlayer(player)) {
+            var video = player.querySelector('video');
+            if (video) video.removeAttribute('controls');
+        }
+        setAudioOnlyStyles(false);
+    }
+
     function transformPlayer() {
         // YouTube Music owns a complete responsive player and Media Session.
         // Native controls are invisible in song mode and duplicate its transport
@@ -3616,17 +3634,15 @@
         shortsSuspensionComplete = false;
 
         var player = findPlayer();
-        if (!player) return;
+        if (!player) {
+            // m.youtube.com moves the watch player into a home-feed preview.
+            var moved = document.querySelector('.wblock-tc-native');
+            if (moved && isHoverPreviewPlayer(moved)) releasePlayer(moved);
+            return;
+        }
 
         if (isMiniPlayer(player)) {
-            if (playerObserver) {
-                try { playerObserver.disconnect(); } catch (e) { /* ignore */ }
-                playerObserver = null;
-            }
-            if (activeVideo) { releaseActiveVideo(); }
-            player.classList.remove('wblock-tc-native');
-            player.removeAttribute(ATTR_CLEANED);
-            setAudioOnlyStyles(false);
+            releasePlayer(player);
             return;
         }
 
@@ -5232,7 +5248,8 @@
     function nodeMayContainPlayer(node) {
         if (!node || node.nodeType !== 1) { return false; }
         try {
-            if (isHoverPreviewPlayer(node)) { return false; }
+            // YouTube may move the active player into a preview; release it then.
+            if (isHoverPreviewPlayer(node)) { return !!(activeVideo && node.contains(activeVideo)); }
             if (node.tagName === 'VIDEO' || node.id === 'movie_player' ||
                 node.id === 'player-container' ||
                 node.matches('.html5-video-player, ytd-player')) {
