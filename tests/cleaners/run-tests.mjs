@@ -140,6 +140,8 @@ const sponsorBlockPrelude = `
           { UUID: 'test-selfpromo', category: 'selfpromo', actionType: 'skip', segment: [30, 40] },
           { UUID: 'test-interaction', category: 'interaction', actionType: 'skip', segment: [50, 60] },
           { UUID: 'test-timer', category: 'sponsor', actionType: 'skip', segment: [70, 80] },
+          { UUID: 'test-overlap-sponsor', category: 'sponsor', actionType: 'skip', segment: [100, 110] },
+          { UUID: 'test-overlap-selfpromo', category: 'selfpromo', actionType: 'skip', segment: [100, 110] },
           { UUID: 'test-end', category: 'sponsor', actionType: 'skip', segment: [290, 300] }
         ]
       }]); }});
@@ -1497,6 +1499,17 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'applies newly enabled SponsorBlock categories immediately', () => {
     const video = document.querySelector('#movie_player video');
     return { pass: video.currentTime === 40, detail: `time=${video.currentTime}` };
+  });
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    video.currentTime = 102;
+    video.dispatchEvent(new Event('timeupdate'));
+    document.querySelector('.wblock-tc-sponsor-notice button').click();
+    video.dispatchEvent(new Event('timeupdate'));
+  });
+  await check(page, 'desktop', 'Undo stays put when one range is both Sponsor and Self-promotion', () => {
+    const video = document.querySelector('#movie_player video');
+    return { pass: video.currentTime > 100 && video.currentTime < 101, detail: `time=${video.currentTime}` };
   });
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.56
+// @version      0.1.57
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2269,7 +2269,7 @@
         return category;
     }
 
-    function showSponsorBlockNotice(player, video, segment, ignored, action) {
+    function showSponsorBlockNotice(player, segment, action, onAction) {
         var existing = player.querySelector('.wblock-tc-sponsor-notice');
         if (existing) existing.remove();
         var locale = sponsorBlockLocale();
@@ -2298,12 +2298,7 @@
         var fadeTimer = setTimeout(function () { notice.style.opacity = '0'; }, 3700);
         var removeTimer = setTimeout(function () { if (notice.parentNode) notice.remove(); }, 4000);
         actionButton.addEventListener('click', function () {
-            if (action === 'undo') {
-                ignored[segment.UUID || segment.segment.join(':')] = true;
-                try { video.currentTime = segment.segment[0] + 0.01; } catch (e) { /* ignore */ }
-            } else {
-                try { video.currentTime = segment.segment[1]; } catch (e) { /* ignore */ }
-            }
+            if (onAction) onAction();
             clearTimeout(fadeTimer);
             clearTimeout(removeTimer);
             notice.remove();
@@ -2331,8 +2326,12 @@
             boundaryKey = null;
         }
 
+        function segmentKey(item) {
+            return item.UUID || item.category + ':' + item.segment.join(':');
+        }
+
         function segmentState(item, settings) {
-            var key = item.UUID || item.category + ':' + item.segment.join(':');
+            var key = segmentKey(item);
             var mode = settings.modes[item.category] || 'off';
             var eligible = mode !== 'off' && !ignored[key] &&
                 (!item.actionType || item.actionType === 'skip') &&
@@ -2347,10 +2346,22 @@
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
                 if (now >= item.segment[0] && now < item.segment[1]) continue;
-                var key = item.UUID || item.category + ':' + item.segment.join(':');
+                var key = segmentKey(item);
                 delete ignored[key];
                 delete notified[key];
             }
+        }
+
+        // Undo protects every segment covering the rewind point, not just the
+        // one named in the notice. The same range is often submitted under two
+        // categories (Sponsor and Self-promotion), and protecting only one
+        // let the other re-skip it, flipping between the two forever.
+        function undoSkip(item) {
+            var target = item.segment[0] + 0.01;
+            for (var i = 0; i < segments.length; i++) {
+                if (target >= segments[i].segment[0] && target < segments[i].segment[1]) ignored[segmentKey(segments[i])] = true;
+            }
+            try { video.currentTime = target; } catch (e) { /* ignore */ }
         }
 
         // Keep timeupdate as a throttling/background fallback, but normally arm
@@ -2411,7 +2422,9 @@
                         if (!notified[state.key]) {
                             notified[state.key] = true;
                             if (removeNotice) removeNotice();
-                            removeNotice = showSponsorBlockNotice(player, video, item, ignored, 'skip');
+                            removeNotice = showSponsorBlockNotice(player, item, 'skip', function () {
+                                try { video.currentTime = item.segment[1]; } catch (e) { /* ignore */ }
+                            });
                         }
                         scheduleNextBoundary(settings, now, true);
                         return;
@@ -2425,7 +2438,7 @@
                     try { video.currentTime = target; } catch (e) { return; }
                     if (settings.showNotice) {
                         if (removeNotice) removeNotice();
-                        removeNotice = showSponsorBlockNotice(player, video, item, ignored, 'undo');
+                        removeNotice = showSponsorBlockNotice(player, item, 'undo', function () { undoSkip(item); });
                     }
                     scheduleNextBoundary(settings, item.segment[1], true);
                     return;
@@ -5345,7 +5358,7 @@
             previewSponsorNotice: function () {
                 var p = findPlayer();
                 if (!p || !activeVideo) return 'no player';
-                showSponsorBlockNotice(p, activeVideo, { category: 'sponsor', segment: [0, 5], UUID: 'preview' }, {}, 'undo');
+                showSponsorBlockNotice(p, { category: 'sponsor', segment: [0, 5], UUID: 'preview' }, 'undo');
                 return 'ok';
             },
             QUALITY_LABELS: QUALITY_LABELS,
