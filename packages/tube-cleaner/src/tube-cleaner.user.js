@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.57
+// @version      0.1.58
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2313,7 +2313,7 @@
         var controller = null;
         var requested = false;
         var segments = [];
-        var ignored = {};
+        var undone = null;
         var notified = {};
         var removeNotice = null;
         var boundaryTimer = null;
@@ -2333,35 +2333,38 @@
         function segmentState(item, settings) {
             var key = segmentKey(item);
             var mode = settings.modes[item.category] || 'off';
-            var eligible = mode !== 'off' && !ignored[key] &&
+            var eligible = mode !== 'off' &&
+                !(undone && item.segment[0] >= undone[0] && item.segment[0] < undone[1]) &&
                 (!item.actionType || item.actionType === 'skip') &&
                 item.segment[1] - item.segment[0] >= settings.minimumDuration;
             return { key: key, mode: mode, eligible: eligible };
         }
 
         // Undo and ask-mode notification state lasts only until playback leaves
-        // that segment. Staying inside after Undo remains protected, while a
+        // that range. Staying inside after Undo remains protected, while a
         // later re-entry behaves like the first visit.
         function clearExitedSegmentState(now) {
+            if (undone && (now < undone[0] || now >= undone[1])) undone = null;
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
-                if (now >= item.segment[0] && now < item.segment[1]) continue;
-                var key = segmentKey(item);
-                delete ignored[key];
-                delete notified[key];
+                if (now < item.segment[0] || now >= item.segment[1]) delete notified[segmentKey(item)];
             }
         }
 
-        // Undo protects every segment covering the rewind point, not just the
-        // one named in the notice. The same range is often submitted under two
-        // categories (Sponsor and Self-promotion), and protecting only one
-        // let the other re-skip it, flipping between the two forever.
-        function undoSkip(item) {
-            var target = item.segment[0] + 0.01;
+        // An automatic skip covers the entered segment plus every automatic
+        // segment chained onto it by overlap. The same range is often submitted
+        // under two categories (Sponsor and Self-promotion); skipping them one
+        // at a time made Undo rewind only to the last one, and protecting only
+        // that one let the other re-skip it.
+        function autoSkipEnd(item, settings) {
+            var end = item.segment[1];
             for (var i = 0; i < segments.length; i++) {
-                if (target >= segments[i].segment[0] && target < segments[i].segment[1]) ignored[segmentKey(segments[i])] = true;
+                var other = segments[i];
+                var state = segmentState(other, settings);
+                if (state.eligible && state.mode === 'auto' && other.segment[0] >= item.segment[0] &&
+                    other.segment[0] < end && other.segment[1] > end) end = other.segment[1];
             }
-            try { video.currentTime = target; } catch (e) { /* ignore */ }
+            return end;
         }
 
         // Keep timeupdate as a throttling/background fallback, but normally arm
@@ -2429,7 +2432,9 @@
                         scheduleNextBoundary(settings, now, true);
                         return;
                     }
-                    var target = item.segment[1];
+                    var start = item.segment[0];
+                    var end = autoSkipEnd(item, settings);
+                    var target = end;
                     // Seeking a Safari media element to its exact duration
                     // replays the video instead of ending it (the SponsorBlock
                     // extension works around the same WebKit behavior). Stop
@@ -2438,9 +2443,12 @@
                     try { video.currentTime = target; } catch (e) { return; }
                     if (settings.showNotice) {
                         if (removeNotice) removeNotice();
-                        removeNotice = showSponsorBlockNotice(player, item, 'undo', function () { undoSkip(item); });
+                        removeNotice = showSponsorBlockNotice(player, item, 'undo', function () {
+                            undone = [start, end];
+                            try { video.currentTime = start + 0.01; } catch (e) { /* ignore */ }
+                        });
                     }
-                    scheduleNextBoundary(settings, item.segment[1], true);
+                    scheduleNextBoundary(settings, end, true);
                     return;
                 }
             }

@@ -142,6 +142,8 @@ const sponsorBlockPrelude = `
           { UUID: 'test-timer', category: 'sponsor', actionType: 'skip', segment: [70, 80] },
           { UUID: 'test-overlap-sponsor', category: 'sponsor', actionType: 'skip', segment: [100, 110] },
           { UUID: 'test-overlap-selfpromo', category: 'selfpromo', actionType: 'skip', segment: [100, 110] },
+          { UUID: 'test-chain-sponsor', category: 'sponsor', actionType: 'skip', segment: [120, 130] },
+          { UUID: 'test-chain-selfpromo', category: 'selfpromo', actionType: 'skip', segment: [125, 140] },
           { UUID: 'test-end', category: 'sponsor', actionType: 'skip', segment: [290, 300] }
         ]
       }]); }});
@@ -1510,6 +1512,23 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'Undo stays put when one range is both Sponsor and Self-promotion', () => {
     const video = document.querySelector('#movie_player video');
     return { pass: video.currentTime > 100 && video.currentTime < 101, detail: `time=${video.currentTime}` };
+  });
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    video.currentTime = 121;
+    video.dispatchEvent(new Event('timeupdate'));
+    window.__wblockChainSkipTime = video.currentTime;
+    document.querySelector('.wblock-tc-sponsor-notice button').click();
+    video.dispatchEvent(new Event('timeupdate'));
+    window.__wblockChainUndoTime = video.currentTime;
+    video.currentTime = 126;
+    video.dispatchEvent(new Event('timeupdate'));
+  });
+  await check(page, 'desktop', 'Undo of chained overlapping segments rewinds to the first and protects the whole range', () => {
+    const video = document.querySelector('#movie_player video');
+    return { pass: window.__wblockChainSkipTime === 140 && window.__wblockChainUndoTime > 120 &&
+        window.__wblockChainUndoTime < 121 && video.currentTime === 126,
+      detail: `skip=${window.__wblockChainSkipTime} undo=${window.__wblockChainUndoTime} later=${video.currentTime}` };
   });
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
