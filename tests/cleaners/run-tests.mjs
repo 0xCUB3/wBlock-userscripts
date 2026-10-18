@@ -2964,12 +2964,13 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     host.remove();
     setTimeout(() => document.body.appendChild(host), 50);
   });
-  // Releasing the detached video clears its marker; wait for the re-scan to
-  // set it again instead of guessing how long a slow CI runner needs.
-  await page.waitForTimeout(100);
+  // A loaded CI runner can fire the 50ms reattach timer late, and releasing
+  // the detached video clears its marker. Wait for the host to return and the
+  // re-scan to mark its video again instead of guessing a delay.
   await page.waitForFunction(() => {
-    const v = document.querySelector('test-play-av').shadowRoot.querySelector('video');
-    return v && v.hasAttribute('data-wblock-player-cleaner');
+    const host = document.querySelector('test-play-av');
+    const v = host && host.shadowRoot.querySelector('video');
+    return !!(v && v.hasAttribute('data-wblock-player-cleaner'));
   }, null, { timeout: 5000 }).catch(() => {});
   await page.waitForTimeout(100);
   const after = await page.evaluate(() => ({ ...window.__wblockResourceCounters }));
