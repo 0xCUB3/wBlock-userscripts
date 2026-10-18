@@ -23,10 +23,20 @@ try {
     await page.clock.install();
     await page.clock.pauseAt(new Date(Date.now() + 1000));
     await page.evaluate(`
-      const __wblockTubeCleanerFeatures = { backgroundPlayback: false, sponsorBlock: false,
+      const __wblockTubeCleanerFeatures = { backgroundPlayback: false, sponsorBlock: true,
         pictureInPicture: false, toolbar: true, chapters: false, captions: false, resumePosition: false };
     ` + script);
     await page.clock.runFor(250);
+    if (name === 'macOS') {
+      const off = await browser.newPage();
+      await off.route('**/*', route => route.request().isNavigationRequest()
+        ? route.fulfill({ contentType: 'text/html', body: fixture }) : route.abort());
+      await off.goto('https://fixture.test/watch?v=FIRSTVID001');
+      await off.evaluate('const __wblockTubeCleanerFeatures = { sponsorBlock: false };\n' + script);
+      await off.waitForSelector('.wblock-tc-quality-button');
+      assert.equal(await off.locator('.wblock-tc-sponsor-button').count(), 0, 'disabling SponsorBlock must remove its toolbar button (#1008)');
+      await off.close();
+    }
     // Safari's private control tree cannot be measured from page JavaScript.
     // Check the public video/toolbar geometry instead, including short players
     // where reserving the expanded volume slider's height put pills mid-video.
