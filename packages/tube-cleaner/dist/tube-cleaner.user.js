@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.59
+// @version      0.1.60
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -3163,8 +3163,12 @@
     // position:0%", which its own renderer ignores but Safari honours, so the
     // text hugs the bottom-left corner. Drop the cue settings so the native
     // renderer centres each cue like the manual tracks.
+    // Auto-generated captions time each word with inline tags. Fullscreen
+    // dims words still ahead but never brightens them, so drop the word
+    // timing and show each cue whole (wBlock-userscripts#10).
     function normalizeCaptionVtt(text) {
-        return text.replace(/^(\d{1,2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{1,2}:\d{2}:\d{2}\.\d{3})[ \t][^\r\n]*/gm, '$1');
+        return text.replace(/^(\d{1,2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{1,2}:\d{2}:\d{2}\.\d{3})[ \t][^\r\n]*/gm, '$1')
+            .replace(/<\d{1,2}:\d{2}:\d{2}\.\d{3}>|<\/?c(?:\.[\w.-]*)?>/g, '');
     }
 
     function downloadNativeSubtitleTracks(tracks, signal) {
