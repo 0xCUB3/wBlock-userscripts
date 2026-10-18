@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.58
+// @version      0.1.59
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -4159,11 +4159,16 @@
             opacity + ';transition:opacity 0.15s';
     }
 
+    // A menu opens upward from its pill. Cap it at the room left below
+    // YouTube's header so the top rows don't slide under it (#1004).
     function placeDesktopAnchoredMenu(menu, options) {
         options = options || {};
+        var header = document.querySelector('#masthead-container, ytm-mobile-topbar-renderer, header.mobile-topbar-header');
+        var top = Math.max(0, header ? header.getBoundingClientRect().bottom : 0);
+        var room = menu.parentNode.getBoundingClientRect().top - top - parseFloat(options.gap || '4px') - 8;
         menu.style.position = 'absolute';
         menu.style.height = 'auto';
-        menu.style.maxHeight = options.maxHeight || '60vh';
+        menu.style.maxHeight = Math.max(120, Math.min(window.innerHeight * (options.maxHeight || 0.6), room)) + 'px';
         menu.style.top = 'auto';
         menu.style.bottom = '100%';
         menu.style.left = options.upLeft || 'auto';
@@ -4216,6 +4221,8 @@
                 var mapped = qualityFromVideoHeight(video);
                 if (mapped) current = mapped;
             }
+            // Before the first frame decodes, YouTube can report 'unknown'.
+            if (!QUALITY_LABELS[current]) current = preferred;
             var currentLabel = QUALITY_LABELS[current] || current;
             if (preferred === 'auto') {
                 // Auto is a mode, not a wedged setting. Small portrait players
@@ -4305,7 +4312,7 @@
                 if (IS_IOS) {
                     showMobilePageOverlay(qualityMenu, qualityBtn, 520, 4);
                 } else {
-                    placeDesktopAnchoredMenu(qualityMenu, { maxHeight: '60vh', gap: '4px' });
+                    placeDesktopAnchoredMenu(qualityMenu, { maxHeight: 0.6, gap: '4px' });
                 }
                 qualityMenu.style.display = 'block';
             } else {
@@ -4557,7 +4564,7 @@
                 if (IS_IOS) {
                     showMobilePageOverlay(sponsorMenu, sponsorBtn, 700, 6);
                 } else {
-                    placeDesktopAnchoredMenu(sponsorMenu, { maxHeight: '65vh', gap: '6px' });
+                    placeDesktopAnchoredMenu(sponsorMenu, { maxHeight: 0.65, gap: '6px' });
                 }
                 sponsorMenu.style.display = 'block';
                 sponsorBtn.setAttribute('aria-expanded', 'true');
