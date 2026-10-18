@@ -1950,9 +1950,33 @@ HTMLElement.prototype.setOption = function (module, option, value) {
   await check(page, S, 'leaves a seek into the buffered past alone', () => ({
     pass: window.__wblockLiveTime === 60, detail: `time=${window.__wblockLiveTime}`,
   }));
+  await page.evaluate(() => {
+    const player = document.getElementById('movie_player');
+    window.__wblockLiveHead = false;
+    player.getProgressState = () => ({ isAtLiveHead: window.__wblockLiveHead, current: 60, seekableEnd: 120 });
+    player.seekToLiveHead = () => { window.__wblockLiveHead = true; window.__wblockLiveTime = 119; };
+    document.querySelector('#movie_player video').dispatchEvent(new Event('seeked'));
+  });
+  await check(page, S, 'shows LIVE as behind while rewound (#1009)', () => {
+    const button = document.querySelector('.wblock-tc-live-button');
+    return { pass: !!button && button.style.display !== 'none' && button.title === 'Jump to live',
+      detail: `display=${button?.style.display} title=${button?.title}` };
+  });
+  await page.evaluate(() => document.querySelector('.wblock-tc-live-button').click());
+  await page.waitForTimeout(400);
+  await check(page, S, 'LIVE jumps to the live head (#1009)', () => {
+    const button = document.querySelector('.wblock-tc-live-button');
+    return { pass: window.__wblockLiveTime === 119 && button.title === 'Watching live',
+      detail: `time=${window.__wblockLiveTime} title=${button.title}` };
+  });
   await page.evaluate(() => { window.__wblockIsLive = false; document.querySelector('#movie_player video').currentTime = 500; });
   await check(page, S, 'does not touch seeks once the stream is not live', () => ({
     pass: window.__wblockLiveTime === 500, detail: `time=${window.__wblockLiveTime}`,
+  }));
+  await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('seeked')));
+  await check(page, S, 'hides LIVE once the stream is not live', () => ({
+    pass: document.querySelector('.wblock-tc-live-button')?.style.display === 'none',
+    detail: `display=${document.querySelector('.wblock-tc-live-button')?.style.display}`,
   }));
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();

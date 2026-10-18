@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.61
+// @version      0.1.62
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1239,17 +1239,41 @@
     // been broadcast and playback stalls (#934). Any seek past the buffered
     // live edge is pulled back to just behind it; YouTube's own seekToLiveHead
     // does not recover once the element has jumped that far.
+    function bufferedLiveEdge(video) {
+        try {
+            var ranges = video.buffered;
+            return ranges && ranges.length ? ranges.end(ranges.length - 1) : null;
+        } catch (e) { return null; }
+    }
+
+    // YouTube's progress state shares its own live timeline; the buffered end
+    // only stands in when the player API is missing.
+    function isAtYouTubeLiveHead(player, video) {
+        try {
+            var state = typeof player.getProgressState === 'function' ? player.getProgressState() : null;
+            if (state && typeof state.isAtLiveHead === 'boolean') return state.isAtLiveHead;
+            if (state && isFinite(state.seekableEnd) && isFinite(state.current)) return state.seekableEnd - state.current < 10;
+        } catch (e) { /* fall back to the media element */ }
+        var edge = bufferedLiveEdge(video);
+        return edge === null || edge - video.currentTime < 10;
+    }
+
+    function seekToYouTubeLiveHead(player, video) {
+        try {
+            if (typeof player.seekToLiveHead === 'function') player.seekToLiveHead();
+            else {
+                var edge = bufferedLiveEdge(video);
+                if (edge !== null) video.currentTime = Math.max(0, edge - 0.5);
+            }
+            if (video.paused) video.play().catch(function () {});
+        } catch (e) { /* leave playback where it is */ }
+    }
+
     function setupLiveSeekGuard(player, video) {
         var correcting = false;
-        function liveEdge() {
-            try {
-                var ranges = video.buffered;
-                return ranges && ranges.length ? ranges.end(ranges.length - 1) : null;
-            } catch (e) { return null; }
-        }
         function onSeeking() {
             if (correcting || !isYouTubeLive(player)) return;
-            var edge = liveEdge();
+            var edge = bufferedLiveEdge(video);
             if (edge === null || !(video.currentTime > edge + 1)) return;
             correcting = true;
             try { video.currentTime = Math.max(0, edge - 0.5); }
@@ -4338,12 +4362,38 @@
         qualityWrap.style.cssText = 'position:relative';
         qualityWrap.appendChild(qualityBtn);
         qualityWrap.appendChild(qualityMenu);
+        // Live streams get a LIVE pill that jumps back to the live head (#1009).
+        var liveBtn = document.createElement('button');
+        liveBtn.className = 'wblock-tc-live-button';
+        liveBtn.type = 'button';
+        liveBtn.style.cssText = btnStyle;
+        liveBtn.textContent = '\u25CF LIVE';
+        function updateLiveBtn() {
+            var live = isYouTubeLive(player);
+            liveBtn.style.display = live ? '' : 'none';
+            if (!live) return;
+            var atHead = isAtYouTubeLiveHead(player, video);
+            liveBtn.style.color = atHead ? '#ff4e45' : '#aaa';
+            liveBtn.title = atHead ? 'Watching live' : 'Jump to live';
+            liveBtn.setAttribute('aria-pressed', atHead ? 'true' : 'false');
+        }
+        updateLiveBtn();
+        liveBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            seekToYouTubeLiveHead(player, video);
+            setTimeout(updateLiveBtn, 250);
+        });
+        ['seeked', 'play', 'pause'].forEach(function (type) { video.addEventListener(type, updateLiveBtn); });
+        registerCleanup(function () {
+            ['seeked', 'play', 'pause'].forEach(function (type) { video.removeEventListener(type, updateLiveBtn); });
+        });
+        playbackRow.appendChild(liveBtn);
         playbackRow.appendChild(qualityWrap);
 
-        // Update quality label periodically. Store the timer on the toolbar so
-        // it can be cleared when the toolbar is rebuilt (avoids a leak across
-        // video-element re-creation).
-        toolbar._wblockQualityTimer = setInterval(updateQualityBtn, 2000);
+        // Update the quality and live labels periodically. Store the timer on
+        // the toolbar so it can be cleared when the toolbar is rebuilt (avoids
+        // a leak across video-element re-creation).
+        toolbar._wblockQualityTimer = setInterval(function () { updateQualityBtn(); updateLiveBtn(); }, 2000);
         registerCleanup(function () {
             if (toolbar._wblockQualityTimer) {
                 clearInterval(toolbar._wblockQualityTimer);
