@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dark Reader
 // @namespace    com.skula.wblock
-// @version      4.9.128-wblock.9
+// @version      4.9.128-wblock.8
 // @description  Dark Reader's MIT-licensed API engine for wBlock (beta; without the full site-fix database).
 // @author       Dark Reader Ltd. and wBlock
 // @match        http://*/*
@@ -130,19 +130,17 @@
             if (sheet.sheet) sheet.sheet.disabled = disabled;
         }
     }
-    // Share of on-screen samples that look light: an opaque light background,
-    // or dark text over a transparent one. 0 when nothing can be sampled.
-    function lightSampleShare(rootStyle) {
+    function sampleDoesNotLookDark(rootStyle) {
         var winWidth = typeof innerWidth === 'number' ? innerWidth : 0;
         var winHeight = typeof innerHeight === 'number' ? innerHeight : 0;
-        if (typeof document.elementFromPoint !== 'function' || winWidth <= 0 || winHeight <= 0) return 0;
+        if (typeof document.elementFromPoint !== 'function' || winWidth <= 0 || winHeight <= 0) return false;
         var CELL_SIZE = 256;
         var MAX_ROW_COUNT = 4;
         var columns = Math.min(MAX_ROW_COUNT, Math.ceil(winWidth / CELL_SIZE));
         var rows = Math.min(MAX_ROW_COUNT, Math.ceil(winHeight / CELL_SIZE));
         var stepX = columns ? Math.floor(winWidth / columns) : 0;
         var stepY = rows ? Math.floor(winHeight / rows) : 0;
-        if (stepX <= 0 || stepY <= 0) return 0;
+        if (stepX <= 0 || stepY <= 0) return false;
         var processedElements = typeof Set === 'function' ? new Set() : null;
         var seen = processedElements ? null : [];
         function alreadyProcessed(element) {
@@ -153,7 +151,7 @@
             if (processedElements) processedElements.add(element);
             else seen.push(element);
         }
-        var y, x, element, style, bgColor, textColor, light, samples = 0, lightSamples = 0;
+        var y, x, element, style, bgColor, textColor;
         for (y = Math.floor(stepY / 2); y < winHeight; y += stepY) {
             for (x = Math.floor(stepX / 2); x < winWidth; x += stepX) {
                 element = document.elementFromPoint(x, y);
@@ -162,15 +160,18 @@
                 markProcessed(element);
                 style = element === document.documentElement ? rootStyle : getComputedStyle(element);
                 bgColor = parseComputedColor(style.backgroundColor);
-                textColor = parseComputedColor(style.color);
-                if (!bgColor || (bgColor.r === 24 && bgColor.g === 26 && bgColor.b === 27)) light = true;
-                else if (bgColor.a === 1) light = getSRGBLightness(bgColor.r, bgColor.g, bgColor.b) > 0.6;
-                else light = !textColor || getSRGBLightness(textColor.r, textColor.g, textColor.b) < 0.4;
-                samples++;
-                if (light) lightSamples++;
+                if (!bgColor) return true;
+                if (bgColor.r === 24 && bgColor.g === 26 && bgColor.b === 27) return true;
+                if (bgColor.a === 1) {
+                    if (getSRGBLightness(bgColor.r, bgColor.g, bgColor.b) > 0.6) return true;
+                } else {
+                    textColor = parseComputedColor(style.color);
+                    if (!textColor) return true;
+                    if (getSRGBLightness(textColor.r, textColor.g, textColor.b) < 0.4) return true;
+                }
             }
         }
-        return samples ? lightSamples / samples : 0;
+        return false;
     }
     function hasBuiltInDarkTheme() {
         var rootStyle = getComputedStyle(document.documentElement);
@@ -188,11 +189,9 @@
             var rootLightness = (1 - rootColor.a) + rootColor.a * getSRGBLightness(rootColor.r, rootColor.g, rootColor.b);
             var finalLightness = (1 - bodyColor.a) * rootLightness
                 + bodyColor.a * getSRGBLightness(bodyColor.r, bodyColor.g, bodyColor.b);
-            // A dark body can sit under a light layout (wBlock-userscripts#9),
-            // so most of what is on screen must look dark too.
-            return finalLightness < 0.5 && lightSampleShare(rootStyle) < 0.5;
+            return finalLightness < 0.5;
         }
-        if (lightSampleShare(rootStyle) > 0) return false;
+        if (sampleDoesNotLookDark(rootStyle)) return false;
         var rootTextColor = parseComputedColor(rootStyle.color);
         return !!(rootTextColor && getSRGBLightness(rootTextColor.r, rootTextColor.g, rootTextColor.b) > 0.5);
     }
