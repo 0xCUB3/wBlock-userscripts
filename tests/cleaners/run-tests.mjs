@@ -2964,7 +2964,14 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     host.remove();
     setTimeout(() => document.body.appendChild(host), 50);
   });
-  await page.waitForTimeout(200);
+  // Releasing the detached video clears its marker; wait for the re-scan to
+  // set it again instead of guessing how long a slow CI runner needs.
+  await page.waitForTimeout(100);
+  await page.waitForFunction(() => {
+    const v = document.querySelector('test-play-av').shadowRoot.querySelector('video');
+    return v && v.hasAttribute('data-wblock-player-cleaner');
+  }, null, { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(100);
   const after = await page.evaluate(() => ({ ...window.__wblockResourceCounters }));
   for (const key of ['listeners', 'intervals', 'mutationObservers', 'intersectionObservers']) {
     record(S, `${key} stay flat after shadow host reattachment`, after[key] === baseline[key],
