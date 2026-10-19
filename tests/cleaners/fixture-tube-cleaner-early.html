@@ -41,6 +41,7 @@
     chrome.className = 'ytp-chrome-bottom';
     player.appendChild(chrome);
     timing.createdAt = performance.now();
+    requestAnimationFrame(function () { timing.frameAt = performance.now(); });
     document.documentElement.appendChild(player);
   })();
 </script>

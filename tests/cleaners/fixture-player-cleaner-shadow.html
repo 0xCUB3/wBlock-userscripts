@@ -33,6 +33,7 @@
         }).observe(root, { childList: true, subtree: true, attributes: true });
 
         timing.createdAt = performance.now();
+        requestAnimationFrame(function () { timing.frameAt = performance.now(); });
         root.innerHTML = [
           '<div id="jw6" class="jwplayer jw-reset">',
           '  <div class="jw-wrapper">',

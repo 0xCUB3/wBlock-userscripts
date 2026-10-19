@@ -314,8 +314,13 @@ function record(scenario, name, pass, detail = '') {
 
 // Run an in-page check that returns {pass, detail}. Retries until pass or timeout
 // because the userscript transforms the player asynchronously (250ms poll loop).
-// A frame is ~16 ms; shared CI Macs stall the main thread far longer.
-const FRAME_BUDGET_MS = process.env.CI ? 100 : 50;
+// "Within one frame" means before the first animation frame after insertion.
+// Compare order, not elapsed time: shared CI Macs stall both by 100 ms or more.
+const beforeFirstFrame = (v) => {
+  const t = window[v];
+  return { pass: !!(t && t.nativeAt > 0 && t.nativeAt >= t.createdAt && (!t.frameAt || t.nativeAt <= t.frameAt)),
+    detail: t ? `native=${(t.nativeAt - t.createdAt).toFixed(1)}ms frame=${t.frameAt ? (t.frameAt - t.createdAt).toFixed(1) + 'ms' : 'none'}` : 'no timing' };
+};
 
 // WebKit selects a <track default> on its own, with no user activation.
 // Playwright's evaluate grants a 5 s activation, so fire after it lapses.
@@ -2352,11 +2357,7 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     return { pass, detail: t ? `native=${t.nativeAt.toFixed(1)}ms dcl=${t.domContentLoadedAt.toFixed(1)}ms` : 'no timing' };
   });
 
-  await check(page, S, 'nativeizes within one frame of insertion', budget => {
-    const t = window.__wblockEarlyTubeTiming;
-    const elapsed = t && t.nativeAt ? t.nativeAt - t.createdAt : Infinity;
-    return { pass: elapsed >= 0 && elapsed < budget, detail: `latency=${Number.isFinite(elapsed) ? elapsed.toFixed(1) : 'n/a'}ms` };
-  }, { arg: FRAME_BUDGET_MS });
+  await check(page, S, 'nativeizes within one frame of insertion', beforeFirstFrame, { arg: '__wblockEarlyTubeTiming' });
 
   await check(page, S, 'keeps YouTube chrome hidden', () => {
     const chrome = document.querySelector('#movie_player .ytp-chrome-bottom');
@@ -2944,12 +2945,7 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     return { pass, detail: t ? `native=${t.nativeAt.toFixed(1)}ms dcl=${t.domContentLoadedAt.toFixed(1)}ms` : 'no timing' };
   });
 
-  await check(page, S, 'nativeizes shadow video within one frame', budget => {
-    const t = window.__wblockShadowTiming;
-    const elapsed = t && t.nativeAt ? t.nativeAt - t.createdAt : Infinity;
-    return { pass: elapsed >= 0 && elapsed < budget,
-      detail: `latency=${Number.isFinite(elapsed) ? elapsed.toFixed(1) : 'n/a'}ms` };
-  }, { arg: FRAME_BUDGET_MS });
+  await check(page, S, 'nativeizes shadow video within one frame', beforeFirstFrame, { arg: '__wblockShadowTiming' });
 
   await check(page, S, 'retains Archive-style media element and absolute source', () => {
     const root = document.querySelector('test-play-av').shadowRoot;
@@ -4006,11 +4002,7 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     return { pass, detail: t ? `native=${t.nativeAt.toFixed(1)}ms dcl=${t.domContentLoadedAt.toFixed(1)}ms` : 'no timing' };
   });
 
-  await check(page, S, 'nativeizes within one frame of insertion', budget => {
-    const t = window.__wblockEarlyPlayerTiming;
-    const elapsed = t && t.nativeAt ? t.nativeAt - t.createdAt : Infinity;
-    return { pass: elapsed >= 0 && elapsed < budget, detail: `latency=${Number.isFinite(elapsed) ? elapsed.toFixed(1) : 'n/a'}ms` };
-  }, { arg: FRAME_BUDGET_MS });
+  await check(page, S, 'nativeizes within one frame of insertion', beforeFirstFrame, { arg: '__wblockEarlyPlayerTiming' });
 
   await check(page, S, 'shows native controls with custom chrome removed', () => {
     const c = document.getElementById('early-player');
