@@ -1969,6 +1969,21 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     return { pass: window.__wblockLiveTime === 119 && button.title === 'Watching live',
       detail: `time=${window.__wblockLiveTime} title=${button.title}` };
   });
+  await page.evaluate(() => {
+    Object.defineProperty(document.querySelector('#movie_player video'), 'paused', { configurable: true, get: () => false });
+    window.__wblockLiveHead = false;
+  });
+  await page.waitForTimeout(2300);
+  await check(page, S, 'LIVE stays red through brief drift behind the head (#1009)', () => ({
+    pass: document.querySelector('.wblock-tc-live-button').title === 'Watching live',
+    detail: `title=${document.querySelector('.wblock-tc-live-button').title}`,
+  }));
+  await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('seeked')));
+  await check(page, S, 'LIVE turns gray at once after a seek behind the head (#1009)', () => ({
+    pass: document.querySelector('.wblock-tc-live-button').title === 'Jump to live',
+    detail: `title=${document.querySelector('.wblock-tc-live-button').title}`,
+  }));
+  await page.evaluate(() => { delete document.querySelector('#movie_player video').paused; });
   await page.evaluate(() => { window.__wblockIsLive = false; document.querySelector('#movie_player video').currentTime = 500; });
   await check(page, S, 'does not touch seeks once the stream is not live', () => ({
     pass: window.__wblockLiveTime === 500, detail: `time=${window.__wblockLiveTime}`,

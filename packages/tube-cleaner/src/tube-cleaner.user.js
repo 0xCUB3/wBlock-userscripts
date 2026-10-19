@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.62
+// @version      0.1.63
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -503,6 +503,15 @@
         '.wblock-tc-native .wblock-tc-sponsor-notice,',
         '.wblock-tc-native .wblock-tc-sponsor-notice *',
         '{ pointer-events: auto !important; }',
+        // Only the buttons and menus take the pointer. The gaps between them
+        // stay on the video, or Safari hides its controls there (#1010).
+        '.wblock-tc-toolbar :is(.wblock-tc-playback-row, .wblock-tc-services-row),',
+        '.wblock-tc-toolbar :is(.wblock-tc-playback-row, .wblock-tc-services-row) > div',
+        '{ pointer-events: none !important; }',
+        // YouTube's closed guide drawer keeps a 20px swipe strip along the
+        // page's left edge, over any video that reaches it (#1010).
+        'tp-yt-app-drawer[swipe-open]:not([opened]) #contentContainer::after',
+        '{ pointer-events: none !important; }',
         // A faded-out toolbar must not swallow taps.
         '.wblock-tc-toolbar.wblock-tc-toolbar-hidden,',
         '.wblock-tc-toolbar.wblock-tc-toolbar-hidden *,',
@@ -4368,11 +4377,21 @@
         liveBtn.type = 'button';
         liveBtn.style.cssText = btnStyle;
         liveBtn.textContent = '\u25CF LIVE';
-        function updateLiveBtn() {
+        // Playback drifts past YouTube's live-head cutoff (about 9 seconds)
+        // and catches up on its own. Only a seek or pause turns the pill gray
+        // right away; drift has to outlast LIVE_DRIFT_MS first.
+        var LIVE_DRIFT_MS = 10000;
+        var liveBehindSince = 0;
+        function updateLiveBtn(event) {
             var live = isYouTubeLive(player);
             liveBtn.style.display = live ? '' : 'none';
             if (!live) return;
             var atHead = isAtYouTubeLiveHead(player, video);
+            var now = Date.now();
+            if (atHead) liveBehindSince = 0;
+            else if (!liveBehindSince) liveBehindSince = now;
+            if (!atHead && !video.paused && !(event && event.type === 'seeked') &&
+                liveBtn.getAttribute('aria-pressed') === 'true' && now - liveBehindSince < LIVE_DRIFT_MS) return;
             liveBtn.style.color = atHead ? '#ff4e45' : '#aaa';
             liveBtn.title = atHead ? 'Watching live' : 'Jump to live';
             liveBtn.setAttribute('aria-pressed', atHead ? 'true' : 'false');
@@ -4860,6 +4879,23 @@
             var TOOLBAR_HIDE_DELAY = 4000;
             var _isOverPlayer = false;
             var _isOverToolbar = false;
+            // Safari fades its controls, and the shade behind them, the moment
+            // the pointer leaves the video for one of these buttons. Draw the
+            // shade ourselves while a button or menu is in use (#1010).
+            var scrim = document.createElement('div');
+            scrim.className = 'wblock-tc-scrim';
+            scrim.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:160px;z-index:2147483645;' +
+                'pointer-events:none;opacity:0;transition:opacity .25s;background:linear-gradient(to top,rgba(0,0,0,.5),rgba(0,0,0,0))';
+            player.querySelectorAll('.wblock-tc-scrim').forEach(function (old) { old.remove(); });
+            player.appendChild(scrim);
+            function syncScrim() {
+                var inUse = _isOverToolbar || desktopPanelOpen();
+                scrim.style.opacity = inUse && toolbar.style.opacity === '1' && !video.paused && !video.ended ? '1' : '0';
+            }
+            function onScrimClick() { setTimeout(syncScrim, 0); }
+            document.addEventListener('click', onScrimClick);
+            video.addEventListener('play', syncScrim);
+            video.addEventListener('pause', syncScrim);
             function clearNativeControlHover() {
                 nativeControlHover = false;
             }
@@ -4885,6 +4921,7 @@
                 toolbar.style.opacity = '1';
                 toolbar.classList.remove('wblock-tc-toolbar-hidden');
                 clearTimeout(toolbarTimer);
+                syncScrim();
             }
 
             function hideToolbar() {
@@ -4894,6 +4931,7 @@
                 }
                 toolbar.style.opacity = '0';
                 toolbar.classList.add('wblock-tc-toolbar-hidden');
+                syncScrim();
             }
 
             function scheduleHideToolbar() {
@@ -4959,6 +4997,7 @@
             toolbar.addEventListener('mouseleave', function () {
                 _isOverToolbar = false;
                 scheduleHideToolbar();
+                syncScrim();
             });
 
             toolbar.addEventListener('focusin', function () {
@@ -5015,6 +5054,10 @@
                 clearTimeout(presentationTimer);
                 document.removeEventListener('mousemove', onDocumentMouseMove, true);
                 document.removeEventListener('mouseout', onDocumentMouseOut, true);
+                document.removeEventListener('click', onScrimClick);
+                video.removeEventListener('play', syncScrim);
+                video.removeEventListener('pause', syncScrim);
+                scrim.remove();
                 video.removeEventListener('dblclick', onVideoReveal);
                 document.removeEventListener('wblock-tc-toolbar-pref', onToolbarPref);
                 player.removeEventListener('mouseenter', onPlayerMouseEnter);

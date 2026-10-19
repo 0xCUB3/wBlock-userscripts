@@ -72,7 +72,9 @@ try {
           // Empty space left of the shorter SB row must still reach the video,
           // not close Safari's volume popover as the pointer moves toward it.
           emptyHit: document.elementFromPoint(tr.left + 1, sr.top + sr.height / 2) === video,
-          qualityHit: document.elementFromPoint(qr.left + qr.width / 2, qr.top + qr.height / 2) === quality
+          qualityHit: document.elementFromPoint(qr.left + qr.width / 2, qr.top + qr.height / 2) === quality,
+          // So must the gap between two pills in a row (#1010).
+          rowGapHit: !audio || document.elementFromPoint((qr.right + audio.getBoundingClientRect().left) / 2, qr.top + qr.height / 2) === video
         };
       });
       const label = `${name} ${layout ? `${layout.width}x${layout.height}` : 'inline'}`;
@@ -86,7 +88,7 @@ try {
       assert.equal(geometry.audioGap, mobile ? null : geometry.gap, `${label}: audio aligns with quality only on macOS`);
       assert.equal(geometry.safeArea, mobile, `${label}: preserve mobile safe-area positioning`);
       assert.ok(geometry.right >= 8 && geometry.inside && geometry.qualityHit, `${label}: buttons stay inside the video and clickable`);
-      if (!mobile) assert.ok(geometry.emptyHit, `${label}: empty toolbar space must not intercept native controls`);
+      if (!mobile) assert.ok(geometry.emptyHit && geometry.rowGapHit, `${label}: empty toolbar space must not intercept native controls`);
     }
     const visible = () => page.evaluate(() => document.querySelector('.wblock-tc-toolbar')?.style.opacity === '1');
     const state = async (values, event) => page.evaluate(({ values, event }) => {
@@ -143,9 +145,12 @@ try {
       await mouse('mouseenter', '.wblock-tc-toolbar');
       await page.clock.runFor(50);
       assert.equal(await visible(), true, 'hovering the custom toolbar keeps controls visible');
+      const scrim = () => page.evaluate(() => document.querySelector('.wblock-tc-scrim')?.style.opacity);
+      assert.equal(await scrim(), '1', 'hovering the toolbar shades the video like Safari’s controls (#1010)');
       await mouse('mouseout', '.wblock-tc-toolbar', null);
       await page.clock.runFor(50);
       assert.equal(await visible(), false, 'leaving the window while hovering the toolbar hides controls immediately');
+      assert.equal(await scrim(), '0', 'the shade leaves with the toolbar');
 
       await mouse('mouseenter', '.wblock-tc-toolbar');
       await page.evaluate(() => document.querySelector('.wblock-tc-quality-button').click());
