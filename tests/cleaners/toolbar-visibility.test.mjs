@@ -35,6 +35,13 @@ try {
       await off.evaluate('const __wblockTubeCleanerFeatures = { sponsorBlock: false };\n' + script);
       await off.waitForSelector('.wblock-tc-quality-button');
       assert.equal(await off.locator('.wblock-tc-sponsor-button').count(), 0, 'disabling SponsorBlock must remove its toolbar button (#1008)');
+      assert.notEqual(await off.evaluate(() => {
+        const error = document.createElement('div');
+        error.className = 'ytp-error';
+        error.textContent = 'This live stream recording is not available.';
+        document.querySelector('#movie_player').appendChild(error);
+        return getComputedStyle(error).display;
+      }), 'none', 'an unplayable video must keep YouTube\u2019s explanation');
       await off.close();
     }
     // Safari's private control tree cannot be measured from page JavaScript.
