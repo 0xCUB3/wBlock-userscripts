@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.64
+// @version      0.1.65
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -4409,7 +4409,7 @@
         // Update the quality and live labels periodically. Store the timer on
         // the toolbar so it can be cleared when the toolbar is rebuilt (avoids
         // a leak across video-element re-creation).
-        toolbar._wblockQualityTimer = setInterval(function () { updateQualityBtn(); updateLiveBtn(); }, 2000);
+        toolbar._wblockQualityTimer = setInterval(function () { updateQualityBtn(); updateLiveBtn(); if (!IS_IOS) updateTheaterBtn(); }, 2000);
         registerCleanup(function () {
             if (toolbar._wblockQualityTimer) {
                 clearInterval(toolbar._wblockQualityTimer);
@@ -4435,6 +4435,30 @@
             updateAudioBtn();
         });
         if (!IS_IOS) { playbackRow.appendChild(audioBtn); }
+
+        // Theater mode. The size button lives in YouTube's hidden control bar;
+        // click it so YouTube keeps its own layout and remembered preference.
+        var theaterBtn = document.createElement('button');
+        theaterBtn.className = 'wblock-tc-theater-button';
+        theaterBtn.type = 'button';
+        theaterBtn.style.cssText = btnStyle;
+        theaterBtn.textContent = 'Theater';
+        theaterBtn.title = 'Theater mode (t)';
+        function updateTheaterBtn() {
+            var flexy = player.closest('ytd-watch-flexy');
+            theaterBtn.style.display = flexy && player.querySelector('.ytp-size-button') ? '' : 'none';
+            var on = !!flexy && flexy.hasAttribute('theater');
+            theaterBtn.style.color = on ? '#4fc3f7' : '#fff';
+            theaterBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+        }
+        updateTheaterBtn();
+        theaterBtn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var size = player.querySelector('.ytp-size-button');
+            if (size) size.click();
+            setTimeout(updateTheaterBtn, 100);
+        });
+        if (!IS_IOS) { playbackRow.appendChild(theaterBtn); }
 
         // SponsorBlock settings. This mirrors SponsorBlock's familiar category
         // colors and Auto / Show button / Disabled choices without importing
