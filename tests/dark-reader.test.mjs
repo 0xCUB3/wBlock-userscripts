@@ -92,10 +92,10 @@ function makeDocument({
 
 function runAdapter(configuration = '', document = undefined, extraContext = {}) {
   StubMutationObserver.instances = [];
-  let autoCalls = 0, autoDisableCalls = 0, enableCalls = 0, disableCalls = 0, fetchMethod;
+  let autoCalls = 0, autoDisableCalls = 0, enableCalls = 0, disableCalls = 0, fetchMethod, themeOptions;
   const window = {DarkReader: {
-    auto(theme) { if (theme === false) autoDisableCalls++; else autoCalls++; },
-    enable() { enableCalls++; },
+    auto(theme) { if (theme === false) autoDisableCalls++; else { autoCalls++; themeOptions = theme; } },
+    enable(theme) { enableCalls++; themeOptions = theme; },
     disable() { disableCalls++; },
     setFetchMethod(fn) { fetchMethod = fn; }
   }};
@@ -116,10 +116,19 @@ function runAdapter(configuration = '', document = undefined, extraContext = {})
   vm.createContext(context); vm.runInContext(configuration + adapter, context);
   return {get autoCalls() { return autoCalls; }, get autoDisableCalls() { return autoDisableCalls; },
           get enableCalls() { return enableCalls; }, get disableCalls() { return disableCalls; },
-          fetchMethod, window, document};
+          fetchMethod, window, document, themeOptions};
 }
 
 const forcedFlag = 'const __wblockDarkReaderFollowsSystemAppearance = false;\n';
+
+for (const follows of [true, false]) {
+  for (const pureBlack of [false, true]) {
+    const result = runAdapter(`const __wblockDarkReaderFollowsSystemAppearance = ${follows};\nconst __wblockDarkReaderPureBlack = ${pureBlack};\n`);
+    if (pureBlack ? result.themeOptions?.darkSchemeBackgroundColor !== '#000000' : result.themeOptions !== undefined) {
+      throw new Error('pure black must configure both appearance modes without changing the default theme');
+    }
+  }
+}
 
 // 1. No DOM available (defensive): modes still wire up, detection is skipped.
 const automatic = runAdapter();

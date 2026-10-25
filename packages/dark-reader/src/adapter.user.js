@@ -47,12 +47,14 @@
        not flash bright first. The guard is excluded from the detector's
        page-has-style probe and removed as soon as detection settles, before
        the page background is measured, so it can never bias detection. */
+    var pureBlack = typeof __wblockDarkReaderPureBlack !== 'undefined' && __wblockDarkReaderPureBlack;
+    var themeOptions = pureBlack ? {darkSchemeBackgroundColor: '#000000'} : undefined;
     var antiflashStyle = null;
     function injectAntiflash() {
         if (!document.documentElement || typeof document.createElement !== 'function') return;
         var style = document.createElement('style');
         style.id = 'wblock-antiflash';
-        style.textContent = 'html { background-color: #181a1b !important; color-scheme: dark !important; }';
+        style.textContent = 'html { background-color: ' + (pureBlack ? '#000000' : '#181a1b') + ' !important; color-scheme: dark !important; }';
         document.documentElement.appendChild(style);
         antiflashStyle = style;
     }
@@ -286,9 +288,9 @@
     var followsSystemAppearance = typeof __wblockDarkReaderFollowsSystemAppearance === 'undefined'
         || __wblockDarkReaderFollowsSystemAppearance;
     if (followsSystemAppearance && typeof api.auto === 'function') {
-        api.auto();
+        api.auto(themeOptions);
     } else if (!followsSystemAppearance && typeof api.enable === 'function') {
-        api.enable();
+        api.enable(themeOptions);
     } else {
         return;
     }

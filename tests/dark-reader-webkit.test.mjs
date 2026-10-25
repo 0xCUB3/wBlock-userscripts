@@ -19,7 +19,7 @@ import {dirname, join} from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const dist = readFileSync(join(__dirname, '..', 'packages', 'dark-reader', 'dist', 'dark-reader.user.js'), 'utf8');
 const fixture = name => pathToFileURL(join(__dirname, 'dark-reader', `fixture-${name}.html`)).href;
-const flagPrefix = follows => `const __wblockDarkReaderFollowsSystemAppearance = ${follows};\n`;
+const flagPrefix = (follows, pureBlack = false) => `const __wblockDarkReaderFollowsSystemAppearance = ${follows};\nconst __wblockDarkReaderPureBlack = ${pureBlack};\n`;
 // Playwright init scripts can run before the document element exists, which
 // never happens for real document-start content-script injection in Safari.
 // Defer to the moment the document element appears to mirror production.
@@ -43,6 +43,22 @@ const antiflashRecorder = `new MutationObserver(records => {
 
 const SETTLE_MS = 400;
 const scenarios = [
+  ...[false, true].flatMap(follows => [false, true].map(pureBlack => ({
+    name: `${follows ? 'system' : 'forced'} ${pureBlack ? 'OLED' : 'default'} background`,
+    follows, pureBlack, colorScheme: 'dark', page: 'light',
+    expectEnabled: true, expectAntiflash: true,
+    expectedBackground: pureBlack ? 'rgb(0, 0, 0)' : 'rgb(24, 26, 27)'
+  }))),
+  {
+    name: 'OLED follows the system and stays off in light mode',
+    follows: true, pureBlack: true, colorScheme: 'light', page: 'light',
+    expectEnabled: false, expectAntiflash: false
+  },
+  {
+    name: 'OLED preserves native-dark detection',
+    follows: false, pureBlack: true, colorScheme: 'dark', page: 'dark-root',
+    expectEnabled: false, expectAntiflash: true
+  },
   {
     name: 'forced dark keeps theming a light page',
     follows: false, colorScheme: 'light', page: 'light',
@@ -117,7 +133,7 @@ for (const scenario of scenarios) {
   try {
     await page.emulateMedia({colorScheme: scenario.colorScheme});
     await context.addInitScript(antiflashRecorder);
-    await context.addInitScript(atDocumentStart(flagPrefix(scenario.follows) + dist));
+    await context.addInitScript(atDocumentStart(flagPrefix(scenario.follows, scenario.pureBlack) + dist));
     await page.goto(fixture(scenario.page), {waitUntil: 'load'});
     await page.waitForFunction(() => window.DarkReader !== undefined);
     if (scenario.expectEnabled) {
@@ -147,6 +163,12 @@ for (const scenario of scenarios) {
     if (antiflash.present) throw new Error('anti-flash guard was left in the document');
     if (antiflash.seen !== scenario.expectAntiflash) {
       throw new Error(antiflash.seen ? 'anti-flash guard injected unexpectedly' : 'anti-flash guard was never injected');
+    }
+    if (scenario.expectedBackground) {
+      const backgrounds = await page.evaluate(() => [document.documentElement, document.body].map(element => getComputedStyle(element).backgroundColor));
+      if (backgrounds.some(background => background !== scenario.expectedBackground)) {
+        throw new Error(`expected ${scenario.expectedBackground}, got ${backgrounds.join(", ")}`);
+      }
     }
     if (scenario.after) await scenario.after(page);
     if (pageErrors.length > 0) throw new Error(`page errors: ${pageErrors.join('; ')}`);
