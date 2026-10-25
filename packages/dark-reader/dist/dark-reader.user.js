@@ -6,7 +6,7 @@ const __wblockDarkReaderChrome={runtime:{}};/**
 // ==UserScript==
 // @name         Dark Reader
 // @namespace    com.skula.wblock
-// @version      4.9.128-wblock.9
+// @version      4.9.128-wblock.10
 // @description  Dark Reader's MIT-licensed API engine for wBlock (beta; without the full site-fix database).
 // @author       Dark Reader Ltd. and wBlock
 // @match        http://*/*
