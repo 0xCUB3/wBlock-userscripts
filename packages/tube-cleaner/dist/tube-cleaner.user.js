@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.67
+// @version      0.1.68
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -1733,12 +1733,17 @@
 
         function metadataData() {
             var data = playerData();
+            var videoId = youtubeVideoIdentity(container);
+            // Page data and meta tags describe the first page loaded, not
+            // the video reached by SPA navigation.
             var details = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails || {};
+            if (videoId && details.videoId !== videoId) details = {};
             var title = data.title || details.title || meta('og:title') || document.title || location.hostname;
             var artist = data.author || data.ownerChannelName || details.author || details.channelTitle ||
                 meta('og:site_name') || location.hostname;
             var thumbnails = (data.thumbnail && data.thumbnail.thumbnails) || (details.thumbnail && details.thumbnail.thumbnails);
-            var artwork = video.poster || (thumbnails && thumbnails.length && thumbnails[thumbnails.length - 1].url) || meta('og:image');
+            var artwork = video.poster || (thumbnails && thumbnails.length && thumbnails[thumbnails.length - 1].url) ||
+                (videoId ? 'https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg' : meta('og:image'));
             var result = { title: String(title), artist: String(artist) };
             if (artwork) result.artwork = [{ src: String(artwork) }];
             var chapters = video._wblockChapterData;

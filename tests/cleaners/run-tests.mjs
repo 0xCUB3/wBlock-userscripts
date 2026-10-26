@@ -1229,10 +1229,12 @@ async function qualityUISelectionCheck(page, scenario) {
     player.getVideoData = () => ({ video_id: 'TESTVID123', title: 'Tau updated', author: 'Updated Channel' });
     document.dispatchEvent(new Event('yt-page-data-updated'));
   });
+  // Player data carries no thumbnail and page meta is stale after SPA navigation.
   await check(page, 'desktop', 'refreshes Now Playing metadata after SPA metadata changes', () => ({
     pass: window.__wblockMediaSessionState.metadata?.title === 'Tau updated' &&
-      window.__wblockMediaSessionState.metadata?.artist === 'Updated Channel',
-    detail: `title=${window.__wblockMediaSessionState.metadata?.title} artist=${window.__wblockMediaSessionState.metadata?.artist}`,
+      window.__wblockMediaSessionState.metadata?.artist === 'Updated Channel' &&
+      window.__wblockMediaSessionState.metadata?.artwork?.[0]?.src === 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg',
+    detail: `title=${window.__wblockMediaSessionState.metadata?.title} artist=${window.__wblockMediaSessionState.metadata?.artist} artwork=${window.__wblockMediaSessionState.metadata?.artwork?.[0]?.src}`,
   }));
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
