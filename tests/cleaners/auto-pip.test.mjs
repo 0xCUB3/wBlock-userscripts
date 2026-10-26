@@ -6,18 +6,20 @@ const source = readFileSync(new URL('../../packages/tube-cleaner/dist/tube-clean
 const browser = await webkit.launch();
 try {
   for (const device of [null, devices['iPhone 13']]) {
+    // On iPhone, hide-time PiP is background playback, so only that switch gates it.
     for (const config of [
-      { name: 'app disabled', app: false, expected: false },
-      { name: 'site disabled', app: true, site: '0', expected: false },
-      { name: 'app overrides site', app: false, site: '1', expected: false },
+      { name: 'app disabled', app: false, expected: !!device },
+      { name: 'site disabled', app: true, site: '0', expected: !!device },
+      { name: 'app overrides site', app: false, site: '1', expected: !!device },
       { name: 'enabled', app: true, expected: true },
       { name: 'default', expected: true },
+      { name: 'background playback disabled', background: false, expected: !device },
     ]) {
       const context = await browser.newContext(device || {});
       await context.route('**/*', route => route.fulfill({ contentType: 'text/html', body:
         '<!doctype html><div id="movie_player"><video playsinline></video></div>' }));
-      await context.addInitScript(({ app, site }) => {
-        window.__wblockTubeCleanerFeatures = { pictureInPicture: app };
+      await context.addInitScript(({ app, site, background }) => {
+        window.__wblockTubeCleanerFeatures = { pictureInPicture: app, backgroundPlayback: background };
         if (site !== undefined) localStorage.setItem('wblock.tubeCleaner.autoPiP', site);
         // WebKit's YouTube caption bridge expects the site's player API.
         HTMLElement.prototype.getOption = () => [];
@@ -53,7 +55,7 @@ try {
       const label = `${device ? 'iPhone' : 'desktop'} ${config.name}`;
       assert.equal(state.hiddenRequests, config.expected ? 1 : 0, `${label}: tab hiding`);
       assert.equal(state.blurRequests, device && config.expected ? 1 : 0, `${label}: blur`);
-      assert.equal(state.backgroundPlayback, true, `${label}: background playback remains enabled`);
+      assert.equal(state.backgroundPlayback, config.background !== false, `${label}: background playback`);
       assert.deepEqual(errors, [], `${label}: page errors`);
       console.log(`PASS ${label}`);
       await context.close();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.66
+// @version      0.1.67
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -130,8 +130,14 @@
             (video && video.webkitPresentationMode === 'picture-in-picture');
     }
 
+    // iOS suspends a playing video track when the page hides unless the video
+    // is in PiP, so on iOS hide-time PiP is what background playback is and
+    // follows that switch. Elsewhere it is plain automatic PiP.
+    function autoPiPAllowed() { return autoPiPEnabled && featureEnabled('pictureInPicture'); }
+    function hidePiPAllowed() { return IS_IOS ? featureEnabled('backgroundPlayback') : autoPiPAllowed(); }
+
     function enterPiP(video) {
-        if (!video || !autoPiPEnabled || !featureEnabled('pictureInPicture')) return;
+        if (!video) return;
         if (isPiPActive(video)) return;
         if (video.paused || video.ended) return;
         try {
@@ -179,19 +185,17 @@
         } catch (e) { warn('exitPiP failed', e); }
     }
 
-    function setupAutoPiP(video) {
-        if (!video || video._wblockAutoPiPHooked) return;
+    // Returns the cleanup. YouTube Music passes watchScroll false: its player
+    // bar keeps playing while the page scrolls.
+    function setupAutoPiP(video, watchScroll) {
+        if (!autoPiPAllowed() && !hidePiPAllowed()) return function () {};
         video._wblockAutoPiPHooked = true;
-
         // Tab switch: enter PiP when tab hides, exit when visible.
         // Note: enableBackgroundPlayback() overrides document.hidden to always
         // return false, so we use _realHidden which tracks the true state.
         function onVisibilityChange() {
-            if (!autoPiPEnabled) return;
             if (_realHidden) {
-                if (!video.paused && !video.ended) {
-                    enterPiP(video);
-                }
+                if (hidePiPAllowed()) enterPiP(video);
             } else if (document.hasFocus() && isPiPActive(video)) {
                 exitPiP(video);
             }
@@ -201,7 +205,6 @@
         // another visible window may simply be active beside Safari. Enter PiP
         // only for actual page hiding or when the video scrolls out of view.
         function onFocus() {
-            if (!autoPiPEnabled) return;
             if (_realHidden) return;
             if (document.hasFocus() && isPiPActive(video)) {
                 exitPiP(video);
@@ -210,7 +213,7 @@
         function onBlur() {
             // iPhone can suspend a video before its hidden event is delivered.
             // Enter while the page still owns an active playback gesture.
-            if (IS_IPHONE && !video.paused && !video.ended) enterPiP(video);
+            if (IS_IPHONE && hidePiPAllowed()) enterPiP(video);
         }
 
         var removeVisibilityObserver = observeRealVisibility(onVisibilityChange);
@@ -225,11 +228,11 @@
         var stickyContainer = document.getElementById('player-container-id');
         var skipScrollPiP = !!(stickyContainer && stickyContainer.classList.contains('sticky-player'));
         var scrollObserver = null;
-        if (!skipScrollPiP) {
+        if (watchScroll && !skipScrollPiP) {
             scrollObserver = new IntersectionObserver(function (entries) {
-                if (!autoPiPEnabled) return;
+                if (!autoPiPAllowed()) return;
                 entries.forEach(function (entry) {
-                    if (!entry.isIntersecting && !video.paused && !video.ended) {
+                    if (!entry.isIntersecting) {
                         enterPiP(video);
                     } else if (entry.isIntersecting && isPiPActive(video)) {
                         exitPiP(video);
@@ -252,14 +255,15 @@
 
         // Release all of the above when this video is superseded, so listeners
         // and observers do not accumulate across SPA navigations.
-        registerCleanup(function () {
+        return function () {
+            video._wblockAutoPiPHooked = false;
             removeVisibilityObserver();
             window.removeEventListener('focus', onFocus);
             window.removeEventListener('blur', onBlur);
             try { if (scrollObserver) scrollObserver.disconnect(); } catch (e) { /* ignore */ }
             video.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
             video.removeEventListener('leavepictureinpicture', onLeavePictureInPicture);
-        });
+        };
     }
 
     // ------------------------------------------------------------------
@@ -1025,20 +1029,6 @@
         function onTrackSignal() { syncMusicNowPlaying(player, video); }
         function onTimeUpdate() { endMusicAd(player, video); scheduleMusicPosition(player, video); }
         function onNavigate() { syncMusicNowPlaying(player, video); }
-        function onVisibility() {
-            // iOS suspends a real video track under lock. PiP is WebKit's public
-            // background-video session and keeps that track alive; audio-only
-            // song mode has no PiP support and continues through the shadowed
-            // visibility state as before.
-            if (_realHidden) enterPiP(video);
-            else if (document.hasFocus() && isPiPActive(video)) exitPiP(video);
-        }
-        function onFocus() {
-            if (!_realHidden && isPiPActive(video)) exitPiP(video);
-        }
-        function onBlur() {
-            if (IS_IPHONE && !video.paused && !video.ended) enterPiP(video);
-        }
 
         video.addEventListener('loadedmetadata', onAdSignal);
         video.addEventListener('durationchange', onAdSignal);
@@ -1056,9 +1046,9 @@
         document.addEventListener('touchend', onSeekEnd, true);
         document.addEventListener('pointercancel', onSeekCancel, true);
         document.addEventListener('touchcancel', onSeekCancel, true);
-        var removeVisibilityObserver = observeRealVisibility(onVisibility);
-        window.addEventListener('focus', onFocus);
-        window.addEventListener('blur', onBlur);
+        // Audio-only song mode has no PiP support and continues through the
+        // shadowed visibility state; music videos need PiP under lock.
+        var removeAutoPiP = setupAutoPiP(video, false);
 
         if (typeof MutationObserver !== 'undefined') {
             musicClassObserver = new MutationObserver(function () {
@@ -1085,9 +1075,7 @@
             document.removeEventListener('touchend', onSeekEnd, true);
             document.removeEventListener('pointercancel', onSeekCancel, true);
             document.removeEventListener('touchcancel', onSeekCancel, true);
-            removeVisibilityObserver();
-            window.removeEventListener('focus', onFocus);
-            window.removeEventListener('blur', onBlur);
+            removeAutoPiP();
             if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
             else video.removeAttribute('title');
             if (seekResumeTimer !== null) clearTimeout(seekResumeTimer);
@@ -1441,7 +1429,6 @@
         // hook flags after teardown so activateVideo() reattaches resources when
         // that element is immediately activated again.
         if (previousVideo) {
-            previousVideo._wblockAutoPiPHooked = false;
             previousVideo._wblockControlsGuarded = false;
             previousVideo._wblockControlsPatched = false;
             previousVideo._wblockMediaSessionHooked = false;
@@ -1708,7 +1695,7 @@
         // iOS toolbar contains only a compact quality selector positioned above
         // Safari's native controls; playback remains owned by the video element.
         if (featureEnabled('toolbar')) buildToolbar(player, video);
-        if (featureEnabled('pictureInPicture')) setupAutoPiP(video);
+        registerCleanup(setupAutoPiP(video, true));
         setupMediaSession(player, video);
         setupLiveSeekGuard(player, video);
         if (featureEnabled('chapters')) setupChapters(player, video);
