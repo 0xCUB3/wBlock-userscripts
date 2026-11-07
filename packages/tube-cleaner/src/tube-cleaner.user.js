@@ -766,6 +766,128 @@
     updateRealVisibility();
     document.addEventListener('visibilitychange', onRealVisibilityChange, true);
 
+    // ------------------------------------------------------------------
+    // Background recovery (macOS)
+    //
+    // Masking visibility keeps YouTube from pausing a hidden tab, but Safari
+    // itself can pause playing media when the tab or Tab Group switches
+    // (#12). With Background Playback on, a pause around the page becoming
+    // really hidden is resumed a bounded number of times within a short
+    // window. A pause the user asked for (Now Playing, a media key, an
+    // in-page pause before switching away) is never undone. iOS keeps playback alive through PiP instead.
+    //
+    // backgroundRecoveryStep is the whole decision: a pure reducer, proven
+    // and held to tests/rules/background-recovery.rule.mjs. Keep it
+    // self-contained; the test evaluates its source on its own.
+    // ------------------------------------------------------------------
+
+    // @gdp-begin backgroundRecoveryStep
+    function backgroundRecoveryStep(config, state, event) {
+        var op = event.op, t = event.t;
+        var inWindow = t <= state.hiddenAt + config.window;
+        // Safari can deliver its pause just before the visibility change.
+        var pausedJustBefore = state.pauseSeen && t <= state.pausedAt + config.lead;
+        var arming = op === 'hide' && config.enabled && (state.playing || pausedJustBefore);
+        var lostWhileHidden = op === 'pause' && state.hidden && !state.intent && inWindow && state.retries < config.budget;
+        var resumeNow = op === 'tick' && state.pending && state.hidden && state.retries < config.budget && inWindow;
+        var retries = op === 'hide' ? 0 : resumeNow ? state.retries + 1 : state.retries;
+        var pending = state.pending;
+        if (op === 'hide') pending = arming && !state.playing;
+        else if (op === 'show' || op === 'play' || op === 'intent' || op === 'reset') pending = false;
+        else if (op === 'pause') pending = state.armed && lostWhileHidden;
+        else if (op === 'tick') pending = resumeNow && retries < config.budget && inWindow;
+        return {
+            hidden: op === 'hide' ? true : op === 'show' ? false : state.hidden,
+            playing: op === 'play' ? true : op === 'pause' || op === 'reset' ? false : state.playing,
+            armed: op === 'hide' ? arming : op === 'show' || op === 'intent' || op === 'reset' ? false : state.armed,
+            pending: pending,
+            intent: op === 'hide' ? false : op === 'intent' ? true : state.intent,
+            // Only a pause the user didn't ask for can be Safari's.
+            pauseSeen: op === 'pause' ? !state.intent : op === 'intent' || op === 'reset' ? false : state.pauseSeen,
+            retries: retries,
+            hiddenAt: op === 'hide' ? t : state.hiddenAt,
+            pausedAt: op === 'pause' && !state.intent ? t : state.pausedAt,
+            resume: resumeNow
+        };
+    }
+    // @gdp-end
+
+    var BACKGROUND_RECOVERY = { enabled: true, budget: 3, window: 6000, lead: 400 };
+    var pauseIntentListeners = [];
+
+    // Every Media Session pause or stop the page registers (Tube Cleaner's
+    // own, YouTube's, YouTube Music's) first tells recovery that the user
+    // asked for this pause, so Now Playing and media keys keep working even
+    // right after a Tab Group switch.
+    (function patchMediaSessionIntent() {
+        try {
+            var proto = typeof MediaSession !== 'undefined' && MediaSession.prototype;
+            var original = proto && proto.setActionHandler;
+            if (!original || original._wblockTubeCleaner) return;
+            var patched = function (action, handler) {
+                if ((action === 'pause' || action === 'stop') && typeof handler === 'function') {
+                    var inner = handler;
+                    handler = function () {
+                        pauseIntentListeners.slice().forEach(function (listener) { try { listener(); } catch (e) { /* ignore */ } });
+                        return inner.apply(this, arguments);
+                    };
+                }
+                return original.call(this, action, handler);
+            };
+            patched._wblockTubeCleaner = true;
+            proto.setActionHandler = patched;
+        } catch (e) { /* recovery still honors in-page pauses */ }
+    })();
+
+    function setupBackgroundRecovery(video, resumePlayback) {
+        if (IS_IOS || !featureEnabled('backgroundPlayback')) return function () {};
+        var state = { hidden: _realHidden, playing: !video.paused && !video.ended, armed: false, pending: false,
+            intent: false, pauseSeen: false, retries: 0, hiddenAt: 0, pausedAt: 0, resume: false };
+        var timer = null;
+        function now() { return Math.round(typeof performance !== 'undefined' ? performance.now() : Date.now()); }
+        function send(op) {
+            state = backgroundRecoveryStep(BACKGROUND_RECOVERY, state, { op: op, t: now() });
+            log('background recovery', op, state.armed ? 'armed' : '', state.pending ? 'pending' : '', state.retries);
+            if (state.resume) {
+                log('resuming playback paused by a background switch');
+                try { resumePlayback(); } catch (e) { /* the next tick retries */ }
+            }
+            if (state.pending && timer === null) {
+                timer = setTimeout(function () { timer = null; send('tick'); }, 300);
+            } else if (!state.pending && timer !== null) {
+                clearTimeout(timer);
+                timer = null;
+            }
+        }
+        function onPlay() { send('play'); }
+        // A pause made in the page while it is visible is the user's: the
+        // reducer arms only for a video playing at hide time (or paused within
+        // the short lead before it). Now Playing and media keys go through
+        // the Media Session hook above. User activation is no signal here: it
+        // outlasts a click, so Safari's own pause right after one would look
+        // intentional.
+        function onPause() { send('pause'); }
+        function onReset() { send('reset'); }
+        function onIntent() { send('intent'); }
+        var stopVisibility = observeRealVisibility(function () { send(_realHidden ? 'hide' : 'show'); });
+        video.addEventListener('playing', onPlay);
+        video.addEventListener('pause', onPause);
+        video.addEventListener('ended', onReset);
+        video.addEventListener('emptied', onReset);
+        pauseIntentListeners.push(onIntent);
+        return function () {
+            stopVisibility();
+            video.removeEventListener('playing', onPlay);
+            video.removeEventListener('pause', onPause);
+            video.removeEventListener('ended', onReset);
+            video.removeEventListener('emptied', onReset);
+            var index = pauseIntentListeners.indexOf(onIntent);
+            if (index !== -1) pauseIntentListeners.splice(index, 1);
+            if (timer !== null) clearTimeout(timer);
+            timer = null;
+        };
+    }
+
     function enableBackgroundPlayback() {
         try {
             Object.defineProperty(document, 'hidden', {
@@ -1049,6 +1171,11 @@
         // Audio-only song mode has no PiP support and continues through the
         // shadowed visibility state; music videos need PiP under lock.
         var removeAutoPiP = setupAutoPiP(video, false);
+        var removeRecovery = setupBackgroundRecovery(video, function () {
+            if (musicAdShowing(player)) return;
+            if (typeof player.playVideo === 'function') player.playVideo();
+            else video.play().catch(function () {});
+        });
 
         if (typeof MutationObserver !== 'undefined') {
             musicClassObserver = new MutationObserver(function () {
@@ -1076,6 +1203,7 @@
             document.removeEventListener('pointercancel', onSeekCancel, true);
             document.removeEventListener('touchcancel', onSeekCancel, true);
             removeAutoPiP();
+            removeRecovery();
             if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
             else video.removeAttribute('title');
             if (seekResumeTimer !== null) clearTimeout(seekResumeTimer);
@@ -1696,6 +1824,10 @@
         // Safari's native controls; playback remains owned by the video element.
         if (featureEnabled('toolbar')) buildToolbar(player, video);
         registerCleanup(setupAutoPiP(video, true));
+        registerCleanup(setupBackgroundRecovery(video, function () {
+            var request = video.play();
+            if (request && request.catch) request.catch(function () {});
+        }));
         setupMediaSession(player, video);
         setupLiveSeekGuard(player, video);
         if (featureEnabled('chapters')) setupChapters(player, video);
@@ -3428,6 +3560,7 @@
         function cycleTrackMode(track) {
             if (pipPumpRestorePending) return;
             pipPumpRestorePending = true;
+            pumpedWhileHidden = true;
             subtitleApplying = true;
             track.mode = 'hidden';
             pipCaptionPumpTicks++;
@@ -3513,7 +3646,30 @@
         function onSubtitleRestoreSignal() {
             if (getSubtitlePreference()) { applyNativeSubtitlePreference(); }
         }
+        // Safari's caption menus learn the selection from mode changes WebKit
+        // delivers while the page renders. The pump's flips happen while it
+        // doesn't, and one that gets dropped leaves fullscreen's menu saying
+        // Off while cues still paint (#11). Re-assert the showing track, in
+        // two tasks, once the page is visible again and whenever native
+        // fullscreen starts. The user's preference is left as it is.
+        var pumpedWhileHidden = false;
+        function resyncSubtitleSelection() {
+            var showing = nativeSubtitleTracks(video).filter(function (track) { return track.mode === 'showing'; })[0];
+            if (!showing || cancelled) return;
+            subtitleApplying = true;
+            try { showing.mode = 'hidden'; } catch (e) { /* ignore */ }
+            setTimeout(function () {
+                try { if (!cancelled && showing.mode === 'hidden') showing.mode = 'showing'; } catch (e) { /* ignore */ }
+                setTimeout(function () { subtitleApplying = false; }, 0);
+            }, 0);
+        }
+        var stopSubtitleVisibility = observeRealVisibility(function () {
+            if (_realHidden || !pumpedWhileHidden) return;
+            pumpedWhileHidden = false;
+            resyncSubtitleSelection();
+        });
         video.addEventListener('timeupdate', onPiPCaptionTick);
+        video.addEventListener('webkitbeginfullscreen', resyncSubtitleSelection);
         video.addEventListener('loadedmetadata', onSubtitleRestoreSignal);
         video.addEventListener('durationchange', onSubtitleRestoreSignal);
         document.addEventListener('yt-player-state-change', onSubtitleRestoreSignal);
@@ -3528,6 +3684,8 @@
             cancelled = true;
             stopRetry();
             video.removeEventListener('timeupdate', onPiPCaptionTick);
+            video.removeEventListener('webkitbeginfullscreen', resyncSubtitleSelection);
+            stopSubtitleVisibility();
             video.removeEventListener('loadedmetadata', onSubtitleRestoreSignal);
             video.removeEventListener('durationchange', onSubtitleRestoreSignal);
             document.removeEventListener('yt-player-state-change', onSubtitleRestoreSignal);
