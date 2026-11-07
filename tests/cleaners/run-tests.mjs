@@ -3278,6 +3278,13 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     return { pass: !!(controls && getComputedStyle(controls).display === 'none' && getComputedStyle(nav).display !== 'none'),
       detail: `controls=${controls && getComputedStyle(controls).display} nav=${getComputedStyle(nav).display}` };
   });
+  await check(page, S, 'fits a cropped video to its visible box so native controls show', () => {
+    const video = document.getElementById('crop-video');
+    const box = document.getElementById('crop').getBoundingClientRect();
+    const r = video.getBoundingClientRect();
+    return { pass: !!(video.controls && Math.abs(r.bottom - box.bottom) < 1.5 && Math.abs(r.top - box.top) < 1.5),
+      detail: `video=${r.top.toFixed(0)}-${r.bottom.toFixed(0)} box=${box.top.toFixed(0)}-${box.bottom.toFixed(0)}` };
+  });
   await check(page, S, 'leaves page copy and a site bottom sheet over players visible', () => {
     const visible = id => { const el = document.getElementById(id); return !!el && getComputedStyle(el).display !== 'none'; };
     const enhancedHero = !!document.querySelector('#hero-bg[data-wblock-player-cleaner]');

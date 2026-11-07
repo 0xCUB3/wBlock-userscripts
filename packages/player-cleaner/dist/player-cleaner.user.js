@@ -1038,6 +1038,25 @@
         return ix * iy >= r.width * r.height * 0.6;
     }
 
+    // Native controls sit on the video element's own bottom edge. Players
+    // often clip a taller video to a shorter box (videojs.org: a 16:9 video
+    // with object-fit: cover in a 2:1 box), which cuts that edge off. Fit
+    // the element to the visible box; object-fit keeps the picture the same.
+    function fitToClip(video, vr) {
+        var container = containerOf(video);
+        var clip = null;
+        for (var el = parentOf(video); el && el.nodeType === 1; el = parentOf(el)) {
+            var overflow = attempt(function () { return getComputedStyle(el).overflowY; });
+            // Only a player box that crops, never a scroll container.
+            if (overflow === 'hidden' || overflow === 'clip') { clip = el; break; }
+            if (el === container) { break; }
+        }
+        var cr = clip && rectOf(clip);
+        if (!cr || cr.height < vr.height * 0.5 || vr.top < cr.top - 1 || vr.bottom <= cr.bottom + 1) { return; }
+        video.style.setProperty('height', clip === parentOf(video) ? '100%' : cr.height + 'px', 'important');
+        video.style.setProperty('max-height', cr.height + 'px', 'important');
+    }
+
     // Inline players can leave html/body locked by a stale fullscreen class.
     function releaseScrollLock(video) {
         if (video._wblockInNativeFullscreen || document.fullscreenElement || document.webkitFullscreenElement) { return; }
@@ -1079,6 +1098,8 @@
         if (container.nodeType === 1 || container.nodeType === 11) { sweep(container, video, vr, everything); }
         if (container.shadowRoot) { sweep(container.shadowRoot, video, vr, everything); }
         if (!vr) { return; }
+        fitToClip(video, vr);
+        vr = rectOf(video);
         // Siblings of the video's ancestors up to the size-bounded shell,
         // outside the container already swept.
         var shell = shellOf(video);
