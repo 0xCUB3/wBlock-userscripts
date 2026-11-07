@@ -11,7 +11,7 @@
     "test:cleaners": "node tests/cleaners/run-tests.mjs && node tests/cleaners/quality-persistence.test.mjs && node tests/cleaners/chapters-navigation.test.mjs && node tests/cleaners/title-navigation.test.mjs && node tests/cleaners/toolbar-visibility.test.mjs && node tests/cleaners/sponsorblock-transfer.test.mjs && node tests/cleaners/abc-amp.test.mjs && node tests/cleaners/site-passthrough.test.mjs && node tests/cleaners/auto-pip.test.mjs && node tests/cleaners/background-recovery.test.mjs",
     "test": "npm run build && npm run check && npm run test:dark-reader && npm run test:dark-reader-webkit && npm run test:rules && npm run test:cleaners",
     "test:dark-reader-webkit": "node tests/dark-reader-webkit.test.mjs",
-    "test:rules": "node tests/rules/background-recovery.test.mjs && node tests/rules/quality-watch.test.mjs"
+    "test:rules": "node tests/rules/background-recovery.test.mjs && node tests/rules/quality-watch.test.mjs && node tests/rules/sponsorblock.test.mjs"
   },
   "devDependencies": {
     "gdp-wired": "^0.47.0",

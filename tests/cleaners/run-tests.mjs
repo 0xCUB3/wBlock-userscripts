@@ -1376,6 +1376,9 @@ async function qualityUISelectionCheck(page, scenario) {
     video.currentTime = 12;
     video.dispatchEvent(new Event('timeupdate'));
   });
+  // When to skip, where to seek, chains, Undo protection and the seek/end
+  // guards are proven in tests/rules/sponsorblock.test.mjs; these checks
+  // cover the request, notices, buttons, timer and settings wiring.
   await check(page, 'desktop', 'skips sponsors through the k-anonymous SponsorBlock endpoint', () => {
     const video = document.querySelector('#movie_player video');
     const request = window.__wblockSponsorRequest || '';
@@ -1392,31 +1395,6 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: video.currentTime > 10 && video.currentTime < 11,
       detail: `time=${video.currentTime}` };
   });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    video.currentTime = 5;
-    video.dispatchEvent(new Event('timeupdate'));
-    video.currentTime = 12;
-    video.dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'skips a SponsorBlock segment again after Undo and re-entry', () => {
-    const video = document.querySelector('#movie_player video');
-    const notice = document.querySelector('.wblock-tc-sponsor-notice');
-    return { pass: video.currentTime === 20 && !!notice, detail: `time=${video.currentTime} notice=${!!notice}` };
-  });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    let seeking = true;
-    Object.defineProperty(video, 'seeking', { configurable: true, get: () => seeking });
-    video.currentTime = 12;
-    video.dispatchEvent(new Event('timeupdate'));
-    window.__wblockSeekingSponsorTime = video.currentTime;
-    seeking = false;
-  });
-  await check(page, 'desktop', 'does not skip a SponsorBlock segment during an in-progress seek', () => ({
-    pass: window.__wblockSeekingSponsorTime === 12,
-    detail: `time=${window.__wblockSeekingSponsorTime}`,
-  }));
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
     Object.defineProperty(video, 'duration', { configurable: true, get: () => 300 });
@@ -1509,34 +1487,6 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'applies newly enabled SponsorBlock categories immediately', () => {
     const video = document.querySelector('#movie_player video');
     return { pass: video.currentTime === 40, detail: `time=${video.currentTime}` };
-  });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    video.currentTime = 102;
-    video.dispatchEvent(new Event('timeupdate'));
-    document.querySelector('.wblock-tc-sponsor-notice button').click();
-    video.dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'Undo stays put when one range is both Sponsor and Self-promotion', () => {
-    const video = document.querySelector('#movie_player video');
-    return { pass: video.currentTime > 100 && video.currentTime < 101, detail: `time=${video.currentTime}` };
-  });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    video.currentTime = 121;
-    video.dispatchEvent(new Event('timeupdate'));
-    window.__wblockChainSkipTime = video.currentTime;
-    document.querySelector('.wblock-tc-sponsor-notice button').click();
-    video.dispatchEvent(new Event('timeupdate'));
-    window.__wblockChainUndoTime = video.currentTime;
-    video.currentTime = 126;
-    video.dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'Undo of chained overlapping segments rewinds to the first and protects the whole range', () => {
-    const video = document.querySelector('#movie_player video');
-    return { pass: window.__wblockChainSkipTime === 140 && window.__wblockChainUndoTime > 120 &&
-        window.__wblockChainUndoTime < 121 && video.currentTime === 126,
-      detail: `skip=${window.__wblockChainSkipTime} undo=${window.__wblockChainUndoTime} later=${video.currentTime}` };
   });
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');

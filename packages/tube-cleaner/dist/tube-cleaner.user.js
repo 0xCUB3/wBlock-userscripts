@@ -2478,6 +2478,63 @@
         return function () { clearTimeout(fadeTimer); clearTimeout(removeTimer); if (notice.parentNode) notice.remove(); };
     }
 
+    // SponsorBlock's decisions: two pure reducers, proven and held to
+    // tests/rules/sponsor-scan.rule.mjs and tests/rules/sponsor-time.rule.mjs.
+    // Times are milliseconds. Keep them self-contained; the tests evaluate
+    // their source on their own.
+    //
+    // The scan folds the segments, sorted by start: it chooses the first
+    // eligible segment playback is inside, then extends an automatic skip
+    // over every eligible automatic segment chained onto it by overlap. The
+    // same range is often submitted under two categories (Sponsor and
+    // Self-promotion); skipping them one at a time made Undo rewind only to
+    // the last one, and protecting only that one let the other re-skip it.
+    // @gdp-begin sponsorSegmentScan
+    function sponsorSegmentScan(context, acc, seg) {
+        var eligible = seg.mode !== 'off' && seg.skip && seg.segEnd >= seg.segStart + context.minDuration &&
+            !(context.undone && context.undoneStart <= seg.segStart && seg.segStart < context.undoneEnd);
+        var picks = !acc.found && eligible && seg.segStart <= context.now && context.now + 50 < seg.segEnd;
+        var chains = acc.found && acc.auto && eligible && seg.mode === 'auto' && acc.start <= seg.segStart &&
+            seg.segStart < acc.end && acc.end < seg.segEnd;
+        return {
+            found: acc.found || picks,
+            auto: picks ? seg.mode === 'auto' : acc.auto,
+            start: picks ? seg.segStart : acc.start,
+            end: picks || chains ? seg.segEnd : acc.end,
+            notified: picks ? seg.segNotified : acc.notified
+        };
+    }
+    // @gdp-end
+
+    // Each timeupdate with the scan's result, and each Undo. Seeking a Safari
+    // video to its exact duration replays it instead of ending it, so a skip
+    // stops 1 ms short (or wraps to 0 for a looping video). Undo protects the
+    // skipped range while playback stays inside it; leaving ends that, and a
+    // later re-entry skips again.
+    // @gdp-begin sponsorTimeStep
+    function sponsorTimeStep(state, event) {
+        var live = event.op === 'time' && event.enabled && !event.seeking && !event.ended &&
+            (!event.hasDuration || event.now + 50 < event.duration);
+        var leaves = live && (event.now < state.undoneStart || event.now >= state.undoneEnd);
+        var skips = live && event.found && event.auto;
+        var undoes = event.op === 'undo';
+        var clamped = event.hasDuration && event.end + 1 >= event.duration;
+        var seek = 0;
+        if (undoes) seek = event.start + 10;
+        else if (skips) seek = clamped ? (event.loop ? 0 : Math.max(0, event.duration - 1)) : event.end;
+        return {
+            undone: undoes ? true : leaves ? false : state.undone,
+            undoneStart: undoes ? event.start : state.undoneStart,
+            undoneEnd: undoes ? event.end : state.undoneEnd,
+            active: live,
+            skip: skips,
+            notify: live && event.found && !event.auto && !event.notified,
+            rewind: undoes,
+            seek: seek
+        };
+    }
+    // @gdp-end
+
     function setupSponsorBlock(player, video) {
         var videoId = sponsorBlockVideoId();
         if (!player || !video || !videoId || !window.crypto || !crypto.subtle || !window.fetch) return;
@@ -2485,7 +2542,8 @@
         var controller = null;
         var requested = false;
         var segments = [];
-        var undone = null;
+        var timing = { undone: false, undoneStart: 0, undoneEnd: 0, active: false, skip: false, notify: false,
+            rewind: false, seek: 0 };
         var notified = {};
         var removeNotice = null;
         var boundaryTimer = null;
@@ -2502,41 +2560,54 @@
             return item.UUID || item.category + ':' + item.segment.join(':');
         }
 
-        function segmentState(item, settings) {
-            var key = segmentKey(item);
-            var mode = settings.modes[item.category] || 'off';
-            var eligible = mode !== 'off' &&
-                !(undone && item.segment[0] >= undone[0] && item.segment[0] < undone[1]) &&
-                (!item.actionType || item.actionType === 'skip') &&
-                item.segment[1] - item.segment[0] >= settings.minimumDuration;
-            return { key: key, mode: mode, eligible: eligible };
+        function msOf(seconds) { return Math.max(0, Math.round(seconds * 1000)); }
+
+        // One segment as the scan reads it.
+        function scanInput(item, settings) {
+            return {
+                segStart: msOf(item.segment[0]), segEnd: msOf(item.segment[1]),
+                mode: settings.modes[item.category] || 'off',
+                skip: !item.actionType || item.actionType === 'skip',
+                segNotified: !!notified[segmentKey(item)]
+            };
         }
 
-        // Undo and ask-mode notification state lasts only until playback leaves
-        // that range. Staying inside after Undo remains protected, while a
-        // later re-entry behaves like the first visit.
-        function clearExitedSegmentState(now) {
-            if (undone && (now < undone[0] || now >= undone[1])) undone = null;
+        function scanContext(settings, nowMs) {
+            return {
+                now: nowMs, minDuration: msOf(settings.minimumDuration),
+                // Protection from Undo lasts while playback is inside the range.
+                undone: timing.undone && nowMs >= timing.undoneStart && nowMs < timing.undoneEnd,
+                undoneStart: timing.undoneStart, undoneEnd: timing.undoneEnd
+            };
+        }
+
+        // Folds the sorted segments through the proven scan; also returns the
+        // segment it chose, for the notice.
+        function scanSegments(settings, nowMs) {
+            var context = scanContext(settings, nowMs);
+            var result = { found: false, auto: false, start: 0, end: 0, notified: false };
+            var chosen = null;
+            for (var i = 0; i < segments.length; i++) {
+                var picked = result.found;
+                result = sponsorSegmentScan(context, result, scanInput(segments[i], settings));
+                if (!picked && result.found) chosen = segments[i];
+            }
+            return { result: result, item: chosen };
+        }
+
+        // A segment the scan would choose at its own start is eligible.
+        function segmentEligible(item, settings) {
+            var input = scanInput(item, settings);
+            return sponsorSegmentScan(scanContext(settings, input.segStart), { found: false, auto: false, start: 0, end: 0, notified: false }, input).found;
+        }
+
+        // Skip-button state lasts only until playback leaves that segment, so
+        // a later re-entry offers the button again.
+        function clearExitedNotices(now) {
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
                 if (now < item.segment[0] || now >= item.segment[1]) delete notified[segmentKey(item)];
             }
-        }
-
-        // An automatic skip covers the entered segment plus every automatic
-        // segment chained onto it by overlap. The same range is often submitted
-        // under two categories (Sponsor and Self-promotion); skipping them one
-        // at a time made Undo rewind only to the last one, and protecting only
-        // that one let the other re-skip it.
-        function autoSkipEnd(item, settings) {
-            var end = item.segment[1];
-            for (var i = 0; i < segments.length; i++) {
-                var other = segments[i];
-                var state = segmentState(other, settings);
-                if (state.eligible && state.mode === 'auto' && other.segment[0] >= item.segment[0] &&
-                    other.segment[0] < end && other.segment[1] > end) end = other.segment[1];
-            }
-            return end;
         }
 
         // Keep timeupdate as a throttling/background fallback, but normally arm
@@ -2549,17 +2620,15 @@
                 return;
             }
             var next = null;
-            var nextState = null;
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
-                var state = segmentState(item, settings);
-                if (!state.eligible || state.mode === 'ask' && notified[state.key] || item.segment[0] <= now) continue;
+                if (item.segment[0] <= now || !segmentEligible(item, settings)) continue;
+                if ((settings.modes[item.category] || 'off') === 'ask' && notified[segmentKey(item)]) continue;
                 next = item;
-                nextState = state;
                 break;
             }
             if (!next) { clearBoundaryTimer(); return; }
-            var key = nextState.key + '@' + next.segment[0] + ':' + video.playbackRate;
+            var key = segmentKey(next) + '@' + next.segment[0] + ':' + video.playbackRate;
             if (!force && boundaryTimer !== null && boundaryKey === key) return;
             clearBoundaryTimer();
             boundaryKey = key;
@@ -2573,56 +2642,50 @@
         }
 
         function onTimeUpdate(forceSchedule) {
-            if (timingSuspended || video.seeking) { clearBoundaryTimer(); return; }
+            if (timingSuspended) { clearBoundaryTimer(); return; }
             var settings = loadSponsorBlockSettings();
-            if (!settings.enabled || sponsorBlockDisabledVideos[videoId] || sponsorBlockChannelExcluded(settings)) {
-                clearBoundaryTimer();
-                return;
-            }
             var now = video.currentTime;
+            var nowMs = msOf(now);
             var duration = video.duration;
             var hasDuration = isFinite(duration) && duration > 0;
-            // Once the media sits at its end, a segment whose SponsorBlock end
-            // time overshoots the real duration would keep re-seeking the
-            // element. YouTube treats any seek from its ended state as a
-            // replay request, so that loop restarts the video.
-            if (video.ended || (hasDuration && now >= duration - 0.05)) { clearBoundaryTimer(); return; }
-            clearExitedSegmentState(now);
-            for (var i = 0; i < segments.length; i++) {
-                var item = segments[i];
-                var state = segmentState(item, settings);
-                if (!state.eligible) continue;
-                if (now >= item.segment[0] && now < item.segment[1] - 0.05) {
-                    if (state.mode === 'ask') {
-                        if (!notified[state.key]) {
-                            notified[state.key] = true;
-                            if (removeNotice) removeNotice();
-                            removeNotice = showSponsorBlockNotice(player, item, 'skip', function () {
-                                try { video.currentTime = item.segment[1]; } catch (e) { /* ignore */ }
-                            });
-                        }
-                        scheduleNextBoundary(settings, now, true);
-                        return;
-                    }
-                    var start = item.segment[0];
-                    var end = autoSkipEnd(item, settings);
-                    var target = end;
-                    // Seeking a Safari media element to its exact duration
-                    // replays the video instead of ending it (the SponsorBlock
-                    // extension works around the same WebKit behavior). Stop
-                    // just short of the end so playback finishes on its own.
-                    if (hasDuration && target >= duration - 0.001) target = video.loop ? 0 : Math.max(0, duration - 0.001);
-                    try { video.currentTime = target; } catch (e) { return; }
-                    if (settings.showNotice) {
-                        if (removeNotice) removeNotice();
-                        removeNotice = showSponsorBlockNotice(player, item, 'undo', function () {
-                            undone = [start, end];
-                            try { video.currentTime = start + 0.01; } catch (e) { /* ignore */ }
-                        });
-                    }
-                    scheduleNextBoundary(settings, end, true);
-                    return;
+            var scanned = scanSegments(settings, nowMs);
+            timing = sponsorTimeStep(timing, {
+                op: 'time', now: nowMs, duration: hasDuration ? msOf(duration) : 0, hasDuration: hasDuration,
+                ended: !!video.ended, seeking: !!video.seeking, loop: !!video.loop,
+                enabled: settings.enabled && !sponsorBlockDisabledVideos[videoId] && !sponsorBlockChannelExcluded(settings),
+                found: scanned.result.found, auto: scanned.result.auto, start: scanned.result.start,
+                end: scanned.result.end, notified: scanned.result.notified
+            });
+            // Seeking, ended, at the very end (a seek there restarts the video
+            // in YouTube), or switched off: nothing to do and no timer.
+            if (!timing.active) { clearBoundaryTimer(); return; }
+            clearExitedNotices(now);
+            var item = scanned.item;
+            if (timing.notify) {
+                notified[segmentKey(item)] = true;
+                if (removeNotice) removeNotice();
+                removeNotice = showSponsorBlockNotice(player, item, 'skip', function () {
+                    try { video.currentTime = item.segment[1]; } catch (e) { /* ignore */ }
+                });
+            }
+            if (scanned.result.found && !scanned.result.auto) {
+                scheduleNextBoundary(settings, now, true);
+                return;
+            }
+            if (timing.skip) {
+                var skipped = { start: scanned.result.start, end: scanned.result.end };
+                try { video.currentTime = timing.seek / 1000; } catch (e) { return; }
+                if (settings.showNotice) {
+                    if (removeNotice) removeNotice();
+                    removeNotice = showSponsorBlockNotice(player, item, 'undo', function () {
+                        timing = sponsorTimeStep(timing, { op: 'undo', now: msOf(video.currentTime), duration: 0,
+                            hasDuration: false, ended: false, seeking: false, loop: false, enabled: true, found: true,
+                            auto: true, start: skipped.start, end: skipped.end, notified: false });
+                        try { video.currentTime = timing.seek / 1000; } catch (e) { /* ignore */ }
+                    });
                 }
+                scheduleNextBoundary(settings, skipped.end / 1000, true);
+                return;
             }
             scheduleNextBoundary(settings, now, !!forceSchedule);
         }

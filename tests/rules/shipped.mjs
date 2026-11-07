@@ -17,7 +17,10 @@ export function shippedFunction(slug, name) {
   return new Function(`'use strict';\n${match[1]}\nreturn ${name};`)();
 }
 
-export function proveAndHold({ title, rule, laws, stepLaws = [], naive, slug, fn, init, params, draw, mutate, trials = 3000, depth = 30 }) {
+// `adapt` turns the shipped function into (params, state, input) when its
+// signature differs; `mutate` changes the shipped function before adapting.
+export function proveAndHold({ title, rule, laws, stepLaws = [], naive, slug, fn, init, params, draw, mutate,
+  adapt = step => step, trials = 3000, depth = 30 }) {
   const proof = proveSteps(rule, laws, stepLaws);
   assert.deepEqual({ proven: proof.proven, checked: proof.checked }, { proven: true, checked: true }, JSON.stringify(proof));
   console.log(`PASS: ${title}: ${laws.length + stepLaws.length} laws proven and kernel-checked`);
@@ -27,7 +30,7 @@ export function proveAndHold({ title, rule, laws, stepLaws = [], naive, slug, fn
   console.log(`PASS: ${title}: the broken variant is refused (${broken.goal})`);
 
   const step = shippedFunction(slug, fn);
-  const hold = candidate => rule.compare({ init, step: candidate }, { trials, depth, params, draw });
+  const hold = candidate => rule.compare({ init, step: adapt(candidate) }, { trials, depth, params, draw });
   const held = hold(step);
   assert.equal(held.failure, undefined, held.failure);
   console.log(`PASS: ${title}: the shipped ${fn} matches the rule on ${held.checked} steps`);
