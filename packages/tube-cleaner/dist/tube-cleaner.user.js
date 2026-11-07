@@ -4238,12 +4238,52 @@
         if (mobileQualityCleanup) mobileQualityCleanup();
     }
 
+    // The restore decision: a pure reducer, proven and held to
+    // tests/rules/quality-watch.rule.mjs. A saved quality is restored only
+    // after real progress; once restored, a stall of stallLimit while playing,
+    // visible, not seeking and not in an ad falls back to Auto once, and
+    // healthyLimit of good playback ends the watch. Times are milliseconds.
+    // Keep it self-contained; the test evaluates its source on its own.
+    // @gdp-begin qualityWatchStep
+    function qualityWatchStep(config, state, event) {
+        var op = event.op, t = event.t, pos = event.pos;
+        var elapsed = Math.min(Math.max(0, t - state.prevCheck), config.maxElapsed);
+        var stalledNext = pos === state.prevPos ? state.stalled + elapsed : 0;
+        var idle = event.paused || event.seeking || event.hidden || event.ad;
+        var ticking = op === 'tick' && state.phase === 'monitoring';
+        var starts = op === 'sample' && state.phase === 'waiting' && !event.paused && !event.seeking && !event.ended &&
+            event.ready && !event.ad && state.lastPos < pos && pos <= state.lastPos + config.maxAdvance;
+        var monitors = op === 'restored' && state.phase === 'restoring';
+        var falls = ticking && !event.ended && !idle && stalledNext >= config.stallLimit;
+        var healthy = ticking && !event.ended && !idle && stalledNext < config.stallLimit &&
+            state.observed + elapsed >= config.healthyLimit;
+        var phase = state.phase;
+        if (op === 'cancel' || ticking && (event.ended || falls || healthy)) phase = 'done';
+        else if (starts) phase = 'restoring';
+        else if (monitors) phase = 'monitoring';
+        return {
+            phase: phase,
+            lastPos: op === 'sample' || op === 'baseline' ? pos : state.lastPos,
+            prevPos: monitors || ticking ? pos : state.prevPos,
+            prevCheck: monitors || ticking ? t : state.prevCheck,
+            stalled: monitors ? 0 : ticking ? (idle ? 0 : stalledNext) : state.stalled,
+            observed: monitors ? 0 : ticking && !idle ? state.observed + elapsed : state.observed,
+            fallbacks: falls ? state.fallbacks + 1 : state.fallbacks,
+            start: starts,
+            fallback: falls
+        };
+    }
+    // @gdp-end
+
+    var QUALITY_WATCH = { stallLimit: 8000, healthyLimit: 20000, maxAdvance: 3000, maxElapsed: 1000 };
+
     function restoreMobileQuality(preferred) {
         cancelMobileQualityRestore();
         var video = activeVideo;
         var player = findPlayer();
         if (!video || !player || QUALITY_ORDER.indexOf(preferred) === -1) return;
-        var lastTime = video.currentTime;
+        var state = { phase: 'waiting', lastPos: 0, prevPos: 0, prevCheck: 0, stalled: 0, observed: 0,
+            fallbacks: 0, start: false, fallback: false };
         var monitor = null;
         function stop() {
             video.removeEventListener('timeupdate', onProgress);
@@ -4251,52 +4291,37 @@
             monitor = null;
             if (mobileQualityCleanup === stop) mobileQualityCleanup = null;
         }
+        // A newer choice, another video or a changed preference ends this one.
         function current() {
             return activeVideo === video && getPreferredQuality() === preferred;
         }
-        function onProgress() {
-            if (!current()) { stop(); return; }
-            var advance = video.currentTime - lastTime;
-            lastTime = video.currentTime;
-            if (video.paused || video.seeking || video.ended || video.readyState < 2 ||
-                player.classList.contains('ad-showing') || advance <= 0 || advance > 3) return;
-            stop();
+        function send(op) {
+            state = qualityWatchStep(QUALITY_WATCH, state, {
+                op: op, t: Date.now(), pos: Math.max(0, Math.round((video.currentTime || 0) * 1000)),
+                paused: !!video.paused, seeking: !!video.seeking, ended: !!video.ended, ready: video.readyState >= 2,
+                ad: player.classList.contains('ad-showing'), hidden: _realHidden
+            });
+            if (state.start) begin();
+            // Recover this video without forgetting the user's choice for the
+            // next one or repeatedly forcing a stalled stream.
+            if (state.fallback) setQuality('auto');
+            if (state.phase === 'done') stop();
+        }
+        function begin() {
+            video.removeEventListener('timeupdate', onProgress);
             // Use the same bounded request as a manual choice, never pin a
             // rendition before the stream has begun producing frames.
             setQuality(preferred, function (worked) {
-                if (!worked || !current()) return;
+                if (!worked || !current()) { send('cancel'); return; }
                 storageRemove('yt-player-quality');
-                var previousTime = video.currentTime;
-                var previousCheck = Date.now();
-                var stalled = 0;
-                var observed = 0;
                 mobileQualityCleanup = stop;
-                monitor = setInterval(function () {
-                    if (!current() || video.ended) { stop(); return; }
-                    var now = Date.now();
-                    var elapsed = Math.min(1000, Math.max(0, now - previousCheck));
-                    previousCheck = now;
-                    if (video.paused || video.seeking || _realHidden ||
-                        player.classList.contains('ad-showing')) {
-                        stalled = 0;
-                        previousTime = video.currentTime;
-                        return;
-                    }
-                    observed += elapsed;
-                    stalled = video.currentTime !== previousTime ? 0 : stalled + elapsed;
-                    previousTime = video.currentTime;
-                    if (stalled >= 8000) {
-                        stop();
-                        // Recover this video without forgetting the user's choice
-                        // for the next one or repeatedly forcing a stalled stream.
-                        setQuality('auto');
-                    } else if (observed >= 20000) {
-                        stop();
-                    }
-                }, 500);
+                send('restored');
+                monitor = setInterval(function () { send(current() ? 'tick' : 'cancel'); }, 500);
             });
         }
+        function onProgress() { send(current() ? 'sample' : 'cancel'); }
         mobileQualityCleanup = stop;
+        send('baseline');
         video.addEventListener('timeupdate', onProgress);
     }
 

@@ -1,3 +1,7 @@
+// Page wiring for Tube Cleaner's iPhone quality restore. When to restore,
+// when to fall back and when to stop are proven in
+// tests/rules/quality-watch.test.mjs; this checks the requests reach
+// YouTube's menu, storage, and the cancellation paths.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { webkit, devices } from 'playwright';
@@ -56,25 +60,15 @@ try {
   assert.equal((await snapshot()).preference, 'hd1080');
   assert.equal((await snapshot()).bias, null);
   assert.equal((await snapshot()).clicks, 0);
-  await sample(0);
-  assert.equal((await snapshot()).clicks, 0, 'metadata without progress must not switch quality');
   await sample(0.5);
   await page.clock.runFor(600);
   assert.equal((await snapshot()).selected, 'hd1080', 'restore after playback begins');
   console.log('PASS: iOS saves 1080p across reload and waits for playback progress');
 
-  await sample(0.5, { paused: true });
   await page.clock.runFor(9000);
-  assert.equal((await snapshot()).current, 'hd1080', 'intentional pause is not a stall');
-  await sample(0.5);
-  await page.clock.runFor(9000);
-  assert.equal((await snapshot()).current, 'auto', 'stalled restoration must recover to Auto');
+  assert.equal((await snapshot()).current, 'auto', 'a stalled restoration falls back to Auto');
   assert.equal((await snapshot()).preference, 'hd1080', 'recovery must not erase the preference');
-  const recoveredClicks = (await snapshot()).clicks;
-  await sample(1);
-  await page.clock.runFor(1000);
-  assert.equal((await snapshot()).clicks, recoveredClicks, 'never retry restoration on the same activation');
-  console.log('PASS: stalled restoration falls back once, preserving the preference and ignoring pauses');
+  console.log('PASS: a stalled restoration falls back to Auto and keeps the preference');
 
   await reload();
   await choose('Auto');
@@ -115,11 +109,6 @@ try {
   await sample(0.5);
   await page.clock.runFor(600);
   assert.equal((await snapshot()).selected, 'hd1080', 'replacement video also restores the saved choice');
-  for (let i = 1; i <= 22; i++) {
-    await sample(i);
-    await page.clock.runFor(1000);
-  }
-  assert.equal((await snapshot()).current, 'hd1080', 'healthy playback must not fall back');
   console.log('PASS: video replacement cancels old listeners and restores on the new stream');
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
