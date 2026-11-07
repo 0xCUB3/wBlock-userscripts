@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.45
+// @version      0.1.46
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -31,3351 +31,1560 @@
 (function () {
     'use strict';
 
-    if (/(^|\.)amazon\.[a-z.]+$/i.test(location.hostname)) { return; }
-
-    // Player Cleaner can hide videos and surrounding post content on X, and
-    // Google Drive's YouTube-based player re-asserts its own controls over
-    // native ones, leaving neither usable. Leave these sites untouched,
-    // including document-start media mutations.
-    if (/(^|\.)(x|twitter)\.com$/i.test(location.hostname) ||
-        /^(drive\.google|docs\.google|youtube\.googleapis)\.com$/i.test(location.hostname)) { return; }
-
-    // National Geographic uses Disney's BAM ManagedMediaSource player. On iOS,
-    // even preflight media-element mutations can leave that player on a black
-    // frame before its source attaches. Leave the complete site player untouched.
-    if (/(^|\.)nationalgeographic\.com$/i.test(location.hostname) &&
-        (/iP(?:hone|ad|od)/i.test(navigator.platform || '') ||
-         /iP(?:hone|ad|od)/i.test(navigator.userAgent || '') ||
-         (/Mac/i.test(navigator.platform || '') && navigator.maxTouchPoints > 1))) { return; }
-
     // ------------------------------------------------------------------
     // Player Cleaner
     //
-    // Many sites wrap a perfectly good HTML5 <video> in a custom player
-    // (video.js, JW Player, Plyr, Flowplayer, MediaElement, Clappr, ...)
-    // whose chrome hides native controls and breaks Picture-in-Picture.
-    // This script finds those players, resolves the underlying media source
-    // where possible, and swaps in a clean native <video>. When the source
-    // is an opaque media-source blob we instead enhance the existing video
-    // in place so playback keeps working with native controls.
+    // Gives the <video> inside a custom web player Safari's native controls,
+    // then hides the site's own chrome painted over it. The media element and
+    // its pipeline are never replaced: the site keeps feeding it, Player
+    // Cleaner only changes what is drawn on top and which controls answer.
     //
-    // Features:
-    //   - Custom player detection & replacement (video.js, JW, Plyr, ...)
-    //   - Auto PiP: enters PiP on tab switch or when scrolled out of view
-    //   - Background playback: keeps playing in background tabs
-    //   - iOS toolbar: hidden by default, shows on tap, auto-hides
-    //
-    // YouTube is excluded; Tube Cleaner handles it. Per-site disabling is
-    // provided by wBlock's userscript site settings.
+    // One rule covers every player: inside the player's box, everything that
+    // is not the video or one of its ancestors is chrome. Overlays mounted
+    // elsewhere (portals) are found by hit-testing the video's pixels.
     // ------------------------------------------------------------------
 
-    var LOG_PREFIX = '[Player Cleaner]';
+    var host = location.hostname;
+    var IS_IOS = /iP(?:hone|ad|od)/i.test(navigator.platform || '') ||
+        /iP(?:hone|ad|od)/i.test(navigator.userAgent || '') ||
+        (/Mac/i.test(navigator.platform || '') && navigator.maxTouchPoints > 1);
+
+    // Sites whose players break under any media-element change. X hides
+    // posts with the video, Google Drive re-asserts YouTube controls over
+    // native ones, and on iOS Nat Geo's BAM player stays black.
+    if (/(^|\.)amazon\.[a-z.]+$/i.test(host) ||
+        /(^|\.)(x|twitter)\.com$/i.test(host) ||
+        /^(drive\.google|docs\.google|youtube\.googleapis)\.com$/i.test(host) ||
+        (IS_IOS && /(^|\.)nationalgeographic\.com$/i.test(host))) { return; }
+
     var ATTR_DONE = 'data-wblock-player-cleaner';
     var HIDDEN_ATTR = 'data-wblock-pc-hidden';
-    var HIDE_STYLE_ID = 'wblock-pc-hide';
     var PREFERENCES_KEY = 'wblock.playerCleaner.preferences';
     var RESUME_KEY = 'wblock.playerCleaner.resume';
-    var enhancedVideos = [];
-
-    // A blob: src on the media element means the page attached a MediaSource /
-    // ManagedMediaSource (Player Cleaner never assigns blob urls itself).
-    function hasOpaqueMediaSource(video) {
-        try {
-            if (!video) { return false; }
-            // After an iOS HLS/MP4 promotion the element src is native even
-            // if currentSrc still briefly reports the old blob.
-            if (video._wblockIOSNativeSrc && isPlayableUrl(video.src) &&
-                video.src === video._wblockIOSNativeSrc) {
-                return false;
-            }
-            // ManagedMediaSource / MediaSource attachments show up as srcObject
-            // or a blob: URL. Either one is an opaque pipeline we must not
-            // tear down, and on iOS it will not load unless remote playback
-            // stays disabled.
-            if (video.srcObject) { return true; }
-            return (video.currentSrc || '').indexOf('blob:') === 0 ||
-                (video.src || '').indexOf('blob:') === 0;
-        } catch (e) { return false; }
-    }
-
-    // Bolt/FAVE (cnn) primes pooled <video> elements inside the play gesture
-    // with a ~1s data: clip so later programmatic playback is unlocked on iOS.
-    // A data: source is that unlock primer, never the content. Treating it as
-    // a real source let the primer's playing event enhance the pooled element
-    // and hide the shared player chrome (play button, slate), wedging CNN's
-    // vertical video pages in an endless loading state.
-    function isPrimerMedia(video) {
-        try {
-            if (!video || video.srcObject) { return false; }
-            var src = video.currentSrc || video.src || '';
-            return src.indexOf('data:') === 0;
-        } catch (e) { return false; }
-    }
-
-    // ------------------------------------------------------------------
-    // Background playback — keep videos playing in background tabs
-    // ------------------------------------------------------------------
-
-    var _realHidden = false;
-
-    function findDocumentGetter(name) {
-        try {
-            var proto = document;
-            while (proto) {
-                var descriptor = Object.getOwnPropertyDescriptor(proto, name);
-                if (descriptor && typeof descriptor.get === 'function') {
-                    return descriptor.get;
-                }
-                proto = Object.getPrototypeOf(proto);
-            }
-        } catch (e) { /* ignore */ }
-        return null;
-    }
-
-    // Capture the native getters before enableBackgroundPlayback() shadows the
-    // properties on document. Reading document.hidden inside the later event
-    // listener would otherwise always return our forced false value.
-    var nativeHiddenGetter = findDocumentGetter('hidden');
-
-    function updateRealVisibility() {
-        try {
-            _realHidden = nativeHiddenGetter ? nativeHiddenGetter.call(document) : document.hidden;
-        } catch (e) { /* ignore */ }
-    }
-
-    updateRealVisibility();
-    document.addEventListener('visibilitychange', updateRealVisibility);
-
-    function enableBackgroundPlayback() {
-        if (!featureEnabled('backgroundPlayback')) return;
-        if (loadPlaybackPreferences().backgroundPlayback === false) return;
-        try {
-            Object.defineProperty(document, 'hidden', {
-                get: function () { return false; },
-                configurable: true
-            });
-        } catch (e) { /* ignore */ }
-        try {
-            Object.defineProperty(document, 'visibilityState', {
-                get: function () { return 'visible'; },
-                configurable: true
-            });
-        } catch (e) { /* ignore */ }
-    }
-
-    // ------------------------------------------------------------------
-    // Auto PiP — automatic Picture-in-Picture
-    // ------------------------------------------------------------------
-
-    // Per-feature switches the app prepends as __wblockPlayerCleanerFeatures
-    // (Userscripts page, Player Cleaner row). Everything defaults to on so
-    // older wBlock builds, which do not inject the constant, behave as before.
-    var playerCleanerFeatures = (function () {
-        var features = { autoPictureInPicture: true, backgroundPlayback: true };
-        var injected = typeof __wblockPlayerCleanerFeatures === 'object' ? __wblockPlayerCleanerFeatures : null;
-        if (!injected) return features;
-        for (var key in features) {
-            if (typeof injected[key] === 'boolean') features[key] = injected[key];
-        }
-        return features;
-    })();
-    function featureEnabled(name) { return playerCleanerFeatures[name] !== false; }
-
     var AUTO_PIP_KEY = 'wblock.playerCleaner.autoPiP';
-    var autoPiPEnabled = true;
 
-    function getAutoPiP() {
-        if (!featureEnabled('autoPictureInPicture')) return false;
-        try {
-            var stored = localStorage.getItem(AUTO_PIP_KEY);
-            return stored === null ? true : stored === '1';
-        } catch (e) { return true; }
-    }
+    // Wrappers of common player libraries. Inside one of these every non-video
+    // element is chrome; elsewhere only positioned overlays are.
+    var PLAYER_SELECTOR = [
+        '.video-js', '.theoplayer-container', '.bitmovinplayer-container',
+        '.jwplayer', '.jw-wrapper', '.plyr', '.flowplayer', '.fp-player',
+        '.mejs-container', '.mejs__container', '.clappr', '[data-clappr-player]',
+        '.fluid_video_wrapper', 'mux-player', 'media-controller', 'media-theme',
+        'media-theme-youtube', '.media-player', '.media-default-skin', '.media-skin',
+        '.WebPlayerContainer', '.mw-tmh-player', '[data-mw-tmh]',
+        '[data-a-target="video-player"]', 'shreddit-player', '.amp-player',
+        '.fave-player-container', '.vjs-pbs', '#player-videojs'
+    ].join(',');
 
-    try { autoPiPEnabled = getAutoPiP(); } catch (e) { /* ignore */ }
+    // Players that attach their media during their own play gesture (CNN
+    // FAVE, Fox AMP). Touching them before playback starts resets startup.
+    var HANDSHAKE_SELECTOR = '.amp-player,.fave-player-container';
 
-    function isPiPActive(video) {
-        return document.pictureInPictureElement === video ||
-            (video && video.webkitPresentationMode === 'picture-in-picture');
-    }
+    // UI that must stay usable even inside a player: ads with their skip
+    // buttons, error screens, and paywall prompts.
+    var PROTECTED_SELECTOR = '[class*="preroll"],[class*="ima-ad"],[class*="ad-container"],' +
+        '[class*="ads-container"],.amp-ad,.amp-ads,.fw-ad,.theo-ad,.theo-ads,.vjs-error-display,' +
+        '[class*="vjs-error"],[class*="passport_benefit"],[class*="PassportBenefit"]';
 
-    function enterPiP(video) {
-        if (!video || !autoPiPEnabled) return;
-        if (isPiPActive(video)) return;
-        if (video.paused || video.ended) return;
-        try {
-            if (video.webkitSupportsPresentationMode &&
-                typeof video.webkitSetPresentationMode === 'function') {
-                video.webkitSetPresentationMode('picture-in-picture');
-            } else if (video.requestPictureInPicture) {
-                var request = video.requestPictureInPicture();
-                if (request && request.catch) request.catch(function () {});
+    var features = { autoPictureInPicture: true, backgroundPlayback: true };
+    if (typeof __wblockPlayerCleanerFeatures === 'object' && __wblockPlayerCleanerFeatures) {
+        for (var featureName in features) {
+            if (typeof __wblockPlayerCleanerFeatures[featureName] === 'boolean') {
+                features[featureName] = __wblockPlayerCleanerFeatures[featureName];
             }
-        } catch (e) { /* ignore */ }
-    }
-
-    function exitPiP(video) {
-        if (!video) return;
-        if (!isPiPActive(video)) return;
-        try {
-            if (video.webkitSupportsPresentationMode &&
-                typeof video.webkitSetPresentationMode === 'function') {
-                video.webkitSetPresentationMode('inline');
-            } else if (document.pictureInPictureElement) {
-                var result = document.exitPictureInPicture();
-                if (result && result.catch) result.catch(function () {});
-            }
-        } catch (e) { /* ignore */ }
-    }
-
-    function registerVideoCleanup(video, cleanup) {
-        if (!video._wblockCleanups) { video._wblockCleanups = []; }
-        video._wblockCleanups.push(cleanup);
-    }
-
-    function releaseVideoResources(video) {
-        if (!video) return;
-        var cleanups = video._wblockCleanups || [];
-        video._wblockCleanups = [];
-        for (var i = 0; i < cleanups.length; i++) {
-            try { cleanups[i](); } catch (e) { /* ignore */ }
-        }
-        video._wblockAutoPiPHooked = false;
-        video._wblockControlsGuarded = false;
-        video._wblockControlsPatched = false;
-        video._wblockClickGuard = false;
-        video._wblockChromeWatch = false;
-        video._wblockEnhanced = false;
-        video._wblockUpgradeable = false;
-        video._wblockPlaybackReady = false;
-        video._wblockHandshakeStarted = false;
-        video._wblockCleaned = false;
-        var _ei = enhancedVideos.indexOf(video);
-        if (_ei !== -1) { enhancedVideos.splice(_ei, 1); }
-        video._wblockPreferencesHooked = false;
-        video._wblockMediaSessionHooked = false;
-        video._wblockShortcutsHooked = false;
-        video._wblockTrackHarvestHooked = false;
-        try { video.removeAttribute(ATTR_DONE); } catch (e) { /* ignore */ }
-    }
-
-    function setupAutoPiP(video) {
-        if (!video || video._wblockAutoPiPHooked) return;
-        video._wblockAutoPiPHooked = true;
-
-        function onVisibilityChange() {
-            if (!autoPiPEnabled) return;
-            if (_realHidden) {
-                if (!video.paused && !video.ended) { enterPiP(video); }
-            } else if (document.hasFocus() && isPiPActive(video)) {
-                exitPiP(video);
-            }
-        }
-
-        // Window focus alone cannot tell whether another macOS window covers
-        // Safari, so blur must not trigger PiP. Actual tab hiding and viewport
-        // intersection changes provide reliable signals.
-        function onFocus() {
-            if (!autoPiPEnabled || _realHidden) return;
-            if (document.hasFocus() && isPiPActive(video)) { exitPiP(video); }
-        }
-
-        function onPageHide(e) {
-            if (e && e.persisted) return;
-            try { video.pause(); } catch (err) { /* ignore */ }
-            exitPiP(video);
-        }
-
-        document.addEventListener('visibilitychange', onVisibilityChange);
-        window.addEventListener('focus', onFocus);
-        window.addEventListener('pagehide', onPageHide);
-        registerVideoCleanup(video, function () {
-            document.removeEventListener('visibilitychange', onVisibilityChange);
-            window.removeEventListener('focus', onFocus);
-            window.removeEventListener('pagehide', onPageHide);
-        });
-
-        if (typeof IntersectionObserver !== 'undefined') {
-            var scrollObserver = new IntersectionObserver(function (entries) {
-                if (!autoPiPEnabled) return;
-                entries.forEach(function (entry) {
-                    if (!entry.isIntersecting && !video.paused && !video.ended) {
-                        enterPiP(video);
-                    } else if (entry.isIntersecting && isPiPActive(video)) {
-                        exitPiP(video);
-                    }
-                });
-            }, { threshold: 0.1 });
-            scrollObserver.observe(video);
-            registerVideoCleanup(video, function () {
-                try { scrollObserver.disconnect(); } catch (e) { /* ignore */ }
-            });
         }
     }
 
     function log() {
-        try {
-            if (window.__wblockPlayerCleanerDebug) {
-                console.log.apply(console, [LOG_PREFIX].concat([].slice.call(arguments)));
-            }
-        } catch (e) { /* ignore */ }
+        if (window.__wblockPlayerCleanerDebug) {
+            try { console.log.apply(console, ['[Player Cleaner]'].concat([].slice.call(arguments))); } catch (e) { /* ignore */ }
+        }
     }
 
-    // Player container selectors for the common custom-player libraries.
-    var PLAYER_SELECTORS = [
-        '.video-js',                 // video.js
-        '.vjs-tech',                 // video.js (inner tech, handled via parent)
-        '.theoplayer-container',     // THEOplayer (also carries .video-js)
-        '.bitmovinplayer-container', // Bitmovin / US Open inline player
-        '.jwplayer',                 // JW Player
-        '.jw-wrapper',               // JW Player
-        '.plyr',                     // Plyr
-        '.flowplayer',               // Flowplayer
-        '.mejs-container',           // MediaElement.js
-        '.mejs__container',          // MediaElement.js (newer)
-        '.clappr',                   // Clappr
-        '[data-clappr-player]',      // Clappr
-        '.hlsjs',                    // hls.js wrappers
-        '.fluid_video_wrapper',      // Fluid Player
-        '.fp-player',                // Flowplayer (inner)
-        'mux-player',                // Mux Player custom element
-        'media-controller',          // Media Chrome
-        'media-theme',               // Media Chrome generic theme
-        'media-theme-youtube',       // Media Chrome YouTube theme
-        '.media-player',             // Media Chrome / modern wrappers
-        '.media-default-skin',       // videojs.org's modern demo wrapper
-        '.WebPlayerContainer',       // ESPN / Disney BAM player
-        '.mw-tmh-player',            // MediaWiki TimedMediaHandler
-        '[data-mw-tmh]',             // MediaWiki TimedMediaHandler
-        '[data-a-target="video-player"]', // Twitch player wrapper
-        'shreddit-player',           // Reddit hosted video
-        '.amp-player',               // Fox / Akamai AMP
-        '.fave-player-container',    // CNN FAVE / Bolt
-        '.vjs-pbs',                  // PBS / GPB video.js
-        '#player-videojs'            // PBS portal / station / partner player
-    ];
-    var PLAYER_SELECTOR = PLAYER_SELECTORS.join(',');
-    // Wrappers whose framework keeps driving the DOM after startup; nativeize
-    // the media element inside them but never empty the shell.
-    var SHELL_PRESERVE_SELECTOR = '.mejs-container,.mejs__container,.theoplayer-container,.bitmovinplayer-container';
+    function attempt(fn) { try { return fn(); } catch (e) { return undefined; } }
 
-    function isHttpUrl(value) {
-        return typeof value === 'string' && /^https?:\/\//i.test(value);
+    // ------------------------------------------------------------------
+    // Per-video state
+    //
+    // Everything attached to a media element lives in one record, dropped as
+    // a whole on release. _wblockEnhanced and _wblockAutoPiPHooked mirror it
+    // onto the element as a read-only debug surface.
+    // ------------------------------------------------------------------
+
+    var states = new WeakMap();
+    var enhanced = [];
+
+    function stateOf(video) {
+        var state = states.get(video);
+        if (!state) { state = { hooks: {}, cleanups: [] }; states.set(video, state); }
+        return state;
     }
 
-    function isPlayableUrl(value) {
-        if (!isHttpUrl(value)) { return false; }
-        // Safari does not natively play MPEG-DASH manifests. Replacing a working
-        // MSE/blob pipeline with its .mpd URL breaks playback; leave it enhanced
-        // in place instead. Other extensionless player-API URLs remain allowed.
-        try {
-            var pathname = new URL(value).pathname.toLowerCase();
-            if (/\.mpd$/.test(pathname)) { return false; }
-        } catch (e) { /* keep the already-validated http(s) URL */ }
+    function once(video, key) {
+        var hooks = stateOf(video).hooks;
+        if (hooks[key]) { return false; }
+        hooks[key] = true;
         return true;
     }
 
-    // Resolve a media or sidecar URL to an absolute http(s) URL. The browser
-    // resolves element attributes itself, but not JS track definitions. Returns
-    // null for empty/non-http(s) values (blob:, data:, javascript:, ...).
-    function toAbsoluteUrl(value) {
-        if (typeof value !== 'string') { return null; }
-        var v = value.trim();
-        if (!v) { return null; }
-        if (isHttpUrl(v)) { return v; }
-        try {
-            var resolved = new URL(v, document.baseURI).href;
-            return isHttpUrl(resolved) ? resolved : null;
-        } catch (e) { return null; }
+    function onCleanup(video, fn) { stateOf(video).cleanups.push(fn); }
+
+    function listen(video, target, type, fn, options) {
+        target.addEventListener(type, fn, options);
+        onCleanup(video, function () { target.removeEventListener(type, fn, options); });
+    }
+
+    function release(video) {
+        var state = states.get(video);
+        if (state) { state.cleanups.forEach(function (fn) { attempt(fn); }); }
+        states.delete(video);
+        video._wblockEnhanced = false;
+        video._wblockAutoPiPHooked = false;
+        var index = enhanced.indexOf(video);
+        if (index !== -1) { enhanced.splice(index, 1); }
+        attempt(function () { video.removeAttribute(ATTR_DONE); });
     }
 
     // ------------------------------------------------------------------
-    // Playback preferences, native tracks, and system media integration
+    // Shadow-aware DOM helpers
     // ------------------------------------------------------------------
 
-    function loadPlaybackPreferences() {
-        // Null media values mean "preserve the site's current state" until the
-        // user changes that control in a cleaned player for the first time.
-        var defaults = { playbackRate: null, volume: null, muted: null, subtitleLanguage: null, backgroundPlayback: true };
-        try {
-            var saved = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}');
-            for (var key in saved) if (Object.prototype.hasOwnProperty.call(defaults, key)) defaults[key] = saved[key];
-        } catch (e) { /* use defaults */ }
-        return defaults;
-    }
-
-    function savePlaybackPreference(key, value) {
-        try {
-            var preferences = loadPlaybackPreferences();
-            preferences[key] = value;
-            localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
-        } catch (e) { /* ignore */ }
-    }
-
-    function resumeIdentity(video) {
-        var pageIdentity = location.origin + location.pathname + location.search;
-        try {
-            var canonical = document.querySelector('link[rel="canonical"]');
-            if (canonical && canonical.href) pageIdentity = canonical.href;
-        } catch (e) { /* ignore */ }
-        // Distinguish multiple independent players on one page without retaining
-        // expiring CDN signatures or query tokens. Opaque MSE streams fall back
-        // to the canonical page URL, which is normally their stable identity.
-        try {
-            var source = sourceFromVideoElement(video);
-            if (source && source.indexOf('blob:') !== 0) {
-                var parsed = new URL(source, location.href);
-                return pageIdentity + '|' + parsed.origin + parsed.pathname;
-            }
-        } catch (e) { /* ignore */ }
-        return pageIdentity;
-    }
-
-    function setupPlaybackPreferences(video) {
-        if (!video || video._wblockPreferencesHooked) return;
-        video._wblockPreferencesHooked = true;
-        var preferences = loadPlaybackPreferences();
-        var applying = true;
-        var lastResumeSave = 0;
-        var resumeApplied = false;
-        var resumeIdentityValue = null;
-
-        if (typeof preferences.playbackRate === 'number' && preferences.playbackRate > 0) try {
-            video.playbackRate = Math.max(0.25, Math.min(4, preferences.playbackRate));
-        } catch (e) { /* ignore */ }
-        if (typeof preferences.volume === 'number') try {
-            video.volume = Math.max(0, Math.min(1, preferences.volume));
-        } catch (e) { /* ignore */ }
-        if (typeof preferences.muted === 'boolean') try {
-            video.muted = preferences.muted;
-        } catch (e) { /* ignore */ }
-        setTimeout(function () { applying = false; }, 0);
-
-        function applySubtitlePreference() {
-            var language = loadPlaybackPreferences().subtitleLanguage;
-            if (language === null || !video.textTracks) return;
-            for (var i = 0; i < video.textTracks.length; i++) {
-                var track = video.textTracks[i];
-                if (track.kind !== 'subtitles' && track.kind !== 'captions') continue;
-                try { track.mode = language && track.language === language ? 'showing' : 'disabled'; } catch (e) { /* ignore */ }
-            }
-        }
-
-        function restoreResumePosition() {
-            var identity = resumeIdentity(video);
-            if (identity !== resumeIdentityValue) {
-                resumeIdentityValue = identity;
-                resumeApplied = false;
-                lastResumeSave = 0;
-            }
-            applySubtitlePreference();
-            if (resumeApplied || !isFinite(video.duration) || video.duration < 60) return;
-            resumeApplied = true;
-            try {
-                var entries = JSON.parse(localStorage.getItem(RESUME_KEY) || '{}');
-                var position = Number(entries[identity] || 0);
-                if (position > 10 && position < video.duration - 15) video.currentTime = position;
-            } catch (e) { /* ignore */ }
-        }
-
-        function saveResumePosition(force) {
-            var now = Date.now();
-            var id = resumeIdentity(video);
-            if (id !== resumeIdentityValue) {
-                resumeIdentityValue = id;
-                resumeApplied = false;
-                lastResumeSave = 0;
-            }
-            if (!force && now - lastResumeSave < 5000) return;
-            lastResumeSave = now;
-            try {
-                var entries = JSON.parse(localStorage.getItem(RESUME_KEY) || '{}');
-                if (video.ended || video.currentTime >= video.duration - 10) delete entries[id];
-                else if (video.currentTime > 10 && isFinite(video.duration) && video.duration >= 60) entries[id] = Math.floor(video.currentTime);
-                var keys = Object.keys(entries);
-                while (keys.length > 50) delete entries[keys.shift()];
-                localStorage.setItem(RESUME_KEY, JSON.stringify(entries));
-            } catch (e) { /* ignore */ }
-        }
-
-        function onRateChange() { if (!applying) savePlaybackPreference('playbackRate', video.playbackRate); }
-        function onVolumeChange() {
-            if (applying) return;
-            savePlaybackPreference('volume', video.volume);
-            savePlaybackPreference('muted', video.muted);
-        }
-        // WebKit shows a <track default> on its own, sometimes several times
-        // as the track loads. That is the page's choice, not the user's. A
-        // pick from Safari's caption menu carries user activation, but so can
-        // an automatic pick when a click mounted the player, so a default
-        // track turning on within moments of appearing is automatic too.
-        var tracksSeenAt = Date.now();
-        if (video.textTracks) video.textTracks.addEventListener('addtrack', function () { tracksSeenAt = Date.now(); });
-        function isAutomaticSelection(track) {
-            var activation = navigator.userActivation;
-            if (activation && activation.isActive && Date.now() - tracksSeenAt > 3000) return false;
-            var elements = video.querySelectorAll('track[default]');
-            for (var i = 0; i < elements.length; i++) if (elements[i].track === track) return true;
-            return false;
-        }
-        function onTextTrackChange() {
-            for (var i = 0; i < video.textTracks.length; i++) {
-                var track = video.textTracks[i];
-                if ((track.kind === 'subtitles' || track.kind === 'captions') && track.mode === 'showing') {
-                    if (isAutomaticSelection(track)) {
-                        applySubtitlePreference();
-                        return;
-                    }
-                    savePlaybackPreference('subtitleLanguage', track.language || '');
-                    return;
-                }
-            }
-            savePlaybackPreference('subtitleLanguage', '');
-        }
-
-        video.addEventListener('loadedmetadata', restoreResumePosition);
-        video.addEventListener('durationchange', restoreResumePosition);
-        video.addEventListener('ratechange', onRateChange);
-        video.addEventListener('volumechange', onVolumeChange);
-        function onPauseOrEnded() { saveResumePosition(true); }
-        function onTimeUpdate() { saveResumePosition(false); }
-        video.addEventListener('timeupdate', onTimeUpdate);
-        video.addEventListener('pause', onPauseOrEnded);
-        video.addEventListener('ended', onPauseOrEnded);
-        if (video.textTracks) video.textTracks.addEventListener('change', onTextTrackChange);
-        restoreResumePosition();
-        registerVideoCleanup(video, function () {
-            saveResumePosition(true);
-            video.removeEventListener('loadedmetadata', restoreResumePosition);
-            video.removeEventListener('durationchange', restoreResumePosition);
-            video.removeEventListener('ratechange', onRateChange);
-            video.removeEventListener('volumechange', onVolumeChange);
-            video.removeEventListener('timeupdate', onTimeUpdate);
-            video.removeEventListener('pause', onPauseOrEnded);
-            video.removeEventListener('ended', onPauseOrEnded);
-            if (video.textTracks) video.textTracks.removeEventListener('change', onTextTrackChange);
-        });
-    }
-
-    function appendNativeTrack(video, definition) {
-        if (!definition) return;
-        var source = toAbsoluteUrl(definition.src || definition.file);
-        if (!source || !isHttpUrl(source)) return;
-        var kind = String(definition.kind || 'subtitles').toLowerCase();
-        if (kind === 'captions') kind = 'subtitles';
-        if (kind !== 'subtitles' && kind !== 'chapters' && kind !== 'descriptions') return;
-        var existing = video.querySelectorAll('track');
-        for (var i = 0; i < existing.length; i++) if (existing[i].src === source) return;
-        var track = document.createElement('track');
-        track.kind = kind;
-        track.src = source;
-        track.label = definition.label || definition.name || definition.srclang || definition.language || kind;
-        if (definition.srclang || definition.language) track.srclang = definition.srclang || definition.language;
-        if (definition.default) track.default = true;
-        video.appendChild(track);
-    }
-
-    function recoverSidecarTracks(container, video) {
-        if (!container || !video) return;
-        function harvestTracks() {
-            try {
-                var domTracks = container.querySelectorAll ? container.querySelectorAll('track[src]') : [];
-                for (var i = 0; i < domTracks.length; i++) {
-                    if (domTracks[i].parentNode !== video) appendNativeTrack(video, {
-                        src: domTracks[i].src, kind: domTracks[i].kind, label: domTracks[i].label,
-                        srclang: domTracks[i].srclang, default: domTracks[i].default
-                    });
-                }
-            } catch (e) { /* ignore */ }
-            try {
-                var elements = [container, video];
-                for (var d = 0; d < elements.length; d++) {
-                    var el = elements[d];
-                    if (!el || !el.getAttribute) continue;
-                    var attr = el.getAttribute('data-subtitles') || el.getAttribute('data-captions') || el.getAttribute('data-tracks');
-                    if (attr) {
-                        if (attr.indexOf('[') === 0 || attr.indexOf('{') === 0) {
-                            var parsed = JSON.parse(attr);
-                            var arr = Array.isArray(parsed) ? parsed : [parsed];
-                            for (var p = 0; p < arr.length; p++) appendNativeTrack(video, arr[p]);
-                        } else {
-                            appendNativeTrack(video, { src: attr, kind: 'subtitles' });
-                        }
-                    }
-                }
-            } catch (e) { /* ignore */ }
-            try {
-                if (window.jwplayer) {
-                    var jw = window.jwplayer(container.id || container);
-                    if (jw && typeof jw.getCaptions === 'function') {
-                        var captions = jw.getCaptions();
-                        if (Array.isArray(captions)) {
-                            for (var jc = 0; jc < captions.length; jc++) appendNativeTrack(video, captions[jc]);
-                        }
-                    }
-                    var item = jw && jw.getPlaylistItem ? jw.getPlaylistItem() : null;
-                    var tracks = item && item.tracks || [];
-                    for (var j = 0; j < tracks.length; j++) appendNativeTrack(video, tracks[j]);
-                }
-            } catch (e) { /* ignore */ }
-            try {
-                if (window.videojs && window.videojs.getPlayers) {
-                    var players = window.videojs.getPlayers();
-                    for (var id in players) {
-                        var player = players[id];
-                        var element = player && player.el ? player.el() : null;
-                        if (!element || !(container.contains(element) || element.contains(container))) continue;
-                        var source = player.currentSource ? player.currentSource() : null;
-                        var tracks = source && source.tracks || player.options_ && player.options_.tracks || [];
-                        for (var k = 0; k < tracks.length; k++) appendNativeTrack(video, tracks[k]);
-                        if (typeof player.remoteTextTracks === 'function') {
-                            var remote = player.remoteTextTracks();
-                            if (remote && remote.length) {
-                                for (var r = 0; r < remote.length; r++) appendNativeTrack(video, remote[r]);
-                            }
-                        }
-                    }
-                }
-            } catch (e) { /* ignore */ }
-            try {
-                var plyr = video.plyr || container.plyr || window.plyr;
-                if (plyr && plyr.captions && Array.isArray(plyr.captions.tracks)) {
-                    for (var pl = 0; pl < plyr.captions.tracks.length; pl++) appendNativeTrack(video, plyr.captions.tracks[pl]);
-                }
-            } catch (e) { /* ignore */ }
-            try {
-                var hls = video._hls || container._hls || window._hls;
-                if (hls && Array.isArray(hls.subtitleTracks)) {
-                    for (var hl = 0; hl < hls.subtitleTracks.length; hl++) {
-                        var st = hls.subtitleTracks[hl];
-                        if (st && (st.url || st.vtt)) appendNativeTrack(video, {
-                            src: st.url || st.vtt, kind: 'subtitles', label: st.name || st.lang, srclang: st.lang
-                        });
-                    }
-                }
-            } catch (e) { /* ignore */ }
-            try {
-                var dash = video._dash || container._dash || window._dash;
-                if (dash && typeof dash.getTracksFor === 'function') {
-                    var dashTracks = dash.getTracksFor('subtitle');
-                    if (Array.isArray(dashTracks)) {
-                        for (var dt = 0; dt < dashTracks.length; dt++) {
-                            var dTrack = dashTracks[dt];
-                            if (dTrack && dTrack.url) appendNativeTrack(video, {
-                                src: dTrack.url, kind: 'subtitles', label: dTrack.lang || dTrack.id, srclang: dTrack.lang
-                            });
-                        }
-                    }
-                }
-            } catch (e) { /* ignore */ }
-        }
-        harvestTracks();
-        if (video.textTracks && !video._wblockTrackHarvestHooked) {
-            video._wblockTrackHarvestHooked = true;
-            function onAddTrack() { harvestTracks(); }
-            try {
-                video.textTracks.addEventListener('addtrack', onAddTrack);
-                registerVideoCleanup(video, function () {
-                    try { video.textTracks.removeEventListener('addtrack', onAddTrack); } catch (e) {}
-                });
-            } catch (e) { /* ignore */ }
-        }
-    }
-
-    function showToast(video, text) {
-        if (!video || !text) return;
-        try {
-            var targetHost = video.parentNode || document.body;
-            var toast = targetHost.querySelector('.wblock-pc-toast');
-            if (!toast) {
-                toast = document.createElement('div');
-                toast.className = 'wblock-pc-toast';
-                toast.style.cssText = 'position:absolute;top:16px;left:50%;transform:translateX(-50%);' +
-                    'background:rgba(0,0,0,0.85);color:#fff;padding:6px 14px;border-radius:16px;' +
-                    'font:600 13px -apple-system,system-ui,sans-serif;pointer-events:none;z-index:2147483647;' +
-                    'box-shadow:0 4px 12px rgba(0,0,0,0.3);transition:opacity 0.2s linear;opacity:1';
-                targetHost.appendChild(toast);
-            }
-            toast.textContent = text;
-            toast.style.opacity = '1';
-            if (toast._timer) clearTimeout(toast._timer);
-            toast._timer = setTimeout(function () {
-                toast.style.opacity = '0';
-                setTimeout(function () { try { toast.remove(); } catch (e) {} }, 250);
-            }, 1200);
-        } catch (e) { /* ignore */ }
-    }
-
-    function setupKeyboardShortcuts(container, video) {
-        if (!video || video._wblockShortcutsHooked) return;
-        video._wblockShortcutsHooked = true;
-
-        function isEditingElement(el) {
-            if (!el) return false;
-            var tag = el.tagName ? el.tagName.toUpperCase() : '';
-            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-            if (el.isContentEditable) return true;
-            if (el.shadowRoot && el.shadowRoot.activeElement) return isEditingElement(el.shadowRoot.activeElement);
-            return false;
-        }
-
-        function onKeyDown(e) {
-            if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
-            if (isEditingElement(document.activeElement)) return;
-
-            var key = e.key;
-            if (key === '[' || key === '{') {
-                e.preventDefault();
-                var lowerRate = Math.max(0.25, Math.round((video.playbackRate - 0.25) * 100) / 100);
-                video.playbackRate = lowerRate;
-                savePlaybackPreference('playbackRate', lowerRate);
-                showToast(video, lowerRate.toFixed(2) + 'x');
-            } else if (key === ']' || key === '}') {
-                e.preventDefault();
-                var higherRate = Math.min(4.0, Math.round((video.playbackRate + 0.25) * 100) / 100);
-                video.playbackRate = higherRate;
-                savePlaybackPreference('playbackRate', higherRate);
-                showToast(video, higherRate.toFixed(2) + 'x');
-            } else if (key === '=' || key === '+') {
-                e.preventDefault();
-                video.playbackRate = 1.0;
-                savePlaybackPreference('playbackRate', 1.0);
-                showToast(video, '1.00x');
-            } else if (key === 'f' || key === 'F') {
-                e.preventDefault();
-                try {
-                    if (document.fullscreenElement === video || document.webkitFullscreenElement === video) {
-                        if (document.exitFullscreen) document.exitFullscreen();
-                        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
-                    } else {
-                        if (video.requestFullscreen) video.requestFullscreen();
-                        else if (video.webkitRequestFullscreen) video.webkitRequestFullscreen();
-                        else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
-                    }
-                } catch (err) { /* ignore */ }
-            } else if (key === 'p' || key === 'P') {
-                e.preventDefault();
-                try {
-                    if (document.pictureInPictureElement === video || video.webkitPresentationMode === 'picture-in-picture') {
-                        if (document.exitPictureInPicture) {
-                            var result = document.exitPictureInPicture();
-                            if (result && result.catch) result.catch(function () {});
-                        } else if (video.webkitSetPresentationMode) video.webkitSetPresentationMode('inline');
-                    } else {
-                        if (video.requestPictureInPicture) {
-                            var request = video.requestPictureInPicture();
-                            if (request && request.catch) request.catch(function () {});
-                        } else if (video.webkitSetPresentationMode) video.webkitSetPresentationMode('picture-in-picture');
-                    }
-                } catch (err) { /* ignore */ }
-            } else if (key === 'm' || key === 'M') {
-                e.preventDefault();
-                video.muted = !video.muted;
-                showToast(video, video.muted ? 'Muted' : 'Unmuted');
-            } else if (key === 'k' || key === 'K') {
-                e.preventDefault();
-                if (video.paused) video.play();
-                else video.pause();
-            } else if (key === 'j' || key === 'J' || key === 'ArrowLeft') {
-                e.preventDefault();
-                video.currentTime = Math.max(0, video.currentTime - 5);
-                showToast(video, '-5s');
-            } else if (key === 'l' || key === 'L' || key === 'ArrowRight') {
-                e.preventDefault();
-                video.currentTime = Math.min(video.duration || Infinity, video.currentTime + 5);
-                showToast(video, '+5s');
-            }
-        }
-
-        container.addEventListener('keydown', onKeyDown, true);
-        registerVideoCleanup(video, function () {
-            container.removeEventListener('keydown', onKeyDown, true);
-        });
-    }
-
-    var mediaSessionOwner = null;
-
-    function setupMediaSession(container, video) {
-        if (!video || video._wblockMediaSessionHooked || !navigator.mediaSession || typeof MediaMetadata === 'undefined') return;
-        video._wblockMediaSessionHooked = true;
-        function meta(name) {
-            var element = document.querySelector('meta[property="' + name + '"],meta[name="' + name + '"]');
-            return element && element.content || '';
-        }
-        function activate() {
-            if (mediaSessionOwner && mediaSessionOwner !== video) {
-                var previous = mediaSessionOwner;
-                (previous._wblockMediaActions || []).forEach(function (action) {
-                    try { navigator.mediaSession.setActionHandler(action, null); } catch (e) { /* ignore */ }
-                });
-                if (navigator.mediaSession.metadata === previous._wblockMediaMetadata) {
-                    try { navigator.mediaSession.metadata = null; } catch (e) { /* ignore */ }
-                }
-                previous._wblockMediaActions = null;
-                previous._wblockMediaMetadata = null;
-            }
-            mediaSessionOwner = video;
-            var title = meta('og:title') || document.title || location.hostname;
-            var artist = meta('og:site_name') || location.hostname;
-            var artworkURL = video.poster || meta('og:image');
-            var data = { title: title, artist: artist };
-            if (artworkURL) data.artwork = [{ src: artworkURL }];
-            try {
-                video._wblockMediaMetadata = new MediaMetadata(data);
-                navigator.mediaSession.metadata = video._wblockMediaMetadata;
-            } catch (e) { /* ignore */ }
-            var actions = {
-                play: function () {
-                    var request = video.play();
-                    if (request && request.catch) request.catch(function () {});
-                },
-                pause: function () { video.pause(); },
-                seekbackward: function (details) { video.currentTime = Math.max(0, video.currentTime - (details.seekOffset || 10)); },
-                seekforward: function (details) { video.currentTime = Math.min(video.duration || Infinity, video.currentTime + (details.seekOffset || 10)); },
-                seekto: function (details) { if (isFinite(details.seekTime)) video.currentTime = details.seekTime; }
-            };
-            try {
-                var jw = window.jwplayer && window.jwplayer(container.id || container);
-                var playlist = jw && jw.getPlaylist ? jw.getPlaylist() : null;
-                if (playlist && playlist.length > 1 && typeof jw.playlistItem === 'function' &&
-                    typeof jw.getPlaylistIndex === 'function') {
-                    actions.previoustrack = function () { jw.playlistItem(Math.max(0, jw.getPlaylistIndex() - 1)); };
-                    actions.nexttrack = function () { jw.playlistItem(Math.min(playlist.length - 1, jw.getPlaylistIndex() + 1)); };
-                }
-            } catch (e) { /* no JW playlist */ }
-            try {
-                if (!actions.nexttrack && window.videojs && window.videojs.getPlayers) {
-                    var players = window.videojs.getPlayers();
-                    for (var id in players) {
-                        var candidate = players[id];
-                        var element = candidate && candidate.el ? candidate.el() : null;
-                        if (!element || !(container.contains(element) || element.contains(container)) || !candidate.playlist) continue;
-                        if (typeof candidate.playlist.previous === 'function') actions.previoustrack = function () { candidate.playlist.previous(); };
-                        if (typeof candidate.playlist.next === 'function') actions.nexttrack = function () { candidate.playlist.next(); };
-                        break;
-                    }
-                }
-            } catch (e) { /* no video.js playlist plugin */ }
-            video._wblockMediaActions = Object.keys(actions);
-            for (var action in actions) try { navigator.mediaSession.setActionHandler(action, actions[action]); } catch (e) { /* unsupported action */ }
-        }
-        function updatePosition() {
-            if (mediaSessionOwner !== video || !navigator.mediaSession.setPositionState) return;
-            if (isFinite(video.duration) && video.duration > 0) try {
-                navigator.mediaSession.setPositionState({ duration: video.duration,
-                    playbackRate: video.playbackRate || 1,
-                    position: Math.max(0, Math.min(video.currentTime, video.duration)) });
-            } catch (e) { /* ignore transient media state */ }
-        }
-        video.addEventListener('play', activate);
-        video.addEventListener('timeupdate', updatePosition);
-        video.addEventListener('ratechange', updatePosition);
-        if (!video.paused) activate();
-        registerVideoCleanup(video, function () {
-            video.removeEventListener('play', activate);
-            video.removeEventListener('timeupdate', updatePosition);
-            video.removeEventListener('ratechange', updatePosition);
-            if (mediaSessionOwner === video) {
-                mediaSessionOwner = null;
-                try {
-                    if (navigator.mediaSession.metadata === video._wblockMediaMetadata)
-                        navigator.mediaSession.metadata = null;
-                } catch (e) { /* ignore */ }
-                video._wblockMediaMetadata = null;
-                (video._wblockMediaActions || []).forEach(function (action) {
-                    try { navigator.mediaSession.setActionHandler(action, null); } catch (e) { /* ignore */ }
-                });
-                video._wblockMediaActions = null;
-            }
-        });
-    }
-
-    // ------------------------------------------------------------------
-    // Media element source state
-    // ------------------------------------------------------------------
-
-    function sourceFromVideoElement(video) {
-        try {
-            if (isPlayableUrl(video.currentSrc)) { return video.currentSrc; }
-            if (isPlayableUrl(video.src) && video.src.indexOf('blob:') !== 0) { return video.src; }
-            var sources = video.getElementsByTagName('source');
-            for (var i = 0; i < sources.length; i++) {
-                var type = (sources[i].getAttribute('type') || '').toLowerCase();
-                if (type.indexOf('dash') !== -1) { continue; }
-                var src = toAbsoluteUrl(sources[i].getAttribute('src'));
-                if (isPlayableUrl(src)) { return src; }
-            }
-        } catch (e) { /* ignore */ }
-        return null;
-    }
-
-    // React ancestors also carry page links and images (Hearst's article
-    // url). Only a media path may replace the site's blob.
-    var MEDIA_PATH = /\.(m3u8|mp4|m4v|mov|webm)$/i;
-
-    function firstPlayableUrl(values) {
-        if (!values) { return null; }
-        for (var i = 0; i < values.length; i++) {
-            var value = values[i];
-            if (!value) { continue; }
-            if (Array.isArray(value)) {
-                var nested = firstPlayableUrl(value);
-                if (nested) { return nested; }
-                continue;
-            }
-            if (typeof value === 'object') {
-                value = value.src || value.href || value.url || value.file || value.full_url || '';
-            }
-            if (typeof value !== 'string') { continue; }
-            var url = toAbsoluteUrl(value);
-            if (isPlayableUrl(url) && MEDIA_PATH.test(new URL(url).pathname)) { return url; }
-        }
-        return null;
-    }
-
-    // Hearst stations list progressive MP4s (240p…720p plus the master) on
-    // props.video.transcodings. Take the tallest labeled rendition.
-    function bestRendition(list) {
-        if (!Array.isArray(list)) { return null; }
-        var best = null;
-        var bestHeight = -1;
-        for (var i = 0; i < list.length; i++) {
-            var url = firstPlayableUrl([list[i]]);
-            if (!url) { continue; }
-            var match = url.match(/(\d{3,4})p(?=[_.\/-])/);
-            var height = match ? +match[1] : 0;
-            if (height > bestHeight) { best = url; bestHeight = height; }
-        }
-        return best;
-    }
-
-    // video.js v10 / Media Chrome keep the real HLS or MP4 on React props
-    // while the <video> only has the MSE blob. Walk a few fiber parents so
-    // iOS can promote that URL to native playback.
-    function sourceFromReactProps(el) {
-        if (!el) { return null; }
-        try {
-            var keys = Object.keys(el);
-            var fiber = null;
-            for (var i = 0; i < keys.length; i++) {
-                if (keys[i].indexOf('__reactProps') === 0) {
-                    var direct = firstPlayableUrl([el[keys[i]] && el[keys[i]].src, el[keys[i]]]);
-                    if (direct) { return direct; }
-                }
-                if (!fiber && (keys[i].indexOf('__reactFiber') === 0 ||
-                    keys[i].indexOf('__reactInternalInstance') === 0)) {
-                    fiber = el[keys[i]];
-                }
-            }
-            var depth = 0;
-            while (fiber && depth < 40) {
-                var found = firstPlayableUrl([fiber.memoizedProps, fiber.pendingProps]);
-                if (!found) {
-                    var props = fiber.memoizedProps || fiber.pendingProps;
-                    if (props) {
-                        found = firstPlayableUrl([props.src, props.source, props.hls, props.file, props.sources]) ||
-                            bestRendition(props.video && props.video.transcodings);
-                    }
-                }
-                if (found) { return found; }
-                fiber = fiber.return;
-                depth++;
-            }
-        } catch (e) { /* ignore */ }
-        return null;
-    }
-
-    function discoverNativeSource(video, container) {
-        // Player API fallbacks sit beside a working MSE blob (JW / classic
-        // video.js). Those must not replace the pipeline. React props are
-        // the URL the component actually mounted, which iOS can play natively.
-        return sourceFromVideoElement(video) ||
-            sourceFromReactProps(video) ||
-            sourceFromReactProps(container);
-    }
-
-    // Swap in one src assignment, without the empty-src + load() detach:
-    // that intermediate load fires 'emptied'/'error' into the site player,
-    // and video.js answers by tearing down or rebuilding its pipeline.
-    function applyIOSNativeSource(video, src) {
-        try {
-            try { video.pause(); } catch (e) { /* ignore */ }
-            try { if (video.srcObject) { video.srcObject = null; } } catch (e) { /* ignore */ }
-            try {
-                var sources = video.getElementsByTagName('source');
-                while (sources.length) { sources[0].parentNode.removeChild(sources[0]); }
-            } catch (e) { /* ignore */ }
-            video.src = src;
-            video._wblockIOSNativeSrc = src;
-            try { video.load(); } catch (e) { /* ignore */ }
-        } catch (e) { return false; }
-        return sourceFromVideoElement(video) === src;
-    }
-
-    // On a cached reload the site player is still initializing when the swap
-    // lands, and video.js re-attaches its MSE pipeline over the native URL.
-    // No later scan recovers that element, so the hero ends up sourceless
-    // (a fresh load spaces things out, which is why only reloads broke).
-    // Re-assert the promoted URL whenever an opaque source lands on top of
-    // it, with a retry cap so a persistent player can win the element back.
-    function guardIOSNativeSource(video) {
-        if (video._wblockIOSNativeGuard) { return; }
-        video._wblockIOSNativeGuard = true;
-        video._wblockIOSNativeRetries = 0;
-        function reassert() {
-            setTimeout(function () {
-                try {
-                    if (!video.isConnected || !video._wblockIOSNativeSrc) { return; }
-                    if (video._wblockIOSNativeRetries >= 4) { return; }
-                    // currentSrc keeps reporting the previous source until
-                    // resource selection finishes, so read the live values:
-                    // srcObject and the src reflected from the last assignment.
-                    if (!video.srcObject) {
-                        var current = video.src || '';
-                        if (current === video._wblockIOSNativeSrc) { return; }
-                        // Only fight opaque re-attachments. A direct http(s)
-                        // source means the site intentionally changed media.
-                        if (current && current.indexOf('blob:') !== 0) { return; }
-                    }
-                    video._wblockIOSNativeRetries++;
-                    log('reasserting iOS native source', video._wblockIOSNativeSrc);
-                    applyIOSNativeSource(video, video._wblockIOSNativeSrc);
-                } catch (e) { /* ignore */ }
-            }, 0);
-        }
-        video.addEventListener('emptied', reassert);
-        video.addEventListener('loadstart', reassert);
-    }
-
-    // iOS cannot nativeize an MSE blob, but it can play the site's HLS/MP4
-    // URL directly. Swap only after the element already owns a pipeline so
-    // we do not race player setup, and never on handshake/primer videos.
-    function promoteIOSNativeSource(video, container) {
-        if (!isIOSLikeDevice() || !video) { return false; }
-        if (isHandshakePlayer(video) || isPrimerMedia(video)) { return false; }
-        if (sourceFromVideoElement(video)) { return false; }
-        if (!hasOpaqueMediaSource(video) && !hasElementSourceSignal(video)) { return false; }
-        var src = discoverNativeSource(video, container || containerForVideo(video));
-        if (!src) { return false; }
-        if (!applyIOSNativeSource(video, src)) { return false; }
-        guardIOSNativeSource(video);
-        return true;
-    }
-
-    function hasElementSourceSignal(video) {
-        try {
-            if (video.srcObject) { return true; }
-            if (video.currentSrc || video.getAttribute('src')) { return true; }
-            var sources = video.getElementsByTagName('source');
-            for (var i = 0; i < sources.length; i++) {
-                if (sources[i].getAttribute('src')) { return true; }
-            }
-        } catch (e) { /* ignore */ }
-        return false;
-    }
-
-    // Some pages use <video> as the host for an audio-only source. Do not add
-    // video-player controls or chrome cleanup to media explicitly declared that way.
-    function isDeclaredAudioOnly(video) {
-        var sawAudio = false;
-        var sawVideo = false;
-        try {
-            var sources = video.getElementsByTagName('source');
-            for (var i = 0; i < sources.length; i++) {
-                var type = (sources[i].getAttribute('type') || '').toLowerCase();
-                if (type.indexOf('audio/') === 0) { sawAudio = true; }
-                if (type.indexOf('video/') === 0) { sawVideo = true; }
-            }
-        } catch (e) { return false; }
-        return sawAudio && !sawVideo;
-    }
-
-    function isLiveMediaStream(video) {
-        try {
-            var obj = video.srcObject;
-            if (!obj) { return false; }
-            if (typeof MediaStream !== 'undefined' && obj instanceof MediaStream) { return true; }
-            return typeof obj.getTracks === 'function' && typeof obj.addTrack === 'function';
-        } catch (e) { return false; }
-    }
-
-    // ------------------------------------------------------------------
-    // Replacement
-    // ------------------------------------------------------------------
-
-    function normalizeContainer(raw) {
-        // Some selectors match inner elements; climb to the outermost player
-        // wrapper so we replace the whole custom chrome, not just part of it.
-        var container = raw;
-        if (container && container.tagName === 'VIDEO') {
-            container = container.parentElement || container;
-        }
-        var wrapperSelectors = ['.video-js', '.jwplayer', '.jw-wrapper', '.plyr',
-            '.flowplayer', '.mejs-container', '.mejs__container', '.clappr',
-            '[data-clappr-player]', '.fluid_video_wrapper', 'mux-player',
-            'media-controller', 'media-theme', 'media-theme-youtube',
-            '.media-player', '.media-default-skin', '.WebPlayerContainer',
-            '.mw-tmh-player', '[data-mw-tmh]', '[data-a-target="video-player"]',
-            'shreddit-player'];
-        for (var i = 0; i < wrapperSelectors.length; i++) {
-            var ancestor = composedClosest(container, wrapperSelectors[i]);
-            if (ancestor && ancestor.tagName !== 'VIDEO') { container = ancestor; }
-        }
-        return container;
-    }
-
-    function forceNativeControls(video) {
-        if (video._wblockControlsPatched) return;
-        // iOS WebKit materializes native controls (and the AirPlay picker)
-        // from this attribute write. If remote playback is still allowed,
-        // a later ManagedMediaSource attachment is rejected and the video
-        // sits on an endless spinner. Lock first, then show controls.
-        applyRemotePlaybackPolicy(video);
-        video._wblockControlsPatched = true;
-        video.controls = true;
-        video.setAttribute('controls', '');
-        try {
-            if (video.hasAttribute('disabled')) { video.removeAttribute('disabled'); }
-            if (video.disabled) { video.disabled = false; }
-        } catch (e) { /* ignore */ }
-        restoreVideoHitTesting(video);
-    }
-
-    // THEOplayer (Olympics, FIFA) pins pointer-events:none on the media element
-    // so its own overlay owns every hit. With native controls forced on, that
-    // rule leaves Safari painting a control bar nothing can click; hits land
-    // on the .vjs-tech wrapper instead. Re-enable hit testing on the video
-    // itself with an inline !important so a site stylesheet cannot win back.
-    function restoreVideoHitTesting(video) {
-        if (!video || !video.style) { return; }
-        try {
-            if (getComputedStyle(video).pointerEvents !== 'none') { return; }
-            video.style.setProperty('pointer-events', 'auto', 'important');
-        } catch (e) { /* ignore */ }
-    }
-
-    function isFacebookPage() {
-        try { return /(^|\.)facebook\.com$/i.test(location.hostname); }
-        catch (e) { return false; }
-    }
-
-    // Prefer the control's accessible state; the label is only a fallback for
-    // Facebook variants that do not expose an ARIA pressed state.
-    function facebookAudioControl(video, container) {
-        if (!isFacebookPage()) return null;
-        var root = container || (typeof containerForVideo === 'function' ?
-            containerForVideo(video) : (video && video.parentElement));
-        if (!root || !root.querySelectorAll) return null;
-        var fallback = null;
-        var controls;
-        try { controls = root.querySelectorAll('button,[role="button"]'); }
-        catch (e) { return null; }
-        for (var i = 0; i < controls.length; i++) {
-            var control = controls[i];
-            if (control === video || control.getAttribute('aria-hidden') === 'true') continue;
-            var label = (control.getAttribute('aria-label') || control.getAttribute('title') ||
-                control.getAttribute('data-testid') || '').toLowerCase();
-            var audioLabel = /mute|sound|volume|audio/.test(label);
-            var hasState = control.hasAttribute('aria-pressed') || control.hasAttribute('aria-checked');
-            if (audioLabel && (hasState || control.hasAttribute('aria-label'))) return control;
-            if (!fallback && hasState) fallback = control;
-        }
-        return fallback;
-    }
-
-    function isFacebookReel(video, container) {
-        if (!isFacebookPage() || !video || !video.autoplay || !video.muted) return false;
-        try {
-            if (/^\/reels?(?:\/|$)/i.test(location.pathname)) return true;
-        } catch (e) { /* use the player control signal */ }
-        return !!facebookAudioControl(video, container);
-    }
-
-    function isFacebookProtected(el, video) {
-        if (!el || !isFacebookReel(video)) return false;
-        var control = facebookAudioControl(video, containerForVideo(video));
-        return !!(control && (el === control || (el.contains && el.contains(control))));
-    }
-
-    // Custom players set disableRemotePlayback to hide the route picker they
-    // cannot style (cineby). With that flag WebKit omits AirPlay from the
-    // native controls, so nativeizing restores remote playback for direct
-    // http(s) sources. Opaque blob/MSE sources are the opposite case: iOS
-    // WebKit only loads a ManagedMediaSource attachment while remote playback
-    // stays disabled (or an AirPlay alternative source exists), so stripping
-    // the attribute there wedges every MSE player (CNN, Fox, ...) in an
-    // endless loading state. macOS uses plain MediaSource and does not care,
-    // which is why the breakage was iOS-only.
-    function lockIOSManagedMediaSource(video) {
-        if (!video) { return; }
-        try {
-            if (!video.disableRemotePlayback) { video.disableRemotePlayback = true; }
-            if (!video.hasAttribute('disableremoteplayback')) {
-                video.setAttribute('disableremoteplayback', '');
-            }
-            // iOS 18/27 still paints the AirPlay picker unless this is an
-            // explicit deny. Removing "allow" is not enough: the default is
-            // still allow, and ManagedMediaSource then never loads.
-            if (video.getAttribute('x-webkit-airplay') !== 'deny') {
-                video.setAttribute('x-webkit-airplay', 'deny');
-            }
-        } catch (e) { /* ignore */ }
-    }
-
-    function applyRemotePlaybackPolicy(video) {
-        if (!video) { return; }
-        try {
-            var opaque = hasOpaqueMediaSource(video);
-            if (isIOSLikeDevice()) {
-                // Never lift the site's restriction on iOS. Also force the
-                // lock for handshake players (CNN FAVE / Fox AMP) and any
-                // video that does not yet own a direct http(s) file: those
-                // attach ManagedMediaSource after the play gesture, and
-                // WebKit will not load it if AirPlay is still enabled.
-                if (opaque || isHandshakePlayer(video) || !sourceFromVideoElement(video)) {
-                    lockIOSManagedMediaSource(video);
-                }
-                return;
-            }
-            // Paramount's player (VH1, MTV) sets the lock, plays a data:
-            // primer, then attaches ManagedMediaSource, which WebKit refuses
-            // while remote playback is on. Lift it only for a direct file.
-            if (sourceFromVideoElement(video)) {
-                video.removeAttribute('disableremoteplayback');
-                video.disableRemotePlayback = false;
-            }
-        } catch (e) { /* ignore */ }
-    }
-
-    // The UA services native-control hits below the JS event layer, but stopping
-    // them in capture phase breaks native control buttons in WebKit shadow DOM.
-    // Stopping propagation in bubble phase lets native play/pause/skip run first
-    // while keeping outer shells (video.js, Vimeo, Reddit) from seeing the same
-    // tap and toggling playback again. iOS Reddit listens for touch/pointer on
-    // shreddit-player, so click-only was not enough. THEOplayer (Olympics,
-    // FIFA) toggles playback from mousedown on its shell, which a native
-    // control tap still emits, so the mouse pair has to stop here too.
-    function blockCompetingClicks(video) {
-        if (!video || video._wblockClickGuard) return;
-        function stopBubble(e) { e.stopPropagation(); }
-        var types = ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'];
-        try {
-            for (var i = 0; i < types.length; i++) {
-                video.addEventListener(types[i], stopBubble);
-            }
-            video._wblockClickGuard = true;
-            registerVideoCleanup(video, function () {
-                for (var j = 0; j < types.length; j++) {
-                    video.removeEventListener(types[j], stopBubble);
-                }
-                video._wblockClickGuard = false;
-            });
-        } catch (e) { /* ignore */ }
-    }
-
-    // WebKit renders native controls from the `controls` content attribute and
-    // omits the AirPlay route picker when `disableremoteplayback` is set. Custom
-    // players toggle both to drive their own chrome. Do not shadow the media
-    // element's controls property with a non-configurable instance descriptor:
-    // doing that before WebKit initializes its native media controls can break
-    // the controls implementation itself. Observe the content attributes
-    // instead; MutationObserver restores them at the pre-paint microtask
-    // checkpoint whenever a custom player removes or re-asserts them. Remote
-    // playback follows applyRemotePlaybackPolicy: on iOS the disable flag must
-    // survive (ManagedMediaSource refuses to load without it), while elsewhere
-    // direct-source players get AirPlay back.
-    function guardNativeControls(video) {
-        if (!video || video._wblockControlsGuarded) return;
-        video._wblockControlsGuarded = true;
-
-        function restore() {
-            if (!video) { return; }
-            if (!video.hasAttribute('controls')) {
-                video.setAttribute('controls', '');
-            }
-            applyRemotePlaybackPolicy(video);
-            restoreVideoHitTesting(video);
-        }
-
-        var observer = null;
-        try {
-            observer = new MutationObserver(restore);
-            observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
-        } catch (e) { /* ignore */ }
-
-        restore();
-        registerVideoCleanup(video, function () {
-            if (observer) {
-                try { observer.disconnect(); } catch (e) { /* ignore */ }
-            }
-        });
-    }
-
-    // Durable hide: an attribute-backed !important rule beats design-system CSS
-    // that reasserts display, and survives most same-node style writes. Inline
-    // setProperty(..., 'important') covers the same fight when the attribute is
-    // stripped. Never hide <html>/<body>/<video>.
-    function ensureHideStyle() {
-        if (document.getElementById(HIDE_STYLE_ID)) return;
-        try {
-            var style = document.createElement('style');
-            style.id = HIDE_STYLE_ID;
-            style.textContent = '[' + HIDDEN_ATTR + ']{display:none!important;visibility:hidden!important;pointer-events:none!important}';
-            (document.head || document.documentElement).appendChild(style);
-        } catch (e) { /* ignore */ }
-    }
-
-    function isYouTubeEmbedIframe(el) {
-        if (!el || el.tagName !== 'IFRAME') { return false; }
-        var src = '';
-        try { src = el.currentSrc || el.src || el.getAttribute('src') || ''; }
-        catch (e) { src = ''; }
-        if (!src) { return false; }
-        try {
-            var url = new URL(src, document.baseURI);
-            var host = String(url.hostname || '').toLowerCase();
-            var path = url.pathname || '';
-            var youtubeHost = host === 'youtu.be' ||
-                host === 'youtube.com' || host.slice(-12) === '.youtube.com' ||
-                host === 'youtube-nocookie.com' || host.slice(-22) === '.youtube-nocookie.com';
-            if (!youtubeHost) { return false; }
-            if (host === 'youtu.be') { return true; }
-            return /^\/(?:embed|live_embed)(?:\/|$)/.test(path) ||
-                /^\/shorts\/[^/]+\/embed(?:\/|$)/.test(path);
-        } catch (e) {
-            return /youtube(?:-nocookie)?\.com\/(?:embed|live_embed)\//i.test(src) ||
-                /youtu\.be\//i.test(src);
-        }
-    }
-
-    function hostsYouTubeEmbed(el) {
-        if (isYouTubeEmbedIframe(el)) { return true; }
-        if (!el || !el.querySelectorAll) { return false; }
-        try {
-            var iframes = el.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
-                if (isYouTubeEmbedIframe(iframes[i])) { return true; }
-            }
-        } catch (e) { /* ignore */ }
-        return false;
-    }
-
-    function isTextEditingSurface(el) {
-        if (!el || el.nodeType !== 1) { return false; }
-        var tag = el.tagName;
-        if (tag === 'TEXTAREA') { return true; }
-        if (el.isContentEditable) {
-            try {
-                var ce = el.getAttribute && el.getAttribute('contenteditable');
-                if (ce !== null && String(ce).toLowerCase() === 'false') { return false; }
-            } catch (e) { /* ignore */ }
-            return true;
-        }
-        try {
-            var role = (el.getAttribute('role') || '').toLowerCase();
-            if (role === 'textbox' || role === 'searchbox') { return true; }
-        } catch (e) { /* ignore */ }
-        if (tag === 'INPUT') {
-            var type = '';
-            try {
-                type = (el.getAttribute('type') || el.type || '').toLowerCase();
-            } catch (e) { type = ''; }
-            if (!type || type === 'text' || type === 'search' || type === 'email' ||
-                type === 'url' || type === 'password' || type === 'tel') {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    function containsTextEditingSurface(el) {
-        if (!el || el.nodeType !== 1) { return false; }
-        if (isTextEditingSurface(el)) { return true; }
-        if (!el.children || !el.children.length) { return false; }
-        try {
-            var nodes = el.querySelectorAll('textarea, input, [contenteditable], [role="textbox"], [role="searchbox"]');
-            for (var i = 0; i < nodes.length; i++) {
-                if (isTextEditingSurface(nodes[i])) { return true; }
-            }
-        } catch (e) { /* ignore */ }
-        return false;
-    }
-
-    function setHiddenChrome(el) {
-        try {
-            if (el.getAttribute(HIDDEN_ATTR) === '1' && el.style.display === 'none') { return; }
-            ensureHideStyle();
-            el.setAttribute(HIDDEN_ATTR, '1');
-            el.style.setProperty('display', 'none', 'important');
-        } catch (e) { /* ignore */ }
-    }
-
-    function hideElement(el) {
-        if (!el || el === document.documentElement || el === document.body) return;
-        if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK' ||
-            el.tagName === 'STYLE' || el.tagName === 'LINK' || el.tagName === 'SLOT' ||
-            el.tagName === 'META' || el.tagName === 'TEMPLATE') return;
-        if (hostsYouTubeEmbed(el)) return;
-        if (containsTextEditingSurface(el)) return;
-        setHiddenChrome(el);
-    }
-
-    function hideKnownPlayerChrome(el) {
-        if (!el || el === document.documentElement || el === document.body) return;
-        if (el.tagName === 'VIDEO' || el.tagName === 'SOURCE' || el.tagName === 'TRACK' ||
-            el.tagName === 'STYLE' || el.tagName === 'LINK' || el.tagName === 'SLOT' ||
-            el.tagName === 'META' || el.tagName === 'TEMPLATE') return;
-        if (hostsYouTubeEmbed(el)) return;
-        setHiddenChrome(el);
-    }
-
-    // Node.contains() stops at a shadow boundary. Walk through ShadowRoot.host so
-    // an outer custom-element player is never mistaken for detached chrome and
-    // hidden along with the media inside its closed shadow root.
-    function composedParent(node) {
+    function parentOf(node) {
         if (!node) { return null; }
         if (node.parentNode) { return node.parentNode; }
-        try {
-            var root = node.getRootNode && node.getRootNode();
-            return root && root !== node && root.host ? root.host :
-                (node.host || null);
-        } catch (e) { return null; }
+        return node.host || null;
     }
 
-    function composedContains(ancestor, node) {
-        if (!ancestor || !node) { return false; }
-        for (var current = node; current; current = composedParent(current)) {
+    function contains(ancestor, node) {
+        for (var current = node; current; current = parentOf(current)) {
             if (current === ancestor) { return true; }
         }
         return false;
     }
 
-    function composedRelated(a, b) {
-        return composedContains(a, b) || composedContains(b, a);
-    }
+    function related(a, b) { return contains(a, b) || contains(b, a); }
 
-    function composedClosest(node, selector) {
-        for (var el = node; el; el = composedParent(el)) {
-            if (el.nodeType === 1 && el.matches) {
-                try { if (el.matches(selector)) { return el; } } catch (e) { /* invalid selector */ }
-            }
+    function closest(node, selector) {
+        for (var el = node; el; el = parentOf(el)) {
+            if (el.nodeType === 1 && attempt(function () { return el.matches(selector); })) { return el; }
         }
         return null;
     }
 
-    // Generic chrome hiding. Instead of maintaining a per-library selector list
-    // (which inevitably misses bespoke players), walk every element inside the
-    // container and hide anything that is not the video, an ancestor of the
-    // video (needed for layout), or a descendant of the video (<source>,
-    // <track>).  In "aggressive" mode all such chrome is hidden; this is safe
-    // when the container is a known player wrapper or has its own positioning
-    // context (position !== 'static'), both strong signals that the element is
-    // a dedicated player shell rather than a general-purpose page wrapper.
-    // In conservative mode only positioned (absolute / fixed / sticky) elements
-    // are hidden, which covers the vast majority of overlay-style custom
-    // controls while leaving flow-layout page content intact.
-    function hideContainerChrome(container, video, aggressive) {
-        if (!container || !container.querySelectorAll) return;
-        if (container.nodeType === 1 && container.tagName === 'VIDEO') return;
-        var elements = container.querySelectorAll('*');
-        for (var i = 0; i < elements.length; i++) {
-            var el = elements[i];
-            if (el === video) continue;
-            if (composedContains(video, el)) continue;   // <source>, <track>
-            if (composedContains(el, video)) continue;   // ancestor wrappers/hosts
-            if (isFacebookProtected(el, video)) continue;
-            if (isPbsProtectedChrome(el)) continue;
-            if (aggressive) {
-                hideElement(el);
-            } else {
-                try {
-                    var pos = getComputedStyle(el).position;
-                    if (pos === 'absolute' || pos === 'fixed' || pos === 'sticky') {
-                        hideElement(el);
-                    }
-                } catch (e) { /* ignore */ }
-            }
+    function positioned(el) {
+        var position = attempt(function () { return getComputedStyle(el).position; });
+        return position && position !== 'static';
+    }
+
+    // Absolute, fixed and sticky elements paint over others; relative ones
+    // stay in flow and only establish a positioning context.
+    function overlay(el) {
+        return /^(absolute|fixed|sticky)$/.test(attempt(function () { return getComputedStyle(el).position; }) || '');
+    }
+
+    function rectOf(el) { return attempt(function () { return el.getBoundingClientRect(); }); }
+
+    // ------------------------------------------------------------------
+    // Background playback and visibility
+    // ------------------------------------------------------------------
+
+    // Captured before the document properties are shadowed below.
+    var nativeHidden = (function () {
+        for (var proto = document; proto; proto = Object.getPrototypeOf(proto)) {
+            var descriptor = Object.getOwnPropertyDescriptor(proto, 'hidden');
+            if (descriptor && descriptor.get) { return descriptor.get; }
         }
-        // Open/observed shadow trees are not in querySelectorAll(). Reddit's
-        // shreddit-media-ui lives as a shadow sibling of <video>; without this
-        // pierce the native controls paint under that overlay and stay dead.
-        // Never walk a <video> UA shadow: that is Safari's own control tree.
-        if (container.shadowRoot) { hideContainerChrome(container.shadowRoot, video, aggressive); }
-        for (var s = 0; s < elements.length; s++) {
-            if (elements[s].tagName === 'VIDEO') continue;
-            if (elements[s].shadowRoot) { hideContainerChrome(elements[s].shadowRoot, video, aggressive); }
-        }
-    }
-
-    // Determine whether a container is a dedicated player shell (aggressive
-    // hiding is safe) or might be a general-purpose wrapper (conservative only).
-    function isPlayerShell(container) {
-        if (container.matches && container.matches(PLAYER_SELECTOR)) return true;
-        try {
-            return getComputedStyle(container).position !== 'static';
-        } catch (e) { return false; }
-    }
-
-    // The player shell for a video: the nearest recognized library wrapper, or —
-    // for bespoke players — the nearest positioned ancestor. Custom players hang
-    // their overlay chrome (controls, poster, outro) off a positioning context,
-    // frequently as siblings of an intermediate video wrapper rather than of the
-    // video itself (Vimeo, LinkedIn). Deriving the container from the direct
-    // parent then misses those siblings and leaves the original chrome painted
-    // over the native controls. Climbing to the positioning context catches them.
-    // Falls back to the parent when nothing nearer than the page root is
-    // positioned, so a positioned <body> can never trigger a whole-page hide.
-    function containerForVideo(video) {
-        var known = composedClosest(video, PLAYER_SELECTOR);
-        if (known && known.tagName !== 'VIDEO') { return normalizeContainer(known); }
-        var el = composedParent(video);
-        while (el && el !== document && el.tagName !== 'BODY' && el.tagName !== 'HTML') {
-            if (el.nodeType === 1) {
-                try {
-                    if (getComputedStyle(el).position !== 'static') { return el; }
-                } catch (e) { break; }
-            }
-            el = composedParent(el);
-        }
-        return video.parentElement || video;
-    }
-
-    // The outermost ancestor that still bounds the player: the highest one whose
-    // box is close to the video's size. A control bar pinned to the video's edges
-    // (LinkedIn) lives inside this shell but OUTSIDE the video's own wrapper, so a
-    // container-descendant sweep never reaches it. The size bound stops the climb
-    // before page content (post text, reactions) that sits in a taller ancestor.
-    function playerShell(video) {
-        var shell = video.parentNode || video, el = video.parentNode;
-        var vr;
-        try { vr = video.getBoundingClientRect(); } catch (e) { return video.parentElement || video; }
-        if (vr.width < 2 || vr.height < 2) { return video.parentElement || video; }
-        var maxH = vr.height * 1.7 + 160, maxW = vr.width * 1.35 + 48;
-        while (el && el !== document && el.nodeType !== 9) {
-            if (el.tagName === 'BODY' || el.tagName === 'HTML') { break; }
-            if (el.nodeType === 11) {
-                // ShadowRoot has no box; keep it so shadow siblings stay in scope.
-                shell = el;
-                el = composedParent(el);
-                continue;
-            }
-            if (el.nodeType !== 1) { break; }
-            var r;
-            try { r = el.getBoundingClientRect(); } catch (e) { break; }
-            if (r.height > maxH || r.width > maxW) { break; }
-            shell = el;
-            el = composedParent(el);
-        }
-        return shell || video.parentElement || video;
-    }
-
-    // Does a rect overlap the video, allowing control bars that sit on the bottom
-    // edge (or just below it) and side/top overlays flush with the edges?
-    function overlapsVideo(r, vr) {
-        var ix = Math.min(r.right, vr.right + 8) - Math.max(r.left, vr.left - 8);
-        var iy = Math.min(r.bottom, vr.bottom + 72) - Math.max(r.top, vr.top - 8);
-        return ix >= 4 && iy >= 4;
-    }
-
-    // True for overlay chrome that sits on the video without being page chrome.
-    // Rejects full-page / full-card boxes so feed text and reaction rows stay.
-    function isPlayerOverlay(el, vr) {
-        var r;
-        try { r = el.getBoundingClientRect(); } catch (e) { return false; }
-        if (r.width < 2 || r.height < 2) { return false; }
-        if (r.height > vr.height * 1.55 + 48 && r.width > vr.width * 0.85) { return false; }
-        var vw = window.innerWidth || 0, vh = window.innerHeight || 0;
-        if (vw > 0 && vh > 0 && r.width > vw * 0.9 && r.height > vh * 0.45) { return false; }
-        return overlapsVideo(r, vr);
-    }
-
-    // Full-bleed cover painted over the video with position:static/relative
-    // (LinkedIn end-card: a grid sibling flex box the same size as the media,
-    // pe:auto, that steals every hit from native controls). Positioned overlays
-    // are handled separately; this is the static same-footprint case.
-    function isVideoCover(el, vr) {
-        var r;
-        try { r = el.getBoundingClientRect(); } catch (e) { return false; }
-        if (r.width < 8 || r.height < 8) { return false; }
-        if (r.width >= vr.width * 0.85 && r.height >= vr.height * 0.85 &&
-            r.width <= vr.width * 1.2 + 8 && r.height <= vr.height * 1.2 + 8) {
-            var cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-            var vcx = (vr.left + vr.right) / 2, vcy = (vr.top + vr.bottom) / 2;
-            if (Math.abs(cx - vcx) <= vr.width * 0.15 && Math.abs(cy - vcy) <= vr.height * 0.15) {
-                return true;
-            }
-        }
-        var ix = Math.min(r.right, vr.right) - Math.max(r.left, vr.left);
-        var iy = Math.min(r.bottom, vr.bottom) - Math.max(r.top, vr.top);
-        if (ix < 8 || iy < 8) { return false; }
-        return (ix * iy) >= (vr.width * vr.height * 0.55);
-    }
-
-    // Static player control bar (LinkedIn): a short strip spanning most of the
-    // video width, stacked over the bottom or top control region. Too short for
-    // isVideoCover and not positioned, so it slips past every other check and
-    // steals hits from native controls.
-    function isControlBar(el, vr) {
-        var r;
-        try { r = el.getBoundingClientRect(); } catch (e) { return false; }
-        if (r.width < 8 || r.height < 8) { return false; }
-        if (r.height > vr.height * 0.4 + 24) { return false; }
-        var ovX = Math.min(r.right, vr.right) - Math.max(r.left, vr.left);
-        if (ovX < vr.width * 0.5) { return false; }
-        // Bar must straddle the video horizontally; tolerate padding/box-sizing
-        // making it a touch wider than the media.
-        var cx = (r.left + r.right) / 2;
-        if (cx < vr.left - r.width * 0.1 || cx > vr.right + r.width * 0.1) { return false; }
-        var ovY = Math.min(r.bottom, vr.bottom) - Math.max(r.top, vr.top);
-        if (ovY < 4) { return false; }
-        var cy = (r.top + r.bottom) / 2;
-        return cy >= vr.bottom - vr.height * 0.4 || cy <= vr.top + vr.height * 0.4;
-    }
-
-    // Hide overlay chrome within an off-path subtree drawn over the video.
-    // Positioned roots that overlap are hidden wholesale. Static roots that are
-    // full-bleed video covers (LinkedIn) are also hidden wholesale. Other static
-    // roots whose box is off the video are pruned; remaining static roots are
-    // walked only for positioned descendants so post text/reactions stay.
-    function hideOverlappingSubtree(root, video, vr) {
-        // PBS host overlays have their own hostname and iframe-gated cleanup.
-        // Generic geometry must not hide them on unrelated pages.
-        if (isPbsCandidateWrapper(root) && !pbsPlayerShell(root)) { return; }
-        if (root === video || composedRelated(root, video) ||
-            isFacebookProtected(root, video) || isPbsProtectedChrome(root)) { return; }
-        var rr;
-        try { rr = root.getBoundingClientRect(); } catch (e) { return; }
-        var pos;
-        try { pos = getComputedStyle(root).position; } catch (e) { return; }
-        if (pos === 'absolute' || pos === 'sticky' || pos === 'fixed') {
-            if (isPlayerOverlay(root, vr)) { hideElement(root); }
-            return;
-        }
-        if (isVideoCover(root, vr)) {
-            hideElement(root);
-            return;
-        }
-        if (isControlBar(root, vr)) {
-            hideElement(root);
-            return;
-        }
-        if (!overlapsVideo(rr, vr)) { return; }
-        var els = root.querySelectorAll('*');
-        for (var i = 0; i < els.length; i++) {
-            var el = els[i];
-            if (el === video || composedRelated(el, video) ||
-                isFacebookProtected(el, video) || isPbsProtectedChrome(el)) { continue; }
-            try {
-                var p = getComputedStyle(el).position;
-                if (p === 'absolute' || p === 'sticky' || p === 'fixed') {
-                    if (isPlayerOverlay(el, vr)) { hideElement(el); }
-                } else if (isVideoCover(el, vr)) {
-                    hideElement(el);
-                }
-            } catch (e) { /* ignore */ }
-        }
-    }
-
-    // Climb the video's ancestors while they bound the player and hide overlay
-    // chrome (siblings of the video's wrapper) that overlaps the media. Catches
-    // players whose controls hang off an outer shell rather than the video's own
-    // wrapper — the case a container-descendant sweep misses.
-    function isTwitchHost() {
-        try { return /(^|\.)twitch\.tv$/i.test(location.hostname); }
-        catch (e) { return false; }
-    }
-
-    function isIOSLikeDevice() {
-        try {
-            return /iP(?:hone|ad|od)/i.test(navigator.platform || '') ||
-                /iP(?:hone|ad|od)/i.test(navigator.userAgent || '') ||
-                (/Mac/i.test(navigator.platform || '') && navigator.maxTouchPoints > 1);
-        } catch (e) { return false; }
-    }
-
-    function isTemporarilyFullscreen(video) {
-        if (!video) { return false; }
-        if (video._wblockInNativeFullscreen) { return true; }
-        try {
-            if (video.webkitDisplayingFullscreen) { return true; }
-        } catch (e) { /* ignore */ }
-        try {
-            if (document.fullscreenElement === video || document.webkitFullscreenElement === video) {
-                return true;
-            }
-        } catch (e) { /* ignore */ }
-        return false;
-    }
-
-
-
-    // iOS WebKit can drop an MSE decoder if we mutate playsinline or rebuild
-    // the wrapper after the first playing event. Keep the existing media
-    // element and only expose native controls + hide site chrome.
-    function isIOSPreservedPlayer(video) {
-        try {
-            return isIOSLikeDevice() && !!video && hasOpaqueMediaSource(video);
-        } catch (e) { return false; }
-    }
-
-    function isAlreadyPlaying(video) {
-        try { return !!(video && !video.paused && !video.ended); }
-        catch (e) { return false; }
-    }
-
-    // CNN FAVE / Bolt dispatch play() before ManagedMediaSource exists.
-    // Nativeizing on that empty playing event paints Safari chrome + AirPlay
-    // and the later srcObject attach is rejected. Wait for a real pipeline.
-    function hasAttachedMediaPipeline(video) {
-        try {
-            if (!video) { return false; }
-            if (video.srcObject) { return true; }
-            if ((video.readyState || 0) >= 2) { return true; }
-            var src = video.currentSrc || video.src || '';
-            return src.indexOf('blob:') === 0 || src.indexOf('http') === 0;
-        } catch (e) { return false; }
-    }
-
-    function shouldDeferHandshake(video) {
-        if (!isHandshakePlayer(video)) { return false; }
-        if (ampAdActive(video)) { return true; }
-        if (!hasAttachedMediaPipeline(video)) { return true; }
-        return !(video._wblockPlaybackReady || isAlreadyPlaying(video));
-    }
-
-    // Real iOS WebKit rejects ManagedMediaSource after we flip native
-    // controls, even with AirPlay denied. Leave any non-file iOS player
-    // to the site unless we can promote a native-playable http(s) URL
-    // (HLS/MP4 from React or video.js). Handshake / blob / empty
-    // srcObject pipelines without that URL stay locked for AirPlay only.
-    function preserveIOSManagedPlayer(video) {
-        if (!isIOSLikeDevice() || !video) { return false; }
-        if (sourceFromVideoElement(video)) { return false; }
-        if (promoteIOSNativeSource(video, containerForVideo(video))) { return false; }
-        lockIOSManagedMediaSource(video);
-        preparePreservedPbsPlayer(video);
-        return true;
-    }
-
-    function enableIOSPreservedControls(container, video) {
-        lockIOSManagedMediaSource(video);
-    }
-
-    function isHandshakePlayer(video) {
-        try {
-            return !!(video.closest && video.closest('.amp-player,.fave-player-container'));
-        } catch (e) { return false; }
-    }
-
-    function isVisiblyPainted(el) {
-        if (!el) { return false; }
-        try {
-            var style = getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden' || +style.opacity === 0) {
-                return false;
-            }
-            var rect = el.getBoundingClientRect();
-            return rect.width > 8 && rect.height > 8;
-        } catch (e) { return false; }
-    }
-
-    // Fox's Akamai AMP preroll keeps Skip Ad and the 10/15s bar in siblings of
-    // .amp-video. Nativeizing during that turn leaves those buttons painted over
-    // Safari's controls and unclickable.
-    function ampAdActive(video) {
-        var shell = null;
-        try { shell = video.closest && video.closest('.amp-player'); }
-        catch (e) { return false; }
-        if (!shell) { return false; }
-        var cls = ' ' + (shell.className || '') + ' ';
-        if (cls.indexOf(' amp-ad ') !== -1 || cls.indexOf(' amp-ads ') !== -1) {
-            return true;
-        }
-        var nodes = shell.querySelectorAll('.amp-ads,.amp-ad,.fw-ad,[class*="amp-ad-"]');
-        for (var i = 0; i < nodes.length; i++) {
-            if (isVisiblyPainted(nodes[i])) { return true; }
-        }
-        var labels = shell.querySelectorAll('button,[role="button"],.amp-component');
-        for (var j = 0; j < labels.length; j++) {
-            var text = ((labels[j].textContent || '') + ' ' +
-                (labels[j].getAttribute('aria-label') || '')).toLowerCase();
-            if (/skip\s*ad/.test(text) && isVisiblyPainted(labels[j])) { return true; }
-        }
-        return false;
-    }
-
-    function pbsPlayerShell(video) {
-        if (!video || !video.closest) { return null; }
-        try { return video.closest('.vjs-pbs, #player-videojs'); }
-        catch (e) { return null; }
-    }
-
-    // PBS mobile leaves its micro-layout shell taller than the actual media.
-    // Once its chrome is hidden that reserved card area becomes a solid blue gap,
-    // and controls remain positioned against the wrong box. Collapse only the
-    // PBS shell to the media ratio; generic video.js layout remains untouched.
-    function normalizePbsGeometry(video) {
-        var shell = pbsPlayerShell(video);
-        if (!shell || !video) { return; }
-        var vw = video.videoWidth || parseFloat(video.getAttribute('width') || '0');
-        var vh = video.videoHeight || parseFloat(video.getAttribute('height') || '0');
-        if (!(vw > 0 && vh > 0)) {
-            try {
-                var rect = video.getBoundingClientRect();
-                if (rect.width > 1 && rect.height > 1) { vw = rect.width; vh = rect.height; }
-            } catch (e) { /* wait for layout or metadata */ }
-        }
-        try {
-            shell.style.setProperty('height', 'auto', 'important');
-            shell.style.setProperty('min-height', '0', 'important');
-            shell.style.setProperty('max-height', 'none', 'important');
-            shell.style.setProperty('padding-top', '0', 'important');
-            shell.style.setProperty('padding-bottom', '0', 'important');
-            video.style.setProperty('display', 'block', 'important');
-            video.style.setProperty('width', '100%', 'important');
-            video.style.setProperty('max-width', '100%', 'important');
-            video.style.setProperty('height', 'auto', 'important');
-            video.style.setProperty('object-fit', 'contain', 'important');
-            if (vw > 0 && vh > 0) {
-                shell.style.setProperty('aspect-ratio', vw + ' / ' + vh, 'important');
-                video.style.setProperty('aspect-ratio', vw + ' / ' + vh, 'important');
-            }
-        } catch (e2) { /* leave the site's geometry if styling is unavailable */ }
-    }
-
-    // iOS ManagedMediaSource must remain under site control, but PBS cleanup is
-    // still safe because it neither changes the source nor enables native controls.
-    function preparePreservedPbsPlayer(video) {
-        if (!pbsPlayerShell(video)) { return; }
-        normalizePbsGeometry(video);
-        hideKnownSiblingChrome(video);
-        if (enhancedVideos.indexOf(video) === -1) { enhancedVideos.push(video); }
-        armChromeWatch(video);
-    }
-
-    function hideKnownSiblingChrome(video) {
-        normalizePbsGeometry(video);
-        // Akamai AMP keeps all custom UI in siblings of .amp-video. Hide the
-        // sibling roots themselves so late React class changes or remounts cannot
-        // repaint an otherwise-empty layer over Safari's native controls.
-        var ampShell = null;
-        try { ampShell = video.closest && video.closest('.amp-player'); }
-        catch (e) { /* not an AMP player */ }
-        if (ampShell && ampShell.children && !ampAdActive(video)) {
-            var kids = ampShell.children;
-            for (var i = 0; i < kids.length; i++) {
-                if (!composedRelated(kids[i], video)) { hideElement(kids[i]); }
-            }
-            var chrome = ampShell.querySelectorAll(
-                '.amp-react,.amp-overlays,.amp-controls,.amp-ads,.amp-ad,.amp-sharing,.fw-ad'
-            );
-            for (var j = 0; j < chrome.length; j++) {
-                if (!composedRelated(chrome[j], video)) { hideElement(chrome[j]); }
-            }
-        }
-
-        // CNN FAVE paints its PUI slate and overlay-root as siblings of the
-        // MSE <video>. Hide those roots only; the video element stays put.
-        var faveShell = null;
-        try { faveShell = video.closest && video.closest('.fave-player-container'); }
-        catch (e) { /* not a FAVE player */ }
-        if (faveShell && faveShell.children) {
-            var faveKids = faveShell.children;
-            for (var f = 0; f < faveKids.length; f++) {
-                if (composedRelated(faveKids[f], video)) { continue; }
-                // Never hide pooled media elements: Bolt reuses sibling
-                // <video>s as unlock primers and for the next feed item on
-                // vertical video pages.
-                if (faveKids[f].tagName === 'VIDEO' ||
-                    (faveKids[f].querySelector && faveKids[f].querySelector('video'))) { continue; }
-                hideElement(faveKids[f]);
-            }
-            var faveChrome = faveShell.querySelectorAll(
-                '.pui-wrapper,.pui,#overlay-root,.fave-controls,[class*="pui_"]'
-            );
-            for (var fc = 0; fc < faveChrome.length; fc++) {
-                if (!composedRelated(faveChrome[fc], video)) { hideElement(faveChrome[fc]); }
-            }
-        }
-
-        // PBS / GPB video.js keeps expand/kebab chrome as siblings of <video>
-        // inside .vjs-pbs / #player-videojs. Blob MSE stays in place, so this
-        // hide has to survive remounts the same way AMP/FAVE do.
-        var pbsShell = pbsPlayerShell(video);
-        if (pbsShell && pbsShell.querySelectorAll) {
-            var pbsChrome = pbsShell.querySelectorAll(
-                '.vjs-control-bar,.vjs-big-play-button,.vjs-poster,.vjs-title-bar,' +
-                '.vjs-loading-spinner,[class*="vjs-pbs-"]'
-            );
-            for (var pc = 0; pc < pbsChrome.length; pc++) {
-                if (composedRelated(pbsChrome[pc], video)) { continue; }
-                if (isPbsProtectedChrome(pbsChrome[pc])) { continue; }
-                hideElement(pbsChrome[pc]);
-            }
-            var pbsMenus = pbsShell.querySelectorAll('button,[role="button"],[aria-haspopup]');
-            for (var pm = 0; pm < pbsMenus.length; pm++) {
-                if (composedRelated(pbsMenus[pm], video)) { continue; }
-                if (pbsMenus[pm].tagName === 'VIDEO') { continue; }
-                if (isPbsProtectedChrome(pbsMenus[pm])) { continue; }
-                if (isPbsMenuChrome(pbsMenus[pm])) { hideElement(pbsMenus[pm]); }
-            }
-        }
-
-        // Reddit paints shreddit-media-ui as a shadow-root sibling of <video>.
-        // parentElement is null there, so the generic ancestor walk used to
-        // miss it and leave Reddit's bar on top of Safari's controls.
-        var redditHost = composedClosest(video, 'shreddit-player');
-        if (redditHost && redditHost.shadowRoot && redditHost.shadowRoot.querySelectorAll) {
-            var redditChrome = redditHost.shadowRoot.querySelectorAll('shreddit-media-ui');
-            for (var rc = 0; rc < redditChrome.length; rc++) {
-                if (!composedRelated(redditChrome[rc], video)) { hideElement(redditChrome[rc]); }
-            }
-        }
-
-        hideTheoPlayerChrome(video);
-        hideBitmovinPlayerChrome(video);
-    }
-
-    function theoPlayerShell(video) {
-        if (!video || !video.closest) { return null; }
-        try {
-            return video.closest(
-                '.theoplayer-container, .theoplayer-skin, .theo-player-wrapper, .theo-player'
-            );
-        } catch (e) { return null; }
-    }
-
-    function bitmovinPlayerShell(video) {
-        if (!video || !video.closest) { return null; }
-        try {
-            var mediaBox = video.closest('.bitmovinplayer-container');
-            if (!mediaBox) { return null; }
-            return mediaBox.closest('.react-ecp, .amp_wrapper, [class*="amp_wrapper"]') || mediaBox;
-        } catch (e) { /* ignore */ }
         return null;
+    })();
+    var reallyHidden = false;
+
+    function updateVisibility() {
+        reallyHidden = nativeHidden ? !!nativeHidden.call(document) : document.hidden;
+    }
+    updateVisibility();
+    document.addEventListener('visibilitychange', updateVisibility);
+
+    function enableBackgroundPlayback() {
+        if (!features.backgroundPlayback || loadPreferences().backgroundPlayback === false) { return; }
+        attempt(function () { Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return false; } }); });
+        attempt(function () { Object.defineProperty(document, 'visibilityState', { configurable: true, get: function () { return 'visible'; } }); });
     }
 
-    function isTheoAdRoot(el) {
-        if (!el || !el.classList) { return false; }
-        var cls = ' ' + (el.className || '') + ' ';
-        return cls.indexOf(' theo-ad ') !== -1 || cls.indexOf(' theo-ads ') !== -1 ||
-            cls.indexOf(' theo-ad-container ') !== -1;
+    // ------------------------------------------------------------------
+    // Auto Picture-in-Picture
+    // ------------------------------------------------------------------
+
+    var autoPiPEnabled = features.autoPictureInPicture &&
+        attempt(function () { return localStorage.getItem(AUTO_PIP_KEY); }) !== '0';
+
+    function inPiP(video) {
+        return document.pictureInPictureElement === video || video.webkitPresentationMode === 'picture-in-picture';
     }
 
-    // THEOplayer keeps its UI in siblings of <video> and in video.js bars that
-    // remount after play (Olympics, US Open). Aggressive container hiding
-    // usually reaches them, but sites that omit .theoplayer-container or paint
-    // UI in a shadow sibling need the same explicit pass as AMP/FAVE.
-    function hideTheoPlayerChrome(video) {
-        var shell = theoPlayerShell(video);
-        if (!shell || !shell.querySelectorAll) { return; }
-        var theoChrome = shell.querySelectorAll(
-            '.theoplayer-controls,.theoplayer-ui,.theo-ui-container,.theo-topbar,' +
-            '.theo-controlbar,.theo-control-bar,.theo-secondary-ui,.theo-time-control,' +
-            '.vjs-control-bar,.vjs-big-play-button,.vjs-poster,.vjs-loading-spinner,' +
-            '.vjs-text-track-display,.vjs-title-bar,[class*="theo-"][class*="control"]'
-        );
-        for (var tc = 0; tc < theoChrome.length; tc++) {
-            if (composedRelated(theoChrome[tc], video) || isTheoAdRoot(theoChrome[tc])) { continue; }
-            hideElement(theoChrome[tc]);
-        }
-        if (shell.children) {
-            for (var tk = 0; tk < shell.children.length; tk++) {
-                var kid = shell.children[tk];
-                if (kid === video || composedRelated(kid, video) || kid.tagName === 'VIDEO') { continue; }
-                if (isTheoAdRoot(kid)) { continue; }
-                hideElement(kid);
-            }
-        }
-        if (shell.shadowRoot) { hideContainerChrome(shell.shadowRoot, video, true); }
-        var hosts = shell.querySelectorAll('theoplayer-ui, theo-ui, [class*="theoplayer"]');
-        for (var th = 0; th < hosts.length; th++) {
-            if (hosts[th].shadowRoot) { hideContainerChrome(hosts[th].shadowRoot, video, true); }
-        }
-    }
-
-    // US Open has used THEOplayer and Bitmovin. Both keep custom controls as
-    // React siblings of the media box, so a nearest-player sweep can miss them.
-    function hideBitmovinPlayerChrome(video) {
-        var shell = bitmovinPlayerShell(video);
-        if (!shell || !shell.querySelectorAll) { return; }
-        var chrome = shell.querySelectorAll(
-            '[id^="controls-"],#overlay,#toolbar,[id="unmute_overlay"],' +
-            '[class*="controls_"],.bitmovinplayer-poster,.bmpui-ui-uicontainer'
-        );
-        for (var i = 0; i < chrome.length; i++) {
-            if (composedRelated(chrome[i], video)) { continue; }
-            hideKnownPlayerChrome(chrome[i]);
-        }
-    }
-
-    // Inline players sometimes leave html/body in a fullscreen or overflow:hidden
-    // state, or paint a fixed UI layer over the page that blocks scroll even
-    // though playback is inline.
-    function releasePlayerDocumentScrollLock(video) {
-        if (!theoPlayerShell(video) && !bitmovinPlayerShell(video)) { return; }
-        try {
-            if (isTemporarilyFullscreen(video)) { return; }
-            var html = document.documentElement;
-            var body = document.body;
-            var bodyWasFullscreen = !!(body && body.classList &&
-                (body.classList.contains('theoplayer-fullscreen') ||
-                 body.classList.contains('theo-fullscreen') ||
-                 body.classList.contains('vjs-fullscreen') ||
-                 body.classList.contains('bmpui-fullscreen')));
-            var lockClasses = ['theoplayer-fullscreen', 'theo-fullscreen', 'vjs-fullscreen', 'theo-noscroll',
-                'bmpui-fullscreen', 'bitmovinplayer-fullscreen', 'no-scroll', 'noscroll'];
-            for (var i = 0; i < lockClasses.length; i++) {
-                if (html && html.classList) { html.classList.remove(lockClasses[i]); }
-                if (body && body.classList) { body.classList.remove(lockClasses[i]); }
-            }
-            if (html && html.style && html.style.overflow === 'hidden') {
-                html.style.removeProperty('overflow');
-            }
-            if (body && body.style) {
-                if (body.style.overflow === 'hidden') { body.style.removeProperty('overflow'); }
-                if (body.style.position === 'fixed' && bodyWasFullscreen) { body.style.removeProperty('position'); }
-            }
-        } catch (e) { /* ignore */ }
-    }
-
-    function normalizePbsHost(host) {
-        if (!host) { return ''; }
-        try { host = String(host).toLowerCase(); }
-        catch (e) { return ''; }
-        if (host.charAt(host.length - 1) === '.') {
-            host = host.slice(0, -1);
-        }
-        return host;
-    }
-
-    function isPbsPlayerHost(host) {
-        return normalizePbsHost(host) === 'player.pbs.org';
-    }
-
-    // Host-page overlay cleanup is only for PBS/GPB documents. Third-party
-    // pages that merely embed player.pbs.org must keep their own chrome.
-    function isPbsOrGpbPageHost(host) {
-        host = normalizePbsHost(host);
-        if (!host) { return false; }
-        return host === 'pbs.org' || host.slice(-8) === '.pbs.org' ||
-            host === 'gpb.org' || host.slice(-8) === '.gpb.org';
-    }
-
-    function isPbsPlayerIframe(el) {
-        if (!el || el.tagName !== 'IFRAME') { return false; }
-        var src = '';
-        try { src = el.getAttribute('src') || el.src || ''; }
-        catch (e) { src = ''; }
-        if (!src) { return false; }
-        try {
-            var base = '';
-            try { base = document.baseURI || location.href || ''; }
-            catch (e2) { base = ''; }
-            var parsed = base ? new URL(src, base) : new URL(src);
-            return isPbsPlayerHost(parsed.hostname);
-        } catch (e3) {
-            return isPbsPlayerIframeSrcFallback(src);
-        }
-    }
-
-    function isPbsPlayerIframeSrcFallback(src) {
-        if (!src) { return false; }
-        try { src = String(src).trim(); }
-        catch (e) { return false; }
-        // Authority must follow optional http(s): immediately. A port, if
-        // present, has to be numeric so https://player.pbs.org:evil.example/
-        // cannot sneak through the lookahead.
-        return /^(?:https?:)?\/\/player\.pbs\.org(?::\d+)?(?=[/?#]|$)/i.test(src);
-    }
-
-    var PBS_HOST_PROTECTED_UI_SELECTOR = (
-        '[class*="passport_benefit"],[class*="PassportBenefit"],' +
-        '.vjs-error-display,[class*="vjs-error"],' +
-        '[class*="preroll"],[class*="ima-ad"],' +
-        '[class*="ad-container"],[class*="ads-container"]'
-    );
-
-    function pbsHostOverlayContainsProtectedUI(overlay) {
-        if (!overlay || !overlay.querySelector) { return false; }
-        try {
-            return !!overlay.querySelector(PBS_HOST_PROTECTED_UI_SELECTOR);
-        } catch (e) { return false; }
-    }
-
-    function isPbsProtectedChrome(el) {
-        if (!el || el === document.documentElement || el === document.body) { return true; }
-        try {
-            if (el.closest && el.closest(
-                'header,nav,[role="banner"],[role="navigation"],[class*="MobileMenu"],' +
-                '[class*="passport_benefit"],[class*="PassportBenefit"],' +
-                '.vjs-error-display,[class*="vjs-error"],' +
-                '[class*="preroll"],[class*="ima-ad"],[class*="ad-container"],[class*="ads-container"]'
-            )) { return true; }
-        } catch (e) { /* ignore */ }
-        var tag = el.tagName || '';
-        if (tag === 'HEADER' || tag === 'NAV' || tag === 'IFRAME') { return true; }
-        if (isPlayableMediaIframe(el)) { return true; }
-        if (isPbsCandidateWrapper(el) && pbsHostOverlayContainsProtectedUI(el)) {
-            return true;
-        }
-        if (isInsidePreservedPbsWrapper(el)) { return true; }
-        return false;
-    }
-
-    function isPbsCandidateWrapper(el) {
-        if (!el) { return false; }
-        var cls = '';
-        try { cls = el.getAttribute('class') || ''; }
-        catch (e) { return false; }
-        return /video_player_overlay|VideoPlayerOverlay|vjs-pbs-/.test(cls);
-    }
-
-    function isInsidePreservedPbsWrapper(el) {
-        if (!el) { return false; }
-        var current;
-        try { current = el.parentElement; }
-        catch (e) { return false; }
-        while (current && current !== document.documentElement && current !== document.body) {
-            if (isPbsCandidateWrapper(current) && pbsHostOverlayContainsProtectedUI(current)) {
+    function requestPiP(video, onRefused) {
+        return !!attempt(function () {
+            if (video.webkitSupportsPresentationMode && video.webkitSetPresentationMode) {
+                video.webkitSetPresentationMode('picture-in-picture');
                 return true;
             }
-            try { current = current.parentElement; }
-            catch (e2) { break; }
-        }
-        return false;
-    }
-
-    function isPbsProtectedHostChrome(el) {
-        return isPbsProtectedChrome(el);
-    }
-
-    function isPbsMenuChrome(el) {
-        if (!el) { return false; }
-        var label = '';
-        try {
-            label = ((el.getAttribute('aria-label') || '') + ' ' +
-                (el.getAttribute('title') || '') + ' ' +
-                (el.getAttribute('data-testid') || '') + ' ' +
-                (el.className || '') + ' ' +
-                (el.id || '') + ' ' +
-                (el.textContent || '')).toLowerCase();
-        } catch (e) { return false; }
-        return /more|kebab|share|overflow|ellipsis|menu/.test(label);
-    }
-
-    function hidePbsHostChrome() {
-        try {
-            if (!isPbsOrGpbPageHost(location.hostname)) { return; }
-        } catch (e) { return; }
-        var iframes;
-        try { iframes = document.querySelectorAll('iframe'); }
-        catch (e) { return; }
-        for (var i = 0; i < iframes.length; i++) {
-            if (!isPbsPlayerIframe(iframes[i])) { continue; }
-            var iframe = iframes[i];
-            var container = null;
-            try {
-                container = iframe.closest && iframe.closest('[class*="video_player_container"]');
-            } catch (e2) { container = null; }
-            if (!container) { container = iframe.parentElement; }
-            if (!container) { continue; }
-            hidePbsHostOverlays(container, iframe);
-            hidePbsHostMenuButtons(container, iframe);
-        }
-    }
-
-    function hidePbsHostOverlays(container, iframe) {
-        var overlays;
-        try {
-            overlays = container.querySelectorAll(
-                '[class*="video_player_overlay"],[class*="VideoPlayerOverlay"]'
-            );
-        } catch (e) { return; }
-        for (var o = 0; o < overlays.length; o++) {
-            var overlay = overlays[o];
-            if (!overlay || overlay === iframe) { continue; }
-            if (isPbsProtectedHostChrome(overlay)) { continue; }
-            if (pbsHostOverlayContainsProtectedUI(overlay)) { continue; }
-            if (overlay.querySelector && overlay.querySelector('iframe')) { continue; }
-            hideElement(overlay);
-        }
-    }
-
-    function hidePbsHostMenuButtons(container, iframe) {
-        var buttons;
-        try {
-            buttons = container.querySelectorAll(
-                'button,[role="button"],[aria-haspopup],[class*="more"],[class*="kebab"],[class*="share"]'
-            );
-        } catch (e) { return; }
-        var ir = null;
-        try { ir = iframe.getBoundingClientRect(); } catch (e2) { ir = null; }
-        for (var b = 0; b < buttons.length; b++) {
-            var btn = buttons[b];
-            if (!btn || btn === iframe) { continue; }
-            if (isPbsProtectedHostChrome(btn)) { continue; }
-            if (!isPbsMenuChrome(btn)) { continue; }
-            if (ir) {
-                var br;
-                try { br = btn.getBoundingClientRect(); } catch (e3) { continue; }
-                var overlaps = !(br.right < ir.left || br.left > ir.right ||
-                    br.bottom < ir.top - 8 || br.top > ir.bottom + 72);
-                if (!overlaps) { continue; }
+            if (video.requestPictureInPicture) {
+                video.requestPictureInPicture().catch(onRefused);
+                return true;
             }
-            hideElement(btn);
-        }
-    }
-
-    function hideOverlappingChrome(video) {
-        hideKnownSiblingChrome(video);
-        // Twitch's player is embedded in a persistent page shell; sibling and
-        // ancestor scans can otherwise classify stream metadata as chrome.
-        if (isTwitchHost()) { return; }
-        var vr;
-        try { vr = video.getBoundingClientRect(); } catch (e) { return; }
-        if (vr.width < 2 || vr.height < 2) { return; }
-        // Never climb through the shell selected for this video. Some players
-        // (notably Twitch's persistent-player) sit inside a much larger layout
-        // container; its siblings are page content, not player chrome.
-        var shell = playerShell(video);
-        var shellParent = composedParent(shell);
-        var child = video;
-        for (var anc = composedParent(video); anc && anc !== shellParent &&
-             anc !== document && anc.tagName !== 'BODY' && anc.tagName !== 'HTML';
-             child = anc, anc = composedParent(anc)) {
-            var kids = anc.children;
-            if (!kids) { continue; }
-            for (var c = 0; c < kids.length; c++) {
-                if (kids[c] !== child) { hideOverlappingSubtree(kids[c], video, vr); }
-            }
-        }
-    }
-
-    // Hide a candidate that sits over the video but is not an ancestor/descendant
-    // of it. Used by both hit-testing and the detached (portal) scan. Accepts
-    // positioned chrome and static/relative full-bleed covers (LinkedIn).
-    function isPlayableMediaIframe(el) {
-        if (!el || el.tagName !== 'IFRAME') { return false; }
-        var allow = (el.getAttribute('allow') || '').toLowerCase();
-        var src = el.getAttribute('src') || '';
-        var label = (el.getAttribute('aria-label') || el.getAttribute('title') || '').toLowerCase();
-        var permissions = /(^|[;\s])autoplay([;\s]|$)/.test(allow) &&
-            /(^|[;\s])encrypted-media([;\s]|$)/.test(allow);
-        var source = /\/(?:video|vod|player|iframe)(?:[/?#]|$)/i.test(src);
-        var named = /video|media|player|mvpd|picker/.test(label);
-        return permissions && (source || named);
-    }
-
-    function hideIfDetachedOverlay(el, video, vr) {
-        if (!el || el === video || el === document.documentElement || el === document.body) { return; }
-        if (isPbsCandidateWrapper(el) && !pbsPlayerShell(el)) { return; }
-        // Chrome is never a media element; pooled sibling <video>s (Bolt feed
-        // primers) must stay usable for the site.
-        if (el.tagName === 'VIDEO') { return; }
-        if (isPlayableMediaIframe(el)) { return; }
-        if (composedRelated(el, video) || isFacebookProtected(el, video) ||
-            isPbsProtectedChrome(el)) { return; }
-        // A hit often lands on a control (slider/button) nested in a static bar;
-        // hide the bar rather than the inner control, which the caller sees.
-        var bar = el;
-        for (var i = 0; i < 6 && bar && bar !== document.body; i++) {
-            if (bar !== video && !composedRelated(bar, video) && isControlBar(bar, vr) &&
-                sharesPlayerBox(bar, video, vr)) {
-                hideElement(bar);
-                return;
-            }
-            bar = bar.parentElement;
-        }
-        if (!isPlayerOverlay(el, vr)) { return; }
-        try {
-            var pos = getComputedStyle(el).position;
-            if (pos !== 'absolute' && pos !== 'fixed' && pos !== 'sticky' &&
-                (!isVideoCover(el, vr) || !sharesPlayerBox(el, video, vr))) {
-                return;
-            }
-        } catch (e) { return; }
-        hideElement(el);
-    }
-
-    // In-flow chrome lives in the player: its nearest common ancestor with the
-    // video is about player-sized. Page content that scrolls over a parallax
-    // hero video (US Open carousels) only meets the video in the page layout,
-    // and hiding it collapses the page under the reader's scroll.
-    function sharesPlayerBox(el, video, vr) {
-        var anc = composedParent(el);
-        while (anc && anc !== document && !composedRelated(anc, video)) { anc = composedParent(anc); }
-        if (!anc || anc === document || anc === document.body || anc === document.documentElement) { return false; }
-        var r;
-        try { r = anc.getBoundingClientRect(); } catch (e) { return false; }
-        return r.height <= vr.height * 1.55 + 48;
-    }
-
-    // Hit-test the pixels over the video and hide anything painted above it.
-    // Catches React portals, position:fixed controls, and overlays whose DOM
-    // parent is outside the player shell — the case an ancestor climb misses
-    // (LinkedIn feed player). Also scans top-level body children geometrically
-    // so off-viewport / zero-hit-test cases (and portal remounts) still get hid.
-    function hideShadowChildOverlays(host, video, vr) {
-        if (!host || !host.shadowRoot || !host.shadowRoot.children) { return; }
-        var kids = host.shadowRoot.children;
-        for (var i = 0; i < kids.length; i++) {
-            if (!composedRelated(kids[i], video)) {
-                hideOverlappingSubtree(kids[i], video, vr);
-            }
-        }
-    }
-
-    function hideStackedChrome(video) {
-        // Keep Twitch page content outside the recognized player wrapper out of
-        // hit-test and detached-overlay scans.
-        if (isTwitchHost()) { return; }
-        var vr;
-        try { vr = video.getBoundingClientRect(); } catch (e) { return; }
-        if (vr.width < 2 || vr.height < 2) { return; }
-        var vw = window.innerWidth || 0, vh = window.innerHeight || 0;
-        if (typeof document.elementsFromPoint === 'function') {
-            var pts = [
-                [vr.left + vr.width * 0.5, vr.top + vr.height * 0.5],
-                [vr.left + 28, vr.top + 28],
-                [vr.right - 28, vr.top + 28],
-                [vr.left + vr.width * 0.5, vr.top + 20],
-                [vr.left + vr.width * 0.5, vr.bottom - 18],
-                [vr.left + 28, vr.bottom - 18],
-                [vr.right - 28, vr.bottom - 18]
-            ];
-            for (var i = 0; i < pts.length; i++) {
-                var x = pts[i][0], y = pts[i][1];
-                if (vw > 0 && (x < 0 || y < 0 || x > vw || y > vh)) { continue; }
-                var stack;
-                try { stack = document.elementsFromPoint(x, y); } catch (e) { continue; }
-                if (!stack) { continue; }
-                for (var s = 0; s < stack.length; s++) {
-                    var hit = stack[s];
-                    if (hit === video) { break; }
-                    if (composedRelated(hit, video)) {
-                        // WebKit's elementsFromPoint often returns the shadow
-                        // host instead of the overlay inside it.
-                        hideShadowChildOverlays(hit, video, vr);
-                        break;
-                    }
-                    hideIfDetachedOverlay(hit, video, vr);
-                }
-            }
-        }
-        // Geometric pass over body-level nodes (and one level of children). Portals
-        // and fixed chrome almost always land here; keeps cost bounded on big pages.
-        var body = document.body;
-        if (!body) { return; }
-        for (var b = 0; b < body.children.length; b++) {
-            var top = body.children[b];
-            hideIfDetachedOverlay(top, video, vr);
-            var kids = top.children;
-            if (!kids || kids.length > 40) { continue; }
-            for (var k = 0; k < kids.length; k++) {
-                hideIfDetachedOverlay(kids[k], video, vr);
-            }
-        }
-    }
-
-    function suppressChrome(container, video) {
-        hideContainerChrome(container, video, isPlayerShell(container));
-        hideOverlappingChrome(video);
-        hideStackedChrome(video);
-        hidePbsHostChrome();
-    }
-
-    // Custom players (LinkedIn) paint or remount chrome on play/seek/end after
-    // our one-shot hide. Re-run hide on those media events, on the next two
-    // animation frames, and on short deferred timeouts — LinkedIn's static
-    // "Watch again" cover often lands a few hundred ms after `ended`.
-    function armChromeWatch(video) {
-        if (!video || video._wblockChromeWatch) { return; }
-        video._wblockChromeWatch = true;
-        var active = true;
-        var timers = [];
-        function clearTimers() {
-            for (var i = 0; i < timers.length; i++) {
-                try { clearTimeout(timers[i]); } catch (e) { /* ignore */ }
-            }
-            timers = [];
-        }
-        function kick() {
-            if (!active || !video.isConnected) { return; }
-            hideOverlappingChrome(video);
-            hideStackedChrome(video);
-            releasePlayerDocumentScrollLock(video);
-        }
-        function kickAfterPaint() {
-            kick();
-            if (typeof requestAnimationFrame === 'function') {
-                requestAnimationFrame(function () { requestAnimationFrame(kick); });
-            }
-        }
-        var hoverKickQueued = false;
-        function kickOnHover() {
-            if (hoverKickQueued) { return; }
-            hoverKickQueued = true;
-            if (typeof requestAnimationFrame === 'function') {
-                requestAnimationFrame(function () {
-                    hoverKickQueued = false;
-                    kickAfterPaint();
-                });
-            } else {
-                hoverKickQueued = false;
-                kickAfterPaint();
-            }
-        }
-        function kickDeferred() {
-            kickAfterPaint();
-            if (typeof setTimeout !== 'function') { return; }
-            clearTimers();
-            [50, 200, 500].forEach(function (ms) {
-                var timer = setTimeout(function () {
-                    var index = timers.indexOf(timer);
-                    if (index !== -1) { timers.splice(index, 1); }
-                    kick();
-                }, ms);
-                timers.push(timer);
-            });
-        }
-        function markNativeFullscreen() {
-            video._wblockInNativeFullscreen = true;
-        }
-        function reassertAfterFullscreen() {
-            video._wblockInNativeFullscreen = false;
-            if (!active) { return; }
-            if (!video.isConnected) { return; }
-            var container = containerForVideo(video);
-            if (container) { suppressChrome(container, video); }
-            kickDeferred();
-            blockCompetingClicks(video);
-            try { forceNativeControls(video); } catch (e) { /* ignore */ }
-            guardNativeControls(video);
-        }
-        try {
-            video.addEventListener('play', kickDeferred);
-            video.addEventListener('pause', kickDeferred);
-            video.addEventListener('ended', kickDeferred);
-            video.addEventListener('seeking', kick);
-            video.addEventListener('loadeddata', kick);
-            video.addEventListener('mouseenter', kickOnHover);
-            video.addEventListener('mousemove', kickOnHover);
-            video.addEventListener('webkitbeginfullscreen', markNativeFullscreen);
-            video.addEventListener('webkitendfullscreen', reassertAfterFullscreen);
-            video.addEventListener('webkitpresentationmodechanged', reassertAfterFullscreen);
-            window.addEventListener('resize', kickDeferred);
-            document.addEventListener('fullscreenchange', reassertAfterFullscreen);
-            document.addEventListener('webkitfullscreenchange', reassertAfterFullscreen);
-        } catch (e) { /* ignore */ }
-        registerVideoCleanup(video, function () {
-            active = false;
-            try {
-                video.removeEventListener('play', kickDeferred);
-                video.removeEventListener('pause', kickDeferred);
-                video.removeEventListener('ended', kickDeferred);
-                video.removeEventListener('seeking', kick);
-                video.removeEventListener('loadeddata', kick);
-                video.removeEventListener('mouseenter', kickOnHover);
-                video.removeEventListener('mousemove', kickOnHover);
-                video.removeEventListener('webkitbeginfullscreen', markNativeFullscreen);
-                video.removeEventListener('webkitendfullscreen', reassertAfterFullscreen);
-                video.removeEventListener('webkitpresentationmodechanged', reassertAfterFullscreen);
-                window.removeEventListener('resize', kickDeferred);
-                document.removeEventListener('fullscreenchange', reassertAfterFullscreen);
-                document.removeEventListener('webkitfullscreenchange', reassertAfterFullscreen);
-            } catch (e) { /* ignore */ }
-            clearTimers();
-            video._wblockChromeWatch = false;
+            return false;
         });
     }
 
-    function enhanceInPlace(container, video, upgradeable) {
-        if (video._wblockEnhanced) {
-            // A video can first appear as a bare custom player and later be
-            // wrapped by a known library. Promote it so a later element source
-            // can still clean the known wrapper. Re-hide chrome a framework may
-            // have rendered after initial cleanup.
-            if (upgradeable) { video._wblockUpgradeable = true; }
-            recoverSidecarTracks(container, video);
-            suppressChrome(container, video);
-            return;
-        }
-        video._wblockEnhanced = true;
-        if (enhancedVideos.indexOf(video) === -1) { enhancedVideos.push(video); }
-        // Upgradeable videos get one more replacement chance once their metadata
-        // (and therefore currentSrc) has loaded; see onMediaSourceReady. Bare
-        // videos enhanced under unknown chrome are not upgradeable, so their
-        // wrapper layout is preserved.
-        video._wblockUpgradeable = !!upgradeable;
-        // We could not resolve a clean source (opaque MSE blob). Keep the
-        // existing video playing but expose native controls + PiP and remove
-        // obvious custom control overlays.
-        try {
-            forceNativeControls(video);
-            applyRemotePlaybackPolicy(video);
-            video.playsInline = true;
-            video.setAttribute('playsinline', '');
-            video.removeAttribute('disablepictureinpicture');
-            video.disablePictureInPicture = false;
-        } catch (e) { /* ignore */ }
-
-        recoverSidecarTracks(container, video);
-        setupAutoPiP(video);
-        setupPlaybackPreferences(video);
-        setupMediaSession(container, video);
-        setupKeyboardShortcuts(container, video);
-
-        suppressChrome(container, video);
-        armChromeWatch(video);
-        blockCompetingClicks(video);
-
-        // Keep controls forced on
-        guardNativeControls(video);
-    }
-
-    function capturePlaybackState(video) {
-        var state = { paused: true, currentTime: 0, volume: 1, muted: false, playbackRate: 1 };
-        try { state.paused = video.paused; } catch (e) { /* ignore */ }
-        try { state.currentTime = video.currentTime || 0; } catch (e) { /* ignore */ }
-        try { state.volume = video.volume; } catch (e) { /* ignore */ }
-        try { state.muted = video.muted; } catch (e) { /* ignore */ }
-        try { state.playbackRate = video.playbackRate || 1; } catch (e) { /* ignore */ }
-        return state;
-    }
-
-    function restorePlaybackState(video, state, sourceChanged) {
-        try { video.volume = state.volume; } catch (e) { /* ignore */ }
-        try { video.muted = state.muted; } catch (e) { /* ignore */ }
-        try { video.playbackRate = state.playbackRate; } catch (e) { /* ignore */ }
-
-        function restorePositionAndPlayback() {
-            if (state.currentTime > 0) {
-                try { video.currentTime = state.currentTime; } catch (e) { /* ignore */ }
+    function leavePiP(video) {
+        attempt(function () {
+            if (video.webkitSupportsPresentationMode && video.webkitSetPresentationMode) {
+                video.webkitSetPresentationMode('inline');
+            } else if (document.exitPictureInPicture) {
+                document.exitPictureInPicture().catch(function () {});
             }
-            if (!state.paused) {
-                try {
-                    var result = video.play();
-                    if (result && result.catch) { result.catch(function () {}); }
-                } catch (e) { /* ignore */ }
-            }
+        });
+    }
+
+    // When to enter or leave PiP: the reducer Tube Cleaner ships too, proven
+    // and held to tests/rules/auto-pip.rule.mjs. It only closes PiP it opened
+    // itself, so PiP the user entered stays open on return.
+    // @gdp-begin autoPiPStep
+    function autoPiPStep(config, state, event) {
+        var op = event.op;
+        var wantsIn = op === 'hide' && event.hideAllowed || op === 'blur' && config.blurEnters && event.hideAllowed ||
+            op === 'scrollOut' && event.autoAllowed;
+        var wantsOut = op === 'show' && event.focused || op === 'focus' && !event.hidden && event.focused ||
+            op === 'scrollIn' && event.autoAllowed;
+        var entering = wantsIn && event.playing && !event.inPiP;
+        var leaving = wantsOut && state.ours && event.inPiP;
+        // PiP that ended on its own (closed, or a refused request) is no
+        // longer ours to close.
+        var forget = op === 'left' || wantsOut && state.ours && !event.inPiP;
+        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving };
+    }
+    // @gdp-end
+
+    function setupAutoPiP(video) {
+        if (!once(video, 'autoPiP')) { return; }
+        video._wblockAutoPiPHooked = true;
+        // Window focus alone cannot tell whether another window covers
+        // Safari, so blur never enters PiP; tab hiding and scrolling do.
+        var state = { ours: false, enter: false, exit: false };
+        function send(op) {
+            state = autoPiPStep({ blurEnters: false }, state, {
+                op: op, autoAllowed: autoPiPEnabled, hideAllowed: autoPiPEnabled,
+                playing: !video.paused && !video.ended, focused: document.hasFocus(), hidden: reallyHidden, inPiP: inPiP(video)
+            });
+            if (state.enter && !requestPiP(video, function () { send('left'); })) { send('left'); }
+            if (state.exit) { leavePiP(video); }
+        }
+        listen(video, document, 'visibilitychange', function () { send(reallyHidden ? 'hide' : 'show'); });
+        listen(video, window, 'focus', function () { send('focus'); });
+        listen(video, video, 'webkitpresentationmodechanged', function () {
+            if (video.webkitPresentationMode !== 'picture-in-picture') { send('left'); }
+        });
+        listen(video, video, 'leavepictureinpicture', function () { send('left'); });
+        listen(video, window, 'pagehide', function (event) {
+            if (event && event.persisted) { return; }
+            attempt(function () { video.pause(); });
+            if (inPiP(video)) { leavePiP(video); }
+        });
+        if (typeof IntersectionObserver === 'undefined') { return; }
+        var observer = new IntersectionObserver(function (entries) {
+            send(entries[entries.length - 1].isIntersecting ? 'scrollIn' : 'scrollOut');
+        }, { threshold: 0.1 });
+        observer.observe(video);
+        onCleanup(video, function () { observer.disconnect(); });
+    }
+
+    // ------------------------------------------------------------------
+    // Playback preferences and resume position
+    // ------------------------------------------------------------------
+
+    function loadPreferences() {
+        // Null media values keep the site's own state until the user first
+        // changes that control in a cleaned player.
+        var preferences = { playbackRate: null, volume: null, muted: null, subtitleLanguage: null, backgroundPlayback: true };
+        var saved = attempt(function () { return JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}'); }) || {};
+        for (var key in saved) { if (key in preferences) { preferences[key] = saved[key]; } }
+        return preferences;
+    }
+
+    function savePreference(key, value) {
+        attempt(function () {
+            var preferences = loadPreferences();
+            preferences[key] = value;
+            localStorage.setItem(PREFERENCES_KEY, JSON.stringify(preferences));
+        });
+    }
+
+    function resumeIdentity(video) {
+        var page = location.origin + location.pathname + location.search;
+        var canonical = document.querySelector('link[rel="canonical"]');
+        if (canonical && canonical.href) { page = canonical.href; }
+        // Tell several players on one page apart without keeping expiring CDN
+        // tokens. Opaque MSE streams fall back to the page itself.
+        var source = directSource(video);
+        if (!source) { return page; }
+        var url = new URL(source);
+        return page + '|' + url.origin + url.pathname;
+    }
+
+    function subtitleTracks(video) {
+        return [].filter.call(video.textTracks || [], function (track) {
+            return track.kind === 'subtitles' || track.kind === 'captions';
+        });
+    }
+
+    // Caption preference decisions: pure functions proven and held to
+    // tests/rules/captions.rule.mjs. WebKit turns on a <track default> by
+    // itself, sometimes repeatedly while it loads; that is the page's choice,
+    // not the user's, and so is a default track switching on right after it
+    // appears. Keep them self-contained; the test evaluates their source.
+    // @gdp-begin captionChoiceStep
+    function captionChoiceStep(config, state, event) {
+        var change = event.op === 'change';
+        var automatic = change && event.showing === 'default' && !(event.active && state.seenAt + config.settle < event.t);
+        var saves = change && !automatic;
+        return {
+            seenAt: event.op === 'tracks' ? event.t : state.seenAt,
+            revert: automatic,
+            save: saves,
+            saveOff: saves && event.showing === 'none',
+            savedLang: saves && event.showing !== 'none' ? event.lang : 0
+        };
+    }
+    // @gdp-end
+
+    // Without a saved preference the page decides; otherwise only the saved
+    // language shows.
+    // @gdp-begin subtitleModeFor
+    function subtitleModeFor(event) {
+        return { touch: event.known, show: event.known && !event.off && event.prefLang === event.trackLang };
+    }
+    // @gdp-end
+
+    function setupPreferences(video) {
+        if (!once(video, 'preferences')) { return; }
+        var preferences = loadPreferences();
+        var applying = true;
+        if (preferences.playbackRate > 0) { video.playbackRate = Math.max(0.25, Math.min(4, preferences.playbackRate)); }
+        if (typeof preferences.volume === 'number') { video.volume = Math.max(0, Math.min(1, preferences.volume)); }
+        if (typeof preferences.muted === 'boolean') { video.muted = preferences.muted; }
+        setTimeout(function () { applying = false; }, 0);
+
+        function applySubtitles() {
+            var language = loadPreferences().subtitleLanguage;
+            subtitleTracks(video).forEach(function (track) {
+                var mode = subtitleModeFor({ known: language !== null, off: !language, prefLang: language, trackLang: track.language });
+                if (mode.touch) { attempt(function () { track.mode = mode.show ? 'showing' : 'disabled'; }); }
+            });
         }
 
-        if (sourceChanged && video.readyState < 1) {
-            video.addEventListener('loadedmetadata', restorePositionAndPlayback, { once: true });
-        } else {
-            restorePositionAndPlayback();
+        var identity = null, restored = false, lastSave = 0;
+        function syncIdentity() {
+            var next = resumeIdentity(video);
+            if (next !== identity) { identity = next; restored = false; lastSave = 0; }
+        }
+        function restore() {
+            syncIdentity();
+            applySubtitles();
+            if (restored || !isFinite(video.duration) || video.duration < 60) { return; }
+            restored = true;
+            var entries = attempt(function () { return JSON.parse(localStorage.getItem(RESUME_KEY) || '{}'); }) || {};
+            var position = Number(entries[identity] || 0);
+            if (position > 10 && position < video.duration - 15) { video.currentTime = position; }
+        }
+        function save(force) {
+            syncIdentity();
+            var now = Date.now();
+            if (!force && now - lastSave < 5000) { return; }
+            lastSave = now;
+            attempt(function () {
+                var entries = JSON.parse(localStorage.getItem(RESUME_KEY) || '{}');
+                if (video.ended || video.currentTime >= video.duration - 10) { delete entries[identity]; }
+                else if (video.currentTime > 10 && isFinite(video.duration) && video.duration >= 60) { entries[identity] = Math.floor(video.currentTime); }
+                var keys = Object.keys(entries);
+                while (keys.length > 50) { delete entries[keys.shift()]; }
+                localStorage.setItem(RESUME_KEY, JSON.stringify(entries));
+            });
+        }
+
+        var captions = { seenAt: Date.now(), revert: false, save: false, saveOff: false, savedLang: 0 };
+        function sendCaptions(op, showing) {
+            var isDefault = !!showing && [].some.call(video.querySelectorAll('track[default]'), function (el) { return el.track === showing; });
+            var activation = navigator.userActivation;
+            captions = captionChoiceStep({ settle: 3000 }, captions, {
+                op: op, t: Date.now(), showing: !showing ? 'none' : isDefault ? 'default' : 'other',
+                lang: showing ? showing.language || '' : '', active: !!(activation && activation.isActive)
+            });
+            if (captions.revert) { applySubtitles(); }
+            else if (captions.save) { savePreference('subtitleLanguage', captions.saveOff ? '' : captions.savedLang); }
+        }
+        function onTrackChange() {
+            sendCaptions('change', subtitleTracks(video).filter(function (track) { return track.mode === 'showing'; })[0]);
+        }
+
+        listen(video, video, 'loadedmetadata', restore);
+        listen(video, video, 'durationchange', restore);
+        listen(video, video, 'ratechange', function () { if (!applying) { savePreference('playbackRate', video.playbackRate); } });
+        listen(video, video, 'volumechange', function () {
+            if (applying) { return; }
+            savePreference('volume', video.volume);
+            savePreference('muted', video.muted);
+        });
+        listen(video, video, 'timeupdate', function () { save(false); });
+        listen(video, video, 'pause', function () { save(true); });
+        listen(video, video, 'ended', function () { save(true); });
+        if (video.textTracks) {
+            listen(video, video.textTracks, 'addtrack', function () { sendCaptions('tracks', null); });
+            listen(video, video.textTracks, 'change', onTrackChange);
+        }
+        onCleanup(video, function () { save(true); });
+        restore();
+    }
+
+    // ------------------------------------------------------------------
+    // Sidecar subtitle and chapter tracks
+    // ------------------------------------------------------------------
+
+    function absoluteUrl(value) {
+        if (typeof value !== 'string' || !value.trim()) { return null; }
+        var url = attempt(function () { return new URL(value.trim(), document.baseURI).href; });
+        return url && /^https?:\/\//i.test(url) ? url : null;
+    }
+
+    // Sidecar files often carry the language only in their name
+    // (Reddit's wh_ben_en.vtt, subs.de.vtt).
+    function languageFromUrl(url) {
+        var match = attempt(function () { return new URL(url).pathname.match(/[._-]([a-z]{2,3}(?:-[A-Za-z]{2,4})?)\.(?:vtt|srt)$/i); });
+        return match ? match[1] : '';
+    }
+
+    function languageName(language) {
+        if (!language) { return ''; }
+        return attempt(function () { return new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' }).of(language); }) || language;
+    }
+
+    function addTrack(video, definition) {
+        if (!definition) { return; }
+        var url = absoluteUrl(definition.src || definition.file || definition.url);
+        var kind = String(definition.kind || 'subtitles').toLowerCase();
+        if (kind === 'captions') { kind = 'subtitles'; }
+        if (!url || ['subtitles', 'chapters', 'descriptions'].indexOf(kind) === -1) { return; }
+        var exists = [].some.call(video.querySelectorAll('track'), function (el) {
+            return el.src === url || el.getAttribute('data-wblock-src') === url;
+        });
+        if (exists) { return; }
+        var language = definition.srclang || definition.language || languageFromUrl(url);
+        var track = document.createElement('track');
+        track.kind = kind;
+        track.setAttribute('data-wblock-src', url);
+        track.label = definition.label || definition.name || languageName(language) || kind;
+        if (language) { track.srclang = language; }
+        if (definition.default) { track.default = true; }
+        video.appendChild(track);
+        // WebKit refuses a cross-origin <track> unless the video is in CORS
+        // mode, and switching the video would refetch (and can break) the
+        // media itself. Fetch the cues instead and hand over a same-origin blob.
+        var crossOrigin = /^https?:$/.test(location.protocol) && !video.hasAttribute('crossorigin') &&
+            new URL(url).origin !== location.origin;
+        if (!crossOrigin) { track.src = url; return; }
+        fetch(url, { mode: 'cors', credentials: 'omit' })
+            .then(function (response) { if (!response.ok) { throw new Error(); } return response.text(); })
+            .then(function (text) { track.src = URL.createObjectURL(new Blob([text], { type: 'text/vtt' })); })
+            .catch(function () { track.src = url; });
+    }
+
+    function harvestTracks(container, video) {
+        var add = function (definition) { addTrack(video, definition); };
+        attempt(function () {
+            [].forEach.call(container.querySelectorAll('track[src]'), function (el) {
+                if (el.parentNode !== video) { add({ src: el.src, kind: el.kind, label: el.label, srclang: el.srclang, default: el.default }); }
+            });
+        });
+        [container, video].forEach(function (el) {
+            var value = el.getAttribute && (el.getAttribute('data-subtitles') || el.getAttribute('data-captions') ||
+                el.getAttribute('data-tracks') || el.getAttribute('caption-url'));
+            if (!value) { return; }
+            var parsed = /^[\[{]/.test(value) ? attempt(function () { return JSON.parse(value); }) : { src: value };
+            [].concat(parsed || []).forEach(add);
+        });
+        attempt(function () {
+            var jw = window.jwplayer && window.jwplayer(container.id || container);
+            if (jw && jw.getCaptions) { [].concat(jw.getCaptions() || []).forEach(add); }
+            var item = jw && jw.getPlaylistItem && jw.getPlaylistItem();
+            [].concat(item && item.tracks || []).forEach(add);
+        });
+        attempt(function () {
+            var players = window.videojs && window.videojs.getPlayers ? window.videojs.getPlayers() : {};
+            for (var id in players) {
+                var player = players[id];
+                var el = player && player.el && player.el();
+                if (!el || !related(el, container)) { continue; }
+                var source = player.currentSource && player.currentSource();
+                [].concat(source && source.tracks || player.options_ && player.options_.tracks || []).forEach(add);
+                var remote = player.remoteTextTracks && player.remoteTextTracks();
+                for (var r = 0; remote && r < remote.length; r++) { add(remote[r]); }
+            }
+        });
+    }
+
+    function setupTracks(container, video) {
+        harvestTracks(container, video);
+        if (video.textTracks && once(video, 'tracks')) {
+            listen(video, video.textTracks, 'addtrack', function () { harvestTracks(container, video); });
         }
     }
 
-    // Bare MediaWiki file videos (mw-file-element / data-mw-tmh) already have
-    // native controls. Their wrapper is an inline <span> in a floated table
-    // <figure> — structural cleanup collapses the box. Size in place instead.
-    // Old .mw-tmh-player shells still go through cleanPlayer.
-    function isNativeFileVideo(video) {
-        try {
-            if (!(video.controls || video.hasAttribute('controls'))) { return false; }
-            if (video.closest && video.closest('.mw-tmh-player')) { return false; }
-            return !!(video.classList && video.classList.contains('mw-file-element')) ||
-                video.hasAttribute('data-mw-tmh');
-        } catch (e) { return false; }
+    // ------------------------------------------------------------------
+    // Keyboard shortcuts
+    // ------------------------------------------------------------------
+
+    function showToast(video, text) {
+        var parent = video.parentNode || document.body;
+        var toast = parent.querySelector && parent.querySelector('.wblock-pc-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.className = 'wblock-pc-toast';
+            toast.style.cssText = 'position:absolute;top:16px;left:50%;transform:translateX(-50%);' +
+                'background:rgba(0,0,0,.85);color:#fff;padding:6px 14px;border-radius:16px;' +
+                'font:600 13px -apple-system,system-ui,sans-serif;pointer-events:none;z-index:2147483647';
+            parent.appendChild(toast);
+        }
+        toast.textContent = text;
+        clearTimeout(toast._timer);
+        toast._timer = setTimeout(function () { toast.remove(); }, 1200);
     }
 
-    // Drop presentational width/height attrs after capturing them for aspect-ratio.
-    function presentationalSize(video) {
-        var attrW = parseFloat(video.getAttribute('width') || '0');
-        var attrH = parseFloat(video.getAttribute('height') || '0');
-        var size = { vw: video.videoWidth || attrW, vh: video.videoHeight || attrH };
-        if (attrW > 0) { try { video.removeAttribute('width'); } catch (e) { /* ignore */ } }
-        if (attrH > 0) { try { video.removeAttribute('height'); } catch (e) { /* ignore */ } }
-        return size;
+    function isEditing(el) {
+        if (!el) { return false; }
+        if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable) { return true; }
+        return !!(el.shadowRoot && isEditing(el.shadowRoot.activeElement));
     }
 
-    // Expand a native MediaWiki file video to the content column without emptying
-    // its wrapper, so mid-play (inline controls, not fullscreen) fills the page.
-    function sizeNativeFileVideo(video) {
-        if (!video) { return; }
-        var shell = null;
-        try {
-            shell = video.closest('.fullImageLink, figure') || video.parentElement;
-        } catch (e) {
-            shell = video.parentElement;
-        }
-
-        // Promote inline/table ancestors so width:100% has a real containing block,
-        // and unfloat the thumb figure so it can span the content column.
-        try {
-            var el = video.parentElement;
-            while (el) {
-                var display = getComputedStyle(el).display;
-                if (display === 'inline' || display === 'contents' || display === 'inline-block' ||
-                    display === 'table' || display === 'table-cell') {
-                    el.style.display = 'block';
-                    el.style.lineHeight = '0';
-                }
-                el.style.width = '100%';
-                el.style.maxWidth = '100%';
-                el.style.float = 'none';
-                if (el === shell) {
-                    el.style.marginLeft = '0';
-                    el.style.marginRight = '0';
-                    el.style.boxSizing = 'border-box';
-                    break;
-                }
-                el = el.parentElement;
-            }
-        } catch (e) { /* ignore */ }
-
-        applyCleanSizing(shell || video.parentElement || video, video);
-        video.style.height = 'auto';
-
-        // preload=none defers intrinsic size; re-run once metadata arrives.
-        if (!video._wblockMwSized && !video.videoWidth) {
-            video._wblockMwSized = true;
-            video.addEventListener('loadedmetadata', function () {
-                sizeNativeFileVideo(video);
-            }, { once: true });
-        }
+    function setRate(video, rate) {
+        rate = Math.max(0.25, Math.min(4, Math.round(rate * 100) / 100));
+        video.playbackRate = rate;
+        savePreference('playbackRate', rate);
+        showToast(video, rate.toFixed(2) + 'x');
     }
 
-    function applyCleanSizing(container, video) {
-        try {
-            var display = getComputedStyle(container).display;
-            if (display === 'inline' || display === 'contents') {
-                container.style.display = 'block';
-                container.style.width = '100%';
-                container.style.maxWidth = '100%';
-                container.style.lineHeight = '0';
-            }
-        } catch (e) { /* ignore */ }
+    function seek(video, time) {
+        video.currentTime = Math.max(0, Math.min(video.duration || Infinity, time));
+    }
 
-        var size = presentationalSize(video);
-        var vw = size.vw, vh = size.vh;
+    function setupShortcuts(container, video) {
+        if (!once(video, 'shortcuts')) { return; }
+        // YouTube's layout: [ ] or < > speed, = reset, f fullscreen, p PiP,
+        // m mute, k play, j l and arrows seek, 0-9 jump to that tenth, and
+        // , . step one frame while paused.
+        listen(video, container, 'keydown', function (event) {
+            if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) { return; }
+            if (isEditing(document.activeElement)) { return; }
+            var key = event.key;
+            var handled = true;
+            if (key === '[' || key === '{' || key === '<') { setRate(video, video.playbackRate - 0.25); }
+            else if (key === ']' || key === '}' || key === '>') { setRate(video, video.playbackRate + 0.25); }
+            else if (key === '=' || key === '+') { setRate(video, 1); }
+            else if (/^[0-9]$/.test(key) && video.duration > 0 && isFinite(video.duration)) { video.currentTime = video.duration * Number(key) / 10; }
+            else if ((key === ',' || key === '.') && video.paused) { seek(video, video.currentTime + (key === '.' ? 1 : -1) / 30); }
+            else if (key === 'j' || key === 'J' || key === 'ArrowLeft') { seek(video, video.currentTime - 5); showToast(video, '-5s'); }
+            else if (key === 'l' || key === 'L' || key === 'ArrowRight') { seek(video, video.currentTime + 5); showToast(video, '+5s'); }
+            else if (key === 'k' || key === 'K') { if (video.paused) { video.play().catch(function () {}); } else { video.pause(); } }
+            else if (key === 'm' || key === 'M') { video.muted = !video.muted; showToast(video, video.muted ? 'Muted' : 'Unmuted'); }
+            else if (key === 'p' || key === 'P') { if (inPiP(video)) { leavePiP(video); } else { requestPiP(video, function () {}); } }
+            else if (key === 'f' || key === 'F') { toggleFullscreen(video); }
+            else { handled = false; }
+            if (handled) { event.preventDefault(); }
+        }, true);
+    }
 
-        video.style.width = '100%';
-        video.style.maxWidth = '100%';
-        video.style.display = 'block';
-        video.style.background = '#000';
-        if (vw > 0 && vh > 0) {
-            try { video.style.aspectRatio = vw + ' / ' + vh; } catch (e) { /* ignore */ }
-        }
-
-        try {
-            var cs = getComputedStyle(container);
-            var containerW = parseFloat(cs.width) || 0;
-            // 100%-of-nothing collapses the player.
-            if (containerW < 2 && vw > 0) {
-                video.style.width = vw + 'px';
-                video.style.height = 'auto';
-                return;
-            }
-            var hasExplicitHeight = cs.height && cs.height !== 'auto' && parseFloat(cs.height) > 0;
-            if (hasExplicitHeight) {
-                video.style.height = '100%';
+    function toggleFullscreen(video) {
+        attempt(function () {
+            if (document.fullscreenElement === video || document.webkitFullscreenElement === video) {
+                (document.exitFullscreen || document.webkitExitFullscreen).call(document);
             } else {
-                video.style.height = 'auto';
-                if (vw > 0 && vh > 0) {
-                    try { container.style.aspectRatio = vw + ' / ' + vh; } catch (e) { /* ignore */ }
+                (video.requestFullscreen || video.webkitRequestFullscreen || video.webkitEnterFullscreen).call(video);
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Now Playing
+    // ------------------------------------------------------------------
+
+    var mediaSessionOwner = null;
+
+    function meta(name) {
+        var el = document.querySelector('meta[property="' + name + '"],meta[name="' + name + '"]');
+        return el && el.content || '';
+    }
+
+    // Feed pages carry many players under one page title. When the player
+    // host describes its own item (Reddit), Now Playing names that item.
+    function nowPlaying(container, video) {
+        var player = closest(video, 'shreddit-player,shreddit-player-2') || container;
+        var attr = function (name) { return player && player.getAttribute && player.getAttribute(name) || ''; };
+        var subreddit = attr('subreddit-name');
+        var data = {
+            title: attr('post-title') || meta('og:title') || document.title || host,
+            artist: subreddit ? 'r/' + subreddit : meta('og:site_name') || host
+        };
+        var artwork = video.poster || absoluteUrl(attr('poster')) || meta('og:image');
+        if (artwork) { data.artwork = [{ src: artwork }]; }
+        return data;
+    }
+
+    function clearMediaSession(video) {
+        var state = stateOf(video);
+        (state.mediaActions || []).forEach(function (action) {
+            attempt(function () { navigator.mediaSession.setActionHandler(action, null); });
+        });
+        if (state.mediaMetadata && navigator.mediaSession.metadata === state.mediaMetadata) {
+            navigator.mediaSession.metadata = null;
+        }
+        state.mediaActions = state.mediaMetadata = null;
+    }
+
+    function setupMediaSession(container, video) {
+        if (!navigator.mediaSession || typeof MediaMetadata === 'undefined' || !once(video, 'mediaSession')) { return; }
+        function activate() {
+            if (mediaSessionOwner && mediaSessionOwner !== video) { clearMediaSession(mediaSessionOwner); }
+            mediaSessionOwner = video;
+            var state = stateOf(video);
+            attempt(function () {
+                state.mediaMetadata = new MediaMetadata(nowPlaying(container, video));
+                navigator.mediaSession.metadata = state.mediaMetadata;
+            });
+            var actions = {
+                play: function () { video.play().catch(function () {}); },
+                pause: function () { video.pause(); },
+                seekbackward: function (d) { seek(video, video.currentTime - (d.seekOffset || 10)); },
+                seekforward: function (d) { seek(video, video.currentTime + (d.seekOffset || 10)); },
+                seekto: function (d) { if (isFinite(d.seekTime)) { video.currentTime = d.seekTime; } }
+            };
+            attempt(function () {
+                var jw = window.jwplayer && window.jwplayer(container.id || container);
+                var playlist = jw && jw.getPlaylist && jw.getPlaylist();
+                if (playlist && playlist.length > 1) {
+                    actions.previoustrack = function () { jw.playlistItem(Math.max(0, jw.getPlaylistIndex() - 1)); };
+                    actions.nexttrack = function () { jw.playlistItem(Math.min(playlist.length - 1, jw.getPlaylistIndex() + 1)); };
                 }
-            }
-        } catch (e) {
-            video.style.height = 'auto';
-        }
-    }
-
-    function cleanPlayer(container, video, src) {
-        if (video._wblockCleaned) { return; }
-        if (hostsYouTubeEmbed(container)) {
-            log('preserving YouTube embed iframe; skipping structural cleanup');
-            return;
-        }
-        // A blob: src means the page attached a MediaSource / MSE pipeline it
-        // owns and is actively feeding (cnn / ms.now, iOS and desktop).
-        // Emptying the wrapper or overwriting src wedges that pipeline and
-        // surfaces as a player that fails to load until the page is refreshed.
-        // enhanceInPlace() already gave the element native controls and hid
-        // the custom chrome, so leaving the pipeline untouched loses nothing.
-        // This is a platform-agnostic rule based on the source type, not the
-        // user agent or the readyState (which may still be 0 when the pipeline
-        // is being set up).
-        if (hasOpaqueMediaSource(video)) { return; }
-        var state = capturePlaybackState(video);
-        // If the browser is already playing a direct source, retain it exactly:
-        // changing src would discard buffered media, selected tracks, and time.
-        // API/data-attribute discovery is used only when the element itself still
-        // has no direct http(s) source (typically an opaque placeholder blob).
-        var elementSource = sourceFromVideoElement(video);
-        var sourceChanged = !elementSource && !!src;
-
-        // Detach and reinsert the SAME media element. Creating a replacement
-        // element causes another network load and a visible blank/buffering gap.
-        // Keeping the original also preserves captions and any MSE pipeline.
-        recoverSidecarTracks(container, video);
-        try { video.remove(); } catch (e) {
-            try { if (video.parentNode) { video.parentNode.removeChild(video); } } catch (e2) { /* ignore */ }
-        }
-        while (container.firstChild) { container.removeChild(container.firstChild); }
-        container.appendChild(video);
-        if (sourceChanged) {
-            try { video.src = src; } catch (e) { /* ignore */ }
-        }
-
-        video._wblockCleaned = true;
-        if (enhancedVideos.indexOf(video) === -1) { enhancedVideos.push(video); }
-        video._wblockUpgradeable = false;
-        video.setAttribute(ATTR_DONE, '1');
-        container.setAttribute(ATTR_DONE, '1');
-        try {
-            var wasVideoJS = container.classList.contains('video-js');
-            container.classList.remove('video-js', 'vjs-paused', 'vjs-playing',
-                'vjs-fluid', 'vjs-16-9', 'vjs-4-3');
-            if (wasVideoJS) {
-                container.style.setProperty('height', 'auto', 'important');
-                container.style.setProperty('padding-top', '0', 'important');
-                container.style.setProperty('padding-bottom', '0', 'important');
-            }
-        } catch (e) { /* ignore */ }
-        applyCleanSizing(container, video);
-        forceNativeControls(video);
-        applyRemotePlaybackPolicy(video);
-        recoverSidecarTracks(container, video);
-        setupAutoPiP(video);
-        setupPlaybackPreferences(video);
-        setupMediaSession(container, video);
-        setupKeyboardShortcuts(container, video);
-        guardNativeControls(video);
-        restorePlaybackState(video, state, sourceChanged);
-        hideOverlappingChrome(video);
-        hideStackedChrome(video);
-        armChromeWatch(video);
-    }
-
-    function selectContainerVideo(container) {
-        if (!container || !container.querySelectorAll) { return null; }
-        var videos = container.querySelectorAll('video');
-        if (!videos.length) { return null; }
-        var selected = videos[0];
-        var bestScore = -1;
-        for (var i = 0; i < videos.length; i++) {
-            var candidate = videos[i];
-            var score = hasElementSourceSignal(candidate) ? 100 : 0;
-            // Pooled autoplay-unlock primers must never outrank the element
-            // that will carry (or already carries) the real source.
-            if (isPrimerMedia(candidate)) { score -= 100; }
-            try {
-                if (candidate.currentSrc) { score += 20; }
-                if (candidate.srcObject) { score += 20; }
-                if (!candidate.paused && !candidate.ended) { score += 10; }
-                score += Math.min(candidate.readyState || 0, 4);
-                if (candidate.offsetWidth > 0 && candidate.offsetHeight > 0) { score += 5; }
-                if (getComputedStyle(candidate).display === 'none') { score -= 5; }
-            } catch (e) { /* use the source-signal score */ }
-            if (score > bestScore) {
-                bestScore = score;
-                selected = candidate;
+            });
+            state.mediaActions = Object.keys(actions);
+            for (var action in actions) {
+                attempt(function () { navigator.mediaSession.setActionHandler(action, actions[action]); });
             }
         }
-        return selected;
+        function updatePosition() {
+            if (mediaSessionOwner !== video || !navigator.mediaSession.setPositionState) { return; }
+            if (!(isFinite(video.duration) && video.duration > 0)) { return; }
+            attempt(function () {
+                navigator.mediaSession.setPositionState({ duration: video.duration, playbackRate: video.playbackRate || 1,
+                    position: Math.max(0, Math.min(video.currentTime, video.duration)) });
+            });
+        }
+        listen(video, video, 'play', activate);
+        listen(video, video, 'timeupdate', updatePosition);
+        listen(video, video, 'ratechange', updatePosition);
+        onCleanup(video, function () {
+            if (mediaSessionOwner === video) { mediaSessionOwner = null; clearMediaSession(video); }
+        });
+        if (!video.paused) { activate(); }
     }
 
-    function replacePlayer(container, allowStructuralCleanup) {
-        var video = selectContainerVideo(container);
-        if (!video) { return; }
-        if (video._wblockCleaned) {
-            recoverSidecarTracks(container, video);
-            suppressChrome(container, video);
-            return;
-        }
+    // ------------------------------------------------------------------
+    // Media source state
+    // ------------------------------------------------------------------
 
-        // A recognized wrapper can expose its API URL before its media element
-        // has a source. That is an initialization state, not permission to
-        // delete the wrapper: on a warm/cached load JW Player can still be
-        // building controls and will later attach its MSE blob. Wait for an
-        // element-owned source mutation so Player Cleaner cannot race setup.
-        // CNN/Fox attach ManagedMediaSource only after tap. On iOS the
-        // restriction has to be in place before that attachment, not after
-        // native controls have already advertised AirPlay.
-        if (preserveIOSManagedPlayer(video)) { return; }
-        if (!hasElementSourceSignal(video)) {
-            log('player initializing; waiting for media element source');
-            return;
-        }
-        if (isPrimerMedia(video)) {
-            log('autoplay-unlock primer; waiting for the real source');
-            return;
-        }
-        if (isDeclaredAudioOnly(video)) {
-            log('declared audio-only media; leaving video untouched');
-            return;
-        }
-        if (isLiveMediaStream(video)) {
-            log('live MediaStream video; leaving video untouched');
-            return;
-        }
-        if (isIOSPreservedPlayer(video) && !video._wblockIOSNativeSrc) { return; }
-        // FAVE/AMP attach media during their own play-event dispatch. Wait
-        // for that handshake even on desktop so we do not nativeize (or hide
-        // Skip Ad) in the middle of startup.
-        if (shouldDeferHandshake(video)) { return; }
-
-        // Native controls are the critical path once the media element owns a
-        // source. Apply them in this mutation microtask before the next paint.
-        var facebookReel = isFacebookReel(video, container);
-        enableBackgroundPlayback();
-        video.setAttribute(ATTR_DONE, '1');
-        container.setAttribute(ATTR_DONE, '1');
-        enhanceInPlace(container, video, true);
-        if (facebookReel) { return; }
-
-        // A custom element owns its shadow tree and may tear itself down if its
-        // internal structure is removed (Archive.org's <play-av> does exactly
-        // that). Nativeize shadow players in place and preserve their pipeline;
-        // structural cleanup is only safe in the document's light DOM.
-        try {
-            if (container.shadowRoot) { return; }
-            if (container.getRootNode && container.getRootNode() !== document) { return; }
-            // MediaElement keeps querying its generated wrapper after startup;
-            // deleting that wrapper leaves playback alive but makes its own
-            // lifecycle callbacks throw. THEOplayer (FIFA, Olympics) reuses the
-            // video.js class on a shell that owns its DRM and ad pipeline, and
-            // stops playback when that shell is emptied. Their controls are
-            // already hidden, so preserve the shell and nativeize in place.
-            if (container.matches && container.matches(SHELL_PRESERVE_SELECTOR)) { return; }
-        } catch (e) { /* continue with the conservative light-DOM path */ }
-
-        // During parser construction, never delete the wrapper DOM before the
-        // site's own setup script has run. Native controls and hidden overlays
-        // are already visible pre-paint; structural cleanup can safely wait for
-        // DOMContentLoaded or a genuine media-ready event.
-        var mayClean = !!allowStructuralCleanup;
-        if (!mayClean) { return; }
-
-        // Only a direct source owned by the media element authorizes structural
-        // cleanup. Player API and data-attribute URLs are hints, not proof that
-        // setup is complete; using them caused cached-load races where the
-        // cleaner emptied JW Player's wrapper before it attached its blob.
-        var src = sourceFromVideoElement(video);
-        log('player detected', container.className, 'source:', src ? 'element-owned' : 'opaque');
-        // Native MediaWiki file videos: size in place, don't empty the wrapper.
-        if (isNativeFileVideo(video)) {
-            sizeNativeFileVideo(video);
-            return;
-        }
-        if (container.querySelectorAll('video').length > 1) {
-            log('multiple videos; preserving player structure');
-            return;
-        }
-        // iOS promotions keep the site wrapper: emptying a React Media
-        // Chrome tree just makes the framework rebuild the custom player.
-        if (src && !video._wblockIOSNativeSrc) { cleanPlayer(container, video, src); }
+    function isPlayable(url) {
+        // Safari cannot play DASH manifests natively.
+        return !!url && /^https?:\/\//i.test(url) && !/\.mpd(?:$|[?#])/i.test(url);
     }
 
-    // A clean source is often not discoverable at first scan because the player
-    // exposes a blob:/opaque src until metadata or its JS API loads. ATTR_DONE is
-    // deliberately non-terminal: media events, source mutations, and recovery
-    // scans all call replacePlayer again until cleanup becomes possible.
-    function onMediaSourceReady(event) {
-        var video = event.target;
-        if (!(video instanceof HTMLVideoElement)) { return; }
-        // Akamai AMP and CNN FAVE players can expose a source before their first
-        // playing event has finished. Nativeizing from inside that startup turn
-        // resets their MSE pipeline. Let the custom play gesture complete, then
-        // take over in the next task.
-        if (!video._wblockEnhanced) {
-            var handshake = isHandshakePlayer(video);
-            if (event.type === 'playing' || (handshake &&
-                (event.type === 'durationchange' || event.type === 'loadedmetadata'))) {
+    // The http(s) file the element itself plays, if any.
+    function directSource(video) {
+        if (isPlayable(video.currentSrc)) { return video.currentSrc; }
+        if (isPlayable(video.src)) { return video.src; }
+        var sources = video.getElementsByTagName('source');
+        for (var i = 0; i < sources.length; i++) {
+            if (/dash/i.test(sources[i].type)) { continue; }
+            var url = absoluteUrl(sources[i].getAttribute('src'));
+            if (isPlayable(url)) { return url; }
+        }
+        return null;
+    }
+
+    // On iOS a declared <source> only counts once the browser selected it:
+    // players often list a fallback file and then attach an MSE blob.
+    function playsDirect(video) {
+        if (!IS_IOS) { return !!directSource(video); }
+        return isPlayable(video.currentSrc) ||
+            !video.currentSrc && isPlayable(absoluteUrl(video.getAttribute('src')));
+    }
+
+    // A MediaSource / ManagedMediaSource pipeline the page owns.
+    function isOpaque(video) {
+        if (video._wblockIOSNativeSrc && video.src === video._wblockIOSNativeSrc) { return false; }
+        return !!video.srcObject || /^blob:/.test(video.currentSrc || '') || /^blob:/.test(video.src || '');
+    }
+
+    function hasSource(video) {
+        return !!(video.srcObject || video.currentSrc || video.getAttribute('src') ||
+            [].some.call(video.getElementsByTagName('source'), function (s) { return s.getAttribute('src'); }));
+    }
+
+    // CNN's Bolt primes pooled elements with a short data: clip to unlock
+    // later playback. That primer is never the content.
+    function isPrimer(video) {
+        return !video.srcObject && /^data:/.test(video.currentSrc || video.src || '');
+    }
+
+    function isLiveStream(video) {
+        var stream = video.srcObject;
+        return !!stream && (typeof MediaStream !== 'undefined' && stream instanceof MediaStream ||
+            typeof stream.getTracks === 'function');
+    }
+
+    function isDeclaredAudio(video) {
+        var types = [].map.call(video.getElementsByTagName('source'), function (s) { return (s.type || '').toLowerCase(); });
+        return types.some(function (t) { return t.indexOf('audio/') === 0; }) &&
+            !types.some(function (t) { return t.indexOf('video/') === 0; });
+    }
+
+    // ------------------------------------------------------------------
+    // iOS: native playback of the site's own stream
+    //
+    // iOS WebKit rejects a ManagedMediaSource attachment once native controls
+    // are on, so an MSE player is left to the site unless the real HLS/MP4 URL
+    // can be found and played directly.
+    // ------------------------------------------------------------------
+
+    var MEDIA_PATH = /\.(m3u8|mp4|m4v|mov|webm)$/i;
+
+    function mediaUrl(values) {
+        for (var i = 0; i < values.length; i++) {
+            var value = values[i];
+            if (Array.isArray(value)) { value = mediaUrl(value); }
+            else if (value && typeof value === 'object') { value = value.src || value.href || value.url || value.file || value.full_url; }
+            var url = absoluteUrl(value);
+            if (isPlayable(url) && MEDIA_PATH.test(new URL(url).pathname)) { return url; }
+        }
+        return null;
+    }
+
+    // Hearst lists progressive MP4 renditions; take the tallest.
+    function tallestRendition(list) {
+        var best = null, bestHeight = -1;
+        [].concat(list || []).forEach(function (item) {
+            var url = mediaUrl([item]);
+            var height = url && +(url.match(/(\d{3,4})p(?=[_.\/-])/) || [0, 0])[1];
+            if (url && height > bestHeight) { best = url; bestHeight = height; }
+        });
+        return best;
+    }
+
+    // React components (video.js v10, Media Chrome, Hearst) keep the real URL
+    // in props while the element only has a blob.
+    function reactSource(el) {
+        if (!el) { return null; }
+        var fiber = null;
+        var keys = Object.keys(el);
+        for (var i = 0; i < keys.length; i++) {
+            if (keys[i].indexOf('__reactProps') === 0) {
+                var direct = mediaUrl([el[keys[i]] && el[keys[i]].src, el[keys[i]]]);
+                if (direct) { return direct; }
+            }
+            if (!fiber && /^__react(Fiber|InternalInstance)/.test(keys[i])) { fiber = el[keys[i]]; }
+        }
+        for (var depth = 0; fiber && depth < 40; depth++, fiber = fiber.return) {
+            var props = fiber.memoizedProps || fiber.pendingProps;
+            var found = mediaUrl([fiber.memoizedProps, fiber.pendingProps]) ||
+                props && (mediaUrl([props.src, props.source, props.hls, props.file, props.sources]) ||
+                    tallestRendition(props.video && props.video.transcodings));
+            if (found) { return found; }
+        }
+        return null;
+    }
+
+    // Web components (Reddit's <shreddit-player>) keep the HLS URL on the
+    // host's src attribute while the shadow <video> gets an MSE blob.
+    function hostSource(video, container) {
+        for (var el = parentOf(video); el && el.nodeType !== 9; el = parentOf(el)) {
+            if (el.nodeType === 1 && el.tagName.indexOf('-') !== -1) {
+                var url = mediaUrl([el.getAttribute('src')]);
+                if (url) { return url; }
+            }
+            if (el === container) { break; }
+        }
+        return null;
+    }
+
+    function setNativeSource(video, url) {
+        // One assignment, no empty-src detach: that intermediate load fires
+        // emptied/error into the site player, which then rebuilds itself.
+        attempt(function () { video.pause(); });
+        if (video.srcObject) { video.srcObject = null; }
+        [].slice.call(video.getElementsByTagName('source')).forEach(function (s) { s.remove(); });
+        video.src = url;
+        video._wblockIOSNativeSrc = url;
+        attempt(function () { video.load(); });
+    }
+
+    function promoteNativeSource(video, container) {
+        if (!IS_IOS || closest(video, HANDSHAKE_SELECTOR) || !isOpaque(video) && (playsDirect(video) || !hasSource(video))) { return false; }
+        var url = hostSource(video, container) || reactSource(video) || reactSource(container);
+        if (!url) { return false; }
+        setNativeSource(video, url);
+        // A cached reload can finish its player setup after the swap and
+        // re-attach the blob. Re-assert a few times, then let a persistent
+        // site player have the element back.
+        if (once(video, 'nativeGuard')) {
+            var retries = 0;
+            var reassert = function () {
                 setTimeout(function () {
-                    if (!video.isConnected || video._wblockEnhanced) { return; }
-                    if (handshake) { video._wblockHandshakeStarted = true; }
-                    if (preserveIOSManagedPlayer(video)) { return; }
-                    if (handshake && ampAdActive(video)) { return; }
-                    video._wblockPlaybackReady = true;
-                    scan(video, false);
+                    if (!video.isConnected || retries >= 4) { return; }
+                    var current = video.src || '';
+                    if (!video.srcObject && (current === url || current && !/^blob:/.test(current))) { return; }
+                    video._wblockIOSNativeRetries = ++retries;
+                    log('reasserting native source', url);
+                    setNativeSource(video, url);
                 }, 0);
-            }
-            return;
+            };
+            listen(video, video, 'emptied', reassert);
+            listen(video, video, 'loadstart', reassert);
         }
-        if (!video._wblockUpgradeable || video._wblockCleaned) { return; }
-        var container = containerForVideo(video);
-        try { replacePlayer(container, true); } catch (e) { log('upgrade failed', e); }
-    }
-
-    // ------------------------------------------------------------------
-    // Scanning
-    // ------------------------------------------------------------------
-
-    // A <video> that is not inside a recognized player-library container but
-    // still looks like a content player whose native controls are suppressed by
-    // custom chrome (modern players such as Mux or bespoke wrappers). These get
-    // enhanced in place rather than rebuilt, so an unknown wrapper's layout is
-    // left intact.
-    function needsBareEnhancement(video) {
-        if (video.getAttribute && video.getAttribute(ATTR_DONE)) { return false; }
-        if (isIOSPreservedPlayer(video)) { return false; }
-        if (video.controls) { return false; } // native controls already present
-        if (isDeclaredAudioOnly(video)) { return false; }
-        if (isLiveMediaStream(video)) { return false; }
-        // These players attach media during their own play-event dispatch. Wait
-        // for the delegated playing handler above so controls/chrome changes do
-        // not interrupt startup. A late inject after playing already fired
-        // still counts as ready.
-        if (shouldDeferHandshake(video)) { return false; }
-        // Must have (or be about to have) a source to be a real player.
-        var src = video.currentSrc || video.src ||
-            (video.getAttribute && video.getAttribute('src'));
-        var hasSrcObject = false;
-        try { hasSrcObject = !!video.srcObject; } catch (e) { /* opaque media source */ }
-        if (!src && !hasSrcObject && !(video.querySelector && video.querySelector('source'))) { return false; }
-        // A pooled autoplay-unlock primer is not a player.
-        if (isPrimerMedia(video)) { return false; }
-        // Skip ambient/background/hero video: autoplay + muted is the dominant
-        // decorative pattern that should keep no native controls. Facebook Reels
-        // are the exception: their accessible audio control is the player UI.
-        if (video.autoplay && video.muted && !isFacebookReel(video)) { return false; }
-        // Skip tiny rendered videos (hover previews / thumbnails) when the size
-        // is known; offsetWidth/Height are 0 before layout, so only filter on a
-        // reliably-small box.
-        var w = video.offsetWidth, h = video.offsetHeight;
-        if (w > 0 && h > 0 && w < 160 && h < 120) { return false; }
         return true;
     }
 
-    // ABC AMP exposes a same-origin MRSS JSON feed for each embedded clip.
-    // Validate native playback off-DOM before retiring the Disney iframe. A
-    // failed feed or media load must leave the original play button available.
-    function prepareABCAMPPlayers() {
-        if (!/(^|\.)abcnews\.com$/i.test(location.hostname)) { return; }
-        var embeds = document.querySelectorAll('amp-video-iframe[src]');
-        for (var i = 0; i < embeds.length; i++) { prepareABCAMPPlayer(embeds[i]); }
+    // ------------------------------------------------------------------
+    // Native controls
+    // ------------------------------------------------------------------
+
+    // Custom players set disableRemotePlayback to hide the AirPlay picker
+    // they cannot style. Lift it for a direct file, but never on iOS: there a
+    // ManagedMediaSource attachment only loads while remote playback stays
+    // denied, and an element without a direct file may still get one.
+    function applyRemotePlaybackPolicy(video) {
+        if (IS_IOS) {
+            if (!directSource(video) || isOpaque(video) || closest(video, HANDSHAKE_SELECTOR)) {
+                if (!video.disableRemotePlayback) { video.disableRemotePlayback = true; }
+                if (!video.hasAttribute('disableremoteplayback')) { video.setAttribute('disableremoteplayback', ''); }
+                if (video.getAttribute('x-webkit-airplay') !== 'deny') { video.setAttribute('x-webkit-airplay', 'deny'); }
+            }
+        } else if (directSource(video) && !isOpaque(video) && video.hasAttribute('disableremoteplayback')) {
+            video.removeAttribute('disableremoteplayback');
+            video.disableRemotePlayback = false;
+        }
     }
 
-    function prepareABCAMPPlayer(host) {
-        if (host._wblockABCRequested) { return; }
-        var embed;
-        try { embed = new URL(host.getAttribute('src'), location.href); } catch (e) { return; }
-        if (embed.origin !== location.origin || embed.pathname !== '/fitt/video/amp/embed') { return; }
-        var id = embed.searchParams.get('id');
-        if (!/^\d+$/.test(id || '')) { return; }
-        host._wblockABCRequested = true;
-        var video = document.createElement('video');
+    function restoreNativeControls(video) {
+        applyRemotePlaybackPolicy(video);
+        if (!video.hasAttribute('controls')) { video.setAttribute('controls', ''); }
+        // THEOplayer pins pointer-events:none on the video so its overlay
+        // owns every hit, which leaves native controls painted but dead.
+        if (attempt(function () { return getComputedStyle(video).pointerEvents; }) === 'none') {
+            video.style.setProperty('pointer-events', 'auto', 'important');
+        }
+    }
+
+    function enableNativeControls(video) {
+        if (!once(video, 'controls')) { return; }
+        // Lock remote playback before controls exist: WebKit builds the
+        // AirPlay picker from this write.
+        restoreNativeControls(video);
         video.controls = true;
         video.playsInline = true;
-        video.preload = 'metadata';
-        video.poster = host.getAttribute('poster') || '';
-        var controller = new AbortController();
-        var retired = [];
-        var finished = false;
-        var installed = false;
-        var timer = setTimeout(restore, 15000);
+        video.setAttribute('playsinline', '');
+        video.removeAttribute('disablepictureinpicture');
+        video.disablePictureInPicture = false;
+        video.removeAttribute('disabled');
+        // Custom players keep stripping these attributes; restore them at the
+        // pre-paint microtask checkpoint. Shadowing the controls property
+        // itself would break WebKit's native controls.
+        var observer = new MutationObserver(function () { restoreNativeControls(video); });
+        observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
+        onCleanup(video, function () { observer.disconnect(); });
+        // Native control hits must not reach the shell too, or its own
+        // tap-to-toggle runs after the native button. Bubble phase, so the
+        // native controls in the UA shadow tree still act first.
+        ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
+            listen(video, video, type, function (event) { event.stopPropagation(); });
+        });
+    }
 
-        function restore() {
-            if (finished) { return; }
-            finished = true;
-            clearTimeout(timer);
-            controller.abort();
-            video.pause();
-            video.removeAttribute('src');
-            video.load();
-            video.remove();
-            retired.forEach(function (entry) {
-                entry.node.style.cssText = entry.style;
-                if (entry.src !== null) { entry.node.setAttribute('src', entry.src); }
+    // ------------------------------------------------------------------
+    // Chrome hiding
+    // ------------------------------------------------------------------
+
+    function ensureHideStyle() {
+        if (document.getElementById('wblock-pc-hide')) { return; }
+        var style = document.createElement('style');
+        style.id = 'wblock-pc-hide';
+        style.textContent = '[' + HIDDEN_ATTR + ']{display:none!important;visibility:hidden!important;pointer-events:none!important}';
+        (document.head || document.documentElement).appendChild(style);
+    }
+
+    function isTextEditing(el) {
+        if (el.tagName === 'TEXTAREA' || /^(textbox|searchbox)$/i.test(el.getAttribute('role') || '')) { return true; }
+        if (el.isContentEditable && String(el.getAttribute('contenteditable')).toLowerCase() !== 'false') { return true; }
+        return el.tagName === 'INPUT' && /^(|text|search|email|url|password|tel)$/i.test(el.getAttribute('type') || '');
+    }
+
+    // Elements that must never be hidden as chrome, together with their
+    // subtree: other media, embeds, text fields (Discord's composer), and
+    // ad, error and paywall UI. A header or nav protects page chrome, but
+    // not when it is the region holding the whole player (videojs.org).
+    function isProtected(el, video) {
+        var tag = el.tagName;
+        if (/^(VIDEO|AUDIO|IFRAME|SOURCE|TRACK|STYLE|LINK|SCRIPT|SLOT|META|TEMPLATE)$/.test(tag)) { return true; }
+        var region = closest(el, 'header,nav,[role="banner"],[role="navigation"]');
+        if (region && !contains(region, video)) { return true; }
+        if (isTextEditing(el) || closest(el, PROTECTED_SELECTOR) || el.querySelector('video,iframe')) { return true; }
+        var inner = el.querySelectorAll('textarea,input,[contenteditable],[role="textbox"],[role="searchbox"],' + PROTECTED_SELECTOR);
+        return [].some.call(inner, function (node) {
+            return node.matches(PROTECTED_SELECTOR) ? node.offsetWidth > 0 && node.offsetHeight > 0 : isTextEditing(node);
+        });
+    }
+
+    var hidingFor = null;
+
+    function hide(el) {
+        if (hidingFor && hidingFor.hidden.indexOf(el) === -1) { hidingFor.hidden.push(el); }
+        if (el.getAttribute(HIDDEN_ATTR) === '1' && el.style.display === 'none') { return; }
+        ensureHideStyle();
+        el.setAttribute(HIDDEN_ATTR, '1');
+        // Inline !important as well: design systems re-assert display with
+        // their own !important rules.
+        el.style.setProperty('display', 'none', 'important');
+    }
+
+    function isHidden(node) { return !!closest(node, '[' + HIDDEN_ATTR + ']'); }
+
+    // The player's own box: a library wrapper, else the nearest positioned
+    // ancestor (custom players hang their chrome off a positioning context),
+    // else the parent.
+    function containerOf(video) {
+        var known = closest(parentOf(video), PLAYER_SELECTOR);
+        if (known) {
+            // Climb to the outermost wrapper of the same player.
+            for (var outer = closest(parentOf(known), PLAYER_SELECTOR); outer; outer = closest(parentOf(outer), PLAYER_SELECTOR)) {
+                var box = rectOf(outer), inner = rectOf(known);
+                if (!box || !inner || box.height > inner.height * 1.6 + 160) { break; }
+                known = outer;
+            }
+            return known;
+        }
+        for (var el = parentOf(video); el && el.nodeType !== 9 && el !== document.body && el !== document.documentElement; el = parentOf(el)) {
+            if (el.nodeType === 1 && positioned(el)) { return el; }
+        }
+        return video.parentElement || parentOf(video);
+    }
+
+    // The outermost ancestor still bounded by the video's size. A control bar
+    // pinned to the player's edge can sit there, outside the container. The
+    // size bound stops before post text and reactions in a feed card.
+    function shellOf(video) {
+        var vr = rectOf(video);
+        var shell = parentOf(video);
+        if (!vr || vr.width < 2 || vr.height < 2) { return shell; }
+        var maxHeight = vr.height * 1.7 + 160, maxWidth = vr.width * 1.35 + 48;
+        for (var el = shell; el && el.nodeType !== 9 && el !== document.body && el !== document.documentElement; el = parentOf(el)) {
+            if (el.nodeType === 1) {
+                var r = rectOf(el);
+                if (!r || r.height > maxHeight || r.width > maxWidth) { break; }
+            }
+            shell = el;
+        }
+        return shell;
+    }
+
+    function overlaps(r, vr) {
+        var x = Math.min(r.right, vr.right + 8) - Math.max(r.left, vr.left - 8);
+        var y = Math.min(r.bottom, vr.bottom + 72) - Math.max(r.top, vr.top - 8);
+        return x >= 4 && y >= 4;
+    }
+
+    // Is `el` chrome drawn over the video? Positioned overlays that sit on
+    // the video count. In-flow elements count only when they hold controls
+    // and little text, and cover the video (LinkedIn's end card) or form a
+    // bar across its top or bottom (LinkedIn controls); page text that
+    // happens to overlap a hero video never does. Page-sized boxes never count.
+    function coversVideo(el, vr) {
+        var r = rectOf(el);
+        if (!r || r.width < 2 || r.height < 2 || !overlaps(r, vr)) { return false; }
+        if (r.height > vr.height * 1.55 + 48 && r.width > vr.width * 0.85) { return false; }
+        if (r.width > innerWidth * 0.9 && r.height > innerHeight * 0.45 && !(r.width <= vr.width * 1.2 + 8 && r.height <= vr.height * 1.2 + 8)) { return false; }
+        if (overlay(el)) { return true; }
+        if (!el.querySelector('button,[role="button"],[role="slider"],input') ||
+            (el.textContent || '').trim().length > 80) { return false; }
+        var ix = Math.min(r.right, vr.right) - Math.max(r.left, vr.left);
+        var iy = Math.min(r.bottom, vr.bottom) - Math.max(r.top, vr.top);
+        if (ix < 4 || iy < 4) { return false; }
+        if (ix * iy >= vr.width * vr.height * 0.55) { return true; }
+        var middle = (r.top + r.bottom) / 2;
+        return r.height <= vr.height * 0.4 + 24 && ix >= vr.width * 0.5 &&
+            (middle >= vr.bottom - vr.height * 0.4 || middle <= vr.top + vr.height * 0.4);
+    }
+
+    // Walk a subtree hiding chrome. `everything` hides every element that is
+    // not an ancestor of the video (inside a known or positioned player box);
+    // otherwise only elements drawn over the video are hidden. A hidden
+    // element hides its subtree, so the walk stops there.
+    function sweep(root, video, vr, everything) {
+        var kids = root.children || [];
+        for (var i = 0; i < kids.length; i++) {
+            var el = kids[i];
+            if (el === video) { continue; }
+            if (el.hasAttribute(HIDDEN_ATTR)) { hide(el); continue; }
+            var ancestor = contains(el, video);
+            if (!ancestor) {
+                if (isProtected(el, video)) { continue; }
+                if (everything) { hide(el); continue; }
+                // Fixed elements are not part of the player box; like portals
+                // they count only when they sit on the video.
+                var fixed = attempt(function () { return getComputedStyle(el).position; }) === 'fixed';
+                if (vr && coversVideo(el, vr) && (!fixed || mostlyInside(el, vr))) { hide(el); continue; }
+                if (fixed) { continue; }
+            }
+            sweep(el, video, vr, everything);
+            // Another component's shadow tree (a menu, a sheet) is its own
+            // business unless it belongs to the player itself.
+            if (el.shadowRoot && (everything || ancestor)) { sweep(el.shadowRoot, video, vr, everything); }
+        }
+    }
+
+    // Overlays mounted outside the player (portals, fixed bars) are found by
+    // what is painted on top of the video's pixels.
+    function hitTest(video, vr) {
+        if (vr.bottom < 0 || vr.right < 0 || vr.top > innerHeight || vr.left > innerWidth) { return; }
+        var points = [[0.5, 0.5], [0.06, 0.1], [0.94, 0.1], [0.5, 0.06], [0.5, 0.94], [0.06, 0.94], [0.94, 0.94]];
+        points.forEach(function (p) {
+            var x = vr.left + vr.width * p[0], y = vr.top + vr.height * p[1];
+            if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) { return; }
+            var stack = attempt(function () { return document.elementsFromPoint(x, y); }) || [];
+            for (var i = 0; i < stack.length && stack[i] !== video; i++) {
+                var hit = stack[i];
+                // WebKit often reports a shadow host instead of the overlay
+                // inside it; sweep that shadow tree for overlays instead.
+                if (contains(hit, video)) {
+                    if (hit.shadowRoot) { sweep(hit.shadowRoot, video, vr, false); }
+                    break;
+                }
+                if (hit === document.body || hit === document.documentElement || isProtected(hit, video)) { continue; }
+                if (coversVideo(hit, vr) && (inPlayerBox(hit, video, vr) || mostlyInside(hit, vr))) { hide(hit); }
+            }
+        });
+        // Portals live at body level; check those boxes geometrically too.
+        [].forEach.call(document.body ? document.body.children : [], function (top) {
+            if (contains(top, video) || isProtected(top, video)) { return; }
+            if (overlay(top) && coversVideo(top, vr) && mostlyInside(top, vr)) { hide(top); }
+        });
+    }
+
+    // In-flow chrome shares a player-sized box with the video. Page content
+    // scrolling over a parallax hero only meets it at the page level.
+    function inPlayerBox(el, video, vr) {
+        var common = parentOf(el);
+        while (common && !contains(common, video)) { common = parentOf(common); }
+        if (!common || common === document.body || common === document.documentElement || common.nodeType === 9) { return false; }
+        var r = rectOf(common);
+        return !!r && r.height <= vr.height * 1.55 + 48;
+    }
+
+    // Detached chrome (portals, fixed bars) sits on the video. A site's own
+    // fixed UI (bottom sheets, banners) only overlaps it in passing.
+    function mostlyInside(el, vr) {
+        var r = rectOf(el);
+        if (!r) { return false; }
+        var ix = Math.max(0, Math.min(r.right, vr.right) - Math.max(r.left, vr.left));
+        var iy = Math.max(0, Math.min(r.bottom, vr.bottom) - Math.max(r.top, vr.top));
+        return ix * iy >= r.width * r.height * 0.6;
+    }
+
+    // Native controls sit on the video element's own bottom edge. Players
+    // often clip a taller video to a shorter box (videojs.org: a 16:9 video
+    // with object-fit: cover in a 2:1 box), which cuts that edge off. Fit
+    // the element to the visible box; object-fit keeps the picture the same.
+    function fitToClip(video, vr) {
+        var container = containerOf(video);
+        var clip = null;
+        for (var el = parentOf(video); el && el.nodeType === 1; el = parentOf(el)) {
+            var overflow = attempt(function () { return getComputedStyle(el).overflowY; });
+            // Only a player box that crops, never a scroll container.
+            if (overflow === 'hidden' || overflow === 'clip') { clip = el; break; }
+            if (el === container) { break; }
+        }
+        var cr = clip && rectOf(clip);
+        if (!cr || cr.height < vr.height * 0.5 || vr.top < cr.top - 1 || vr.bottom <= cr.bottom + 1) { return; }
+        video.style.setProperty('height', clip === parentOf(video) ? '100%' : cr.height + 'px', 'important');
+        video.style.setProperty('max-height', cr.height + 'px', 'important');
+    }
+
+    // Inline players can leave html/body locked by a stale fullscreen class.
+    function releaseScrollLock(video) {
+        if (video._wblockInNativeFullscreen || document.fullscreenElement || document.webkitFullscreenElement) { return; }
+        [document.documentElement, document.body].forEach(function (el) {
+            if (!el || !/fullscreen/i.test(el.className || '')) { return; }
+            el.className.split(/\s+/).forEach(function (name) {
+                if (/fullscreen|no-?scroll/i.test(name)) { el.classList.remove(name); }
+            });
+            if (el.style.overflow === 'hidden') { el.style.removeProperty('overflow'); }
+            if (el.style.position === 'fixed') { el.style.removeProperty('position'); }
+        });
+    }
+
+    // Is the player currently showing an ad? Its chrome (Skip Ad) must stay.
+    function adShowing(video) {
+        var shell = closest(video, PLAYER_SELECTOR);
+        if (!shell) { return false; }
+        if (/\b(amp-ads?|ad-showing|vjs-ad-playing)\b/.test(shell.className || '')) { return true; }
+        return [].some.call(shell.querySelectorAll('.amp-ads,.amp-ad,.fw-ad,[class*="amp-ad-"],button,[role="button"]'), function (el) {
+            var visible = el.offsetWidth > 8 && el.offsetHeight > 8 && getComputedStyle(el).visibility !== 'hidden';
+            return visible && (el.tagName !== 'BUTTON' && el.getAttribute('role') !== 'button' ||
+                /skip\s*ad/i.test(el.textContent + ' ' + (el.getAttribute('aria-label') || '')));
+        });
+    }
+
+    function hideChrome(video) {
+        if (!video.isConnected || adShowing(video)) { return; }
+        var state = stateOf(video);
+        state.hidden = state.hidden || [];
+        hidingFor = state;
+        try { hideChromeNow(video); } finally { hidingFor = null; }
+    }
+
+    function hideChromeNow(video) {
+        var container = containerOf(video);
+        var vr = rectOf(video);
+        if (vr && (vr.width < 2 || vr.height < 2)) { vr = null; }
+        var everything = !!(container.matches && container.matches(PLAYER_SELECTOR)) || positioned(container);
+        if (container.nodeType === 1 || container.nodeType === 11) { sweep(container, video, vr, everything); }
+        if (container.shadowRoot) { sweep(container.shadowRoot, video, vr, everything); }
+        if (!vr) { return; }
+        fitToClip(video, vr);
+        vr = rectOf(video);
+        // Siblings of the video's ancestors up to the size-bounded shell,
+        // outside the container already swept.
+        var shell = shellOf(video);
+        for (var el = video; el && el !== shell; el = parentOf(el)) {
+            var parent = parentOf(el);
+            if (!parent || parent.nodeType === 9) { break; }
+            [].forEach.call(parent.children || [], function (sibling) {
+                if (sibling !== el && !contains(container, sibling)) { sweep({ children: [sibling] }, video, vr, false); }
             });
         }
+        hitTest(video, vr);
+    }
 
-        video.addEventListener('error', restore);
-        video.addEventListener('loadedmetadata', function () {
-            if (finished || installed || !host.isConnected) { return; }
-            clearTimeout(timer);
-            installed = true;
-            // Keep AMP's sizer so the article layout does not jump. Only retire
-            // the iframe and its poster/placeholder once the stream is usable.
-            var children = host.querySelectorAll('iframe,[placeholder],[fallback]');
-            for (var j = 0; j < children.length; j++) {
-                var node = children[j];
-                var src = node.tagName === 'IFRAME' ? node.getAttribute('src') : null;
-                retired.push({ node: node, style: node.style.cssText, src: src });
-                node.style.setProperty('display', 'none', 'important');
-                // A hidden iframe can still autoplay with audio. Blank it, but
-                // retain its URL so a later native media error can restore it.
-                if (src !== null) { node.setAttribute('src', 'about:blank'); }
-            }
-            video.style.cssText = 'position:absolute!important;inset:0!important;width:100%!important;height:100%!important;object-fit:contain!important;background:black;z-index:2';
-            video._wblockCleaned = true;
-            video._wblockEnhanced = true;
-            video.setAttribute(ATTR_DONE, '1');
-            host.appendChild(video);
-            forceNativeControls(video);
-            applyRemotePlaybackPolicy(video);
-            setupAutoPiP(video);
-            setupPlaybackPreferences(video);
-            setupMediaSession(host, video);
-            setupKeyboardShortcuts(host, video);
-            guardNativeControls(video);
+    // ------------------------------------------------------------------
+    // Chrome passes
+    //
+    // Players repaint or remount their chrome after the first hide. Each
+    // enhanced video gets a pass, coalesced to one per frame so it still lands
+    // before paint, but only from its own signals: media events, mutations in
+    // its own box or shadow root, entering the viewport, and portals mounted
+    // at body level. Unrelated page churn never runs the layout-reading hide.
+    // ------------------------------------------------------------------
+
+    var viewportObserver = null;
+
+    function requestPass(video) {
+        var state = states.get(video);
+        if (!state || !state.hooks.watch || state.queued) { return; }
+        state.queued = true;
+        requestAnimationFrame(function () {
+            state.queued = false;
+            if (!states.has(video) || !video.isConnected) { return; }
+            hideChrome(video);
+            releaseScrollLock(video);
+            watchBox(video);
         });
+    }
 
-        fetch('/video/itemfeed?id=' + encodeURIComponent(id), { signal: controller.signal })
-            .then(function (response) {
-                if (!response.ok) { throw new Error('ABC feed unavailable'); }
-                return response.json();
-            })
-            .then(function (feed) {
-                if (finished || !host.isConnected) { restore(); return; }
-                var item = feed && feed.channel && feed.channel.item;
-                if (!item || String(item.guid) !== id || item.isLiveVideo === true ||
-                    item.temporalType !== 'vod') { restore(); return; }
-                var group = item['media-group'];
-                var sources = group && group['media-content'];
-                if (!Array.isArray(sources)) { restore(); return; }
-                var candidates = [];
-                sources.forEach(function (source) {
-                    var attrs = source && source['@attributes'];
-                    if (!attrs || attrs.medium !== 'video' || !video.canPlayType(attrs.type || '')) { return; }
-                    var url;
-                    try { url = new URL(attrs.url); } catch (e) { return; }
-                    if (url.protocol !== 'https:' ||
-                        !/^(?:service-pkgabcnews\.akamaized\.net|ondemand\.abcnews\.com)$/.test(url.hostname)) { return; }
-                    candidates.push({ url: url.href, hls: /mpegurl/i.test(attrs.type) });
+    // Observe the nodes that can hold this player's chrome. The shell depends
+    // on layout, so it is re-resolved after every pass.
+    function watchBox(video) {
+        var state = stateOf(video);
+        var roots = [];
+        [video.getRootNode && video.getRootNode(), containerOf(video), shellOf(video)].forEach(function (node) {
+            if (node && (node.nodeType === 1 || node.nodeType === 11) && node !== video && roots.indexOf(node) === -1) { roots.push(node); }
+        });
+        var previous = state.watched || [];
+        if (previous.length === roots.length && roots.every(function (n) { return previous.indexOf(n) !== -1; })) { return; }
+        state.watched = roots;
+        state.boxObserver.disconnect();
+        roots.forEach(function (root) {
+            state.boxObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'hidden'] });
+        });
+    }
+
+    function watchChrome(video) {
+        if (!once(video, 'watch')) { return; }
+        var state = stateOf(video);
+        var timers = [];
+        var pass = function () { requestPass(video); };
+        // LinkedIn's "Watch again" cover lands a few hundred ms after `ended`.
+        var passSoon = function () {
+            pass();
+            timers.forEach(clearTimeout);
+            timers = [50, 200, 500].map(function (ms) { return setTimeout(pass, ms); });
+        };
+        var exitFullscreen = function () {
+            video._wblockInNativeFullscreen = false;
+            if (!video.isConnected) { return; }
+            restoreNativeControls(video);
+            hideChrome(video);
+            passSoon();
+        };
+        state.boxObserver = new MutationObserver(function (records) {
+            for (var i = 0; i < records.length; i++) {
+                var record = records[i];
+                var nodes = record.type === 'childList' ? record.addedNodes : [record.target];
+                for (var j = 0; j < nodes.length; j++) {
+                    if (nodes[j].nodeType === 1 && nodes[j] !== video && !isHidden(nodes[j])) { pass(); return; }
+                }
+            }
+        });
+        ['play', 'pause', 'ended'].forEach(function (type) { listen(video, video, type, passSoon); });
+        ['seeking', 'loadeddata', 'mouseenter', 'mousemove'].forEach(function (type) { listen(video, video, type, pass); });
+        listen(video, video, 'webkitbeginfullscreen', function () { video._wblockInNativeFullscreen = true; });
+        listen(video, video, 'webkitendfullscreen', exitFullscreen);
+        listen(video, video, 'webkitpresentationmodechanged', exitFullscreen);
+        listen(video, document, 'fullscreenchange', exitFullscreen);
+        listen(video, document, 'webkitfullscreenchange', exitFullscreen);
+        listen(video, window, 'resize', passSoon);
+        onCleanup(video, function () { state.boxObserver.disconnect(); timers.forEach(clearTimeout); });
+        if (typeof IntersectionObserver !== 'undefined') {
+            viewportObserver = viewportObserver || new IntersectionObserver(function (entries) {
+                entries.forEach(function (entry) { if (entry.isIntersecting) { requestPass(entry.target); } });
+            });
+            viewportObserver.observe(video);
+            onCleanup(video, function () { viewportObserver.unobserve(video); });
+        }
+        watchBox(video);
+    }
+
+    // ------------------------------------------------------------------
+    // Deciding what to do with a video
+    // ------------------------------------------------------------------
+
+    function enhance(container, video) {
+        if (video._wblockEnhanced) { requestPass(video); return; }
+        video._wblockEnhanced = true;
+        enhanced.push(video);
+        video.setAttribute(ATTR_DONE, '1');
+        if (container.setAttribute) { container.setAttribute(ATTR_DONE, '1'); }
+        enableBackgroundPlayback();
+        enableNativeControls(video);
+        setupTracks(container, video);
+        setupAutoPiP(video);
+        setupPreferences(video);
+        setupMediaSession(container, video);
+        setupShortcuts(container, video);
+        hideChrome(video);
+        watchChrome(video);
+    }
+
+    // Leave an iOS MSE player to the site, with remote playback locked so
+    // its ManagedMediaSource attachment is accepted.
+    function leaveToSite(video) {
+        applyRemotePlaybackPolicy(video);
+    }
+
+    // iOS: an enhanced player that switched to an MSE blob must get its own
+    // controls back, or WebKit refuses the ManagedMediaSource attachment.
+    function handBack(video) {
+        log('handing an MSE player back to the site');
+        var hidden = stateOf(video).hidden || [];
+        release(video);
+        hidden.forEach(function (el) {
+            el.removeAttribute(HIDDEN_ATTR);
+            el.style.removeProperty('display');
+        });
+        video.controls = false;
+        video.removeAttribute('controls');
+        leaveToSite(video);
+    }
+
+    function consider(video) {
+        if (!video || video.tagName !== 'VIDEO' || !video.isConnected) { return; }
+        if (video._wblockEnhanced) {
+            if (IS_IOS && isOpaque(video)) {
+                // A promoted URL has its own bounded re-assertion; hand back
+                // only once that gives up.
+                if (!video._wblockIOSNativeSrc || (video._wblockIOSNativeRetries || 0) >= 4) { handBack(video); }
+                return;
+            }
+            requestPass(video);
+            return;
+        }
+        if (isPrimer(video) || isDeclaredAudio(video) || isLiveStream(video)) { return; }
+        var container = containerOf(video);
+        var known = !!closest(parentOf(video), PLAYER_SELECTOR);
+        var handshake = !!closest(video, HANDSHAKE_SELECTOR);
+
+        if (IS_IOS && (isOpaque(video) || !playsDirect(video)) && !promoteNativeSource(video, container)) {
+            // An MSE pipeline (even with an http <source> fallback in the
+            // markup, plyr.io) or no direct file yet, and nothing native to
+            // promote: the element carries a ManagedMediaSource pipeline.
+            leaveToSite(video);
+            return;
+        }
+        // A bare <source> without src means the player attaches media later
+        // (Paramount locks remote playback first).
+        if (!hasSource(video) && (known || !video.querySelector('source'))) { return; }
+        // FAVE and AMP attach media inside their own play dispatch, and AMP's
+        // preroll keeps Skip Ad in sibling chrome. Wait for real playback.
+        if (handshake && (!(stateOf(video).started || !video.paused && video.readyState >= 2) || adShowing(video))) { return; }
+        if (!known) {
+            // Bare videos: wait for parsing so autoplay/muted/layout signals
+            // are complete, and skip ambient, preview, and already-native ones.
+            if (document.readyState === 'loading' || video.controls) { return; }
+            if (video.autoplay && video.muted) { return; }
+            if (video.offsetWidth > 0 && video.offsetHeight > 0 && video.offsetWidth < 160 && video.offsetHeight < 120) { return; }
+        }
+        log('enhancing', container.className || container.tagName);
+        enhance(container, video);
+    }
+
+    // A player usually holds one content video plus placeholders or pooled
+    // primers; consider the one with a real source first.
+    function videosUnder(root) {
+        if (!root || !root.querySelectorAll) { return []; }
+        var list = root.nodeType === 1 && root.tagName === 'VIDEO' ? [root] : [].slice.call(root.querySelectorAll('video'));
+        var player = root.nodeType === 1 ? closest(root, PLAYER_SELECTOR) : null;
+        if (player && player !== root) { list = list.concat([].slice.call(player.querySelectorAll('video'))); }
+        var score = function (v) {
+            return (hasSource(v) ? 100 : 0) - (isPrimer(v) ? 200 : 0) + (v.currentSrc ? 20 : 0) +
+                (v.srcObject ? 20 : 0) + (!v.paused ? 10 : 0) + (v.readyState || 0);
+        };
+        return list.filter(function (v, i) { return list.indexOf(v) === i; })
+            .sort(function (a, b) { return score(b) - score(a); });
+    }
+
+    // ------------------------------------------------------------------
+    // Site rules
+    // ------------------------------------------------------------------
+
+    // PBS/GPB pages embed player.pbs.org in an iframe and paint their own
+    // title/play overlay over it. Only on those hosts, and only for overlays
+    // in the iframe's own container.
+    function hidePbsHostOverlays() {
+        if (!/(^|\.)(pbs|gpb)\.org\.?$/i.test(host)) { return; }
+        [].forEach.call(document.querySelectorAll('iframe[src]'), function (iframe) {
+            var url = attempt(function () { return new URL(iframe.getAttribute('src'), document.baseURI); });
+            if (!url || url.hostname !== 'player.pbs.org') { return; }
+            var container = iframe.closest('[class*="video_player_container"]') || iframe.parentElement;
+            [].forEach.call(container.querySelectorAll('[class*="video_player_overlay"],[class*="VideoPlayerOverlay"]'), function (overlay) {
+                if (!overlay.contains(iframe) && !isProtected(overlay, iframe)) { hide(overlay); }
+            });
+        });
+    }
+
+    // ABC News AMP embeds a Disney iframe player. The same-origin MRSS feed
+    // has the HLS/MP4 URL; a native video replaces the iframe only once that
+    // stream has loaded, and any failure restores the original embed.
+    function prepareAbcPlayers() {
+        if (!/(^|\.)abcnews\.com$/i.test(host)) { return; }
+        [].forEach.call(document.querySelectorAll('amp-video-iframe[src]'), function (embed) {
+            if (embed._wblockAbc) { return; }
+            var url = attempt(function () { return new URL(embed.getAttribute('src'), location.href); });
+            var id = url && url.searchParams.get('id');
+            if (!url || url.origin !== location.origin || url.pathname !== '/fitt/video/amp/embed' || !/^\d+$/.test(id || '')) { return; }
+            embed._wblockAbc = true;
+            var video = document.createElement('video');
+            video.controls = true;
+            video.playsInline = true;
+            video.preload = 'metadata';
+            video.poster = embed.getAttribute('poster') || '';
+            var controller = new AbortController();
+            var retired = [], finished = false, installed = false;
+            var timer = setTimeout(restore, 15000);
+            function restore() {
+                if (finished) { return; }
+                finished = true;
+                clearTimeout(timer);
+                controller.abort();
+                video.removeAttribute('src');
+                attempt(function () { video.load(); });
+                video.remove();
+                retired.forEach(function (entry) {
+                    entry.node.removeAttribute(HIDDEN_ATTR);
+                    entry.node.style.cssText = entry.style;
+                    if (entry.src !== null) { entry.node.setAttribute('src', entry.src); }
                 });
-                candidates.sort(function (a, b) { return Number(b.hls) - Number(a.hls); });
-                if (!candidates.length) { restore(); return; }
-                video.title = item.title || '';
-                video.src = candidates[0].url;
-                video.load();
-            }).catch(restore);
+            }
+            video.addEventListener('error', restore);
+            video.addEventListener('loadedmetadata', function () {
+                if (finished || installed || !embed.isConnected) { return; }
+                clearTimeout(timer);
+                installed = true;
+                [].forEach.call(embed.querySelectorAll('iframe,[placeholder],[fallback]'), function (node) {
+                    var src = node.tagName === 'IFRAME' ? node.getAttribute('src') : null;
+                    retired.push({ node: node, style: node.style.cssText, src: src });
+                    node.style.setProperty('display', 'none', 'important');
+                    // A hidden iframe can still play audio; keep its URL for restore.
+                    if (src !== null) { node.setAttribute('src', 'about:blank'); }
+                });
+                video.style.cssText = 'position:absolute!important;inset:0!important;width:100%!important;height:100%!important;object-fit:contain!important;background:black;z-index:2';
+                embed.appendChild(video);
+                enhance(embed, video);
+            });
+            fetch('/video/itemfeed?id=' + encodeURIComponent(id), { signal: controller.signal })
+                .then(function (response) { if (!response.ok) { throw new Error(); } return response.json(); })
+                .then(function (feed) {
+                    var item = feed && feed.channel && feed.channel.item;
+                    var sources = item && item['media-group'] && item['media-group']['media-content'];
+                    if (finished || !embed.isConnected || !item || String(item.guid) !== id || item.isLiveVideo === true ||
+                        item.temporalType !== 'vod' || !Array.isArray(sources)) { restore(); return; }
+                    var candidates = sources.map(function (s) { return s && s['@attributes']; }).filter(function (a) {
+                        var u = a && attempt(function () { return new URL(a.url); });
+                        return u && a.medium === 'video' && video.canPlayType(a.type || '') && u.protocol === 'https:' &&
+                            /^(service-pkgabcnews\.akamaized\.net|ondemand\.abcnews\.com)$/.test(u.hostname);
+                    }).sort(function (a, b) { return /mpegurl/i.test(b.type) - /mpegurl/i.test(a.type); });
+                    if (!candidates.length) { restore(); return; }
+                    video.title = item.title || '';
+                    video.src = candidates[0].url;
+                    video.load();
+                }).catch(restore);
+        });
     }
 
-    function scan(root, allowStructuralCleanup) {
-        var scope = root || document;
-        if (!scope || !scope.querySelectorAll) { return; }
-        // PBS/GPB host pages embed player.pbs.org in an iframe and paint a
-        // sibling overlay. There is no <video> in that document, so chrome hide
-        // has to run even when scan finds nothing. Off those hosts this is a no-op.
-        hidePbsHostChrome();
-        prepareABCAMPPlayers();
-        var seen = [];
-
-        function addContainer(raw) {
-            var container = normalizeContainer(raw);
-            if (!container || seen.indexOf(container) !== -1) { return; }
-            seen.push(container);
-        }
-
-        // Include the affected node's nearest wrapper. querySelectorAll() does
-        // not include the root itself, and a player often adds its <video> in a
-        // later mutation after the wrapper was first observed.
-        if (scope.nodeType === 1) {
-            try {
-                var nearest = scope.matches(PLAYER_SELECTOR) ? scope : scope.closest(PLAYER_SELECTOR);
-                if (nearest) { addContainer(nearest); }
-            } catch (e) { /* ignore */ }
-        }
-
-        // Pass 1: known player-library containers (video.js, JW Player, Plyr...).
-        var known;
-        try { known = scope.querySelectorAll(PLAYER_SELECTOR); }
-        catch (e) { known = []; }
-        for (var i = 0; i < known.length; i++) { addContainer(known[i]); }
-        for (var j = 0; j < seen.length; j++) {
-            try { replacePlayer(seen[j], allowStructuralCleanup); }
-            catch (e) { log('replace failed', e); }
-        }
-
-        // Pass 2: any other <video> whose native controls are suppressed by an
-        // unrecognized custom player. Wait until parsing finishes: before then,
-        // autoplay/muted/layout signals can be incomplete, and WebKit can throw
-        // while initializing native controls for several parser-created videos.
-        // Known wrappers above remain on the pre-paint path.
-        if (document.readyState === 'loading') { return; }
-        var bareVideos = [];
-        if (scope.nodeType === 1 && scope.tagName === 'VIDEO') { bareVideos.push(scope); }
-        var descendants;
-        try { descendants = scope.querySelectorAll('video'); }
-        catch (e) { descendants = []; }
-        for (var k = 0; k < descendants.length; k++) { bareVideos.push(descendants[k]); }
-        for (var v = 0; v < bareVideos.length; v++) {
-            var video = bareVideos[v];
-            // CNN/Fox attach ManagedMediaSource after tap. Lock remote
-            // playback on the handshake element even before it has a source
-            // so WebKit will accept the later attachment.
-            if (preserveIOSManagedPlayer(video)) { continue; }
-            if (isIOSPreservedPlayer(video) && !video._wblockIOSNativeSrc) { continue; }
-            if (!needsBareEnhancement(video)) { continue; }
-            var bareContainer = containerForVideo(video);
-            log('bare player detected', bareContainer.className || '(no class)', 'enhancing in place');
-            try {
-                video.setAttribute(ATTR_DONE, '1');
-                if (bareContainer.setAttribute) { bareContainer.setAttribute(ATTR_DONE, '1'); }
-                enableBackgroundPlayback();
-                enhanceInPlace(bareContainer, video, false);
-            } catch (e) { log('bare enhance failed', e); }
-        }
-    }
+    // ------------------------------------------------------------------
+    // Observation
+    // ------------------------------------------------------------------
 
     var observedRoots = [];
-    var observedRootObservers = [];
 
-    function collectVideos(node, output) {
-        if (!node || !node.querySelectorAll) { return; }
-        if (node.nodeType === 1 && node.tagName === 'VIDEO') { output.push(node); }
-        var videos = node.querySelectorAll('video');
-        for (var i = 0; i < videos.length; i++) { output.push(videos[i]); }
+    function scan(root) {
+        hidePbsHostOverlays();
+        prepareAbcPlayers();
+        videosUnder(root).forEach(function (video) { attempt(function () { consider(video); }); });
     }
 
-    function discoverShadowRoots(node) {
-        if (!node || !node.querySelectorAll) { return; }
-        function inspect(element) {
-            try {
-                if (element.shadowRoot) { observeTreeRoot(element.shadowRoot); }
-            } catch (e) { /* closed roots are captured by attachShadow instead */ }
+    function onMediaEvent(event) {
+        var video = event.target;
+        if (!video || video.tagName !== 'VIDEO') { return; }
+        // Let a play gesture finish before taking over in the next task:
+        // handshake players attach their media from inside it.
+        if (event.type === 'playing' || closest(video, HANDSHAKE_SELECTOR)) {
+            setTimeout(function () {
+                if (event.type === 'playing') { stateOf(video).started = true; }
+                consider(video);
+            }, 0);
+        } else {
+            consider(video);
         }
-        if (node.nodeType === 1) { inspect(node); }
-        var elements = node.querySelectorAll('*');
-        for (var i = 0; i < elements.length; i++) { inspect(elements[i]); }
     }
 
-    function disconnectTreeRoot(root) {
+    function observeRoot(root) {
+        if (!root || observedRoots.indexOf(root) !== -1) { return; }
+        observedRoots.push(root);
+        var observer = new MutationObserver(handleMutations);
+        observer.observe(root, { childList: true, subtree: true, attributes: true,
+            attributeFilter: ['class', 'src', 'data-src', 'data-video-src', 'data-file', 'data-video', 'data-source', 'data-url'] });
+        ['loadstart', 'loadedmetadata', 'durationchange', 'playing'].forEach(function (type) { root.addEventListener(type, onMediaEvent, true); });
+        root._wblockObserver = observer;
+        attempt(function () {
+            [].forEach.call(root.querySelectorAll('*'), function (el) { if (el.shadowRoot) { observeRoot(el.shadowRoot); } });
+        });
+        scan(root);
+    }
+
+    function forgetRoot(root) {
         var index = observedRoots.indexOf(root);
         if (index === -1 || root === document) { return; }
-        try { observedRootObservers[index].disconnect(); } catch (e) { /* ignore */ }
-        try {
-            root.removeEventListener('loadedmetadata', onMediaSourceReady, true);
-            root.removeEventListener('durationchange', onMediaSourceReady, true);
-            root.removeEventListener('playing', onMediaSourceReady, true);
-        } catch (e) { /* ignore */ }
         observedRoots.splice(index, 1);
-        observedRootObservers.splice(index, 1);
+        root._wblockObserver.disconnect();
+        ['loadstart', 'loadedmetadata', 'durationchange', 'playing'].forEach(function (type) { root.removeEventListener(type, onMediaEvent, true); });
     }
 
-    function releaseDetachedShadowRoots() {
-        // Closed roots are not reachable through host.shadowRoot, so use the
-        // retained root list. Disconnect and release them when their host leaves
-        // the document; re-insertion of an open root is rediscovered normally.
-        for (var i = observedRoots.length - 1; i >= 0; i--) {
-            var root = observedRoots[i];
-            if (root === document || !root.host || root.host.isConnected) { continue; }
-            var videos = [];
-            collectVideos(root, videos);
-            var keep = false;
-            for (var v = 0; v < videos.length; v++) {
-                if (isTemporarilyFullscreen(videos[v])) { keep = true; continue; }
-                releaseVideoResources(videos[v]);
-            }
-            // iOS native fullscreen detaches shreddit-player. Dropping the
-            // shadow observer there is what lets Reddit's tap-toggle return.
-            if (!keep) { disconnectTreeRoot(root); }
-        }
-    }
-
-    function hasSourceSignal(node) {
-        if (!node || !node.querySelectorAll) { return false; }
-        try {
-            if (node.nodeType === 1 &&
-                (node.tagName === 'VIDEO' || node.tagName === 'SOURCE' ||
-                 node.matches('[data-src],[data-video-src],[data-file],[data-video],[data-source],[data-url]'))) {
-                return true;
-            }
-            return !!node.querySelector('video,source,[data-src],[data-video-src],[data-file],[data-video],[data-source],[data-url]');
-        } catch (e) { return false; }
+    function collectVideos(node, out) {
+        if (!node || !node.querySelectorAll) { return; }
+        if (node.tagName === 'VIDEO') { out.push(node); }
+        [].push.apply(out, node.querySelectorAll('video'));
     }
 
     function handleMutations(records) {
-        var roots = [];
-        var detachedVideos = [];
-        var sourceRelevant = false;
-        function addRoot(node) {
-            if (!node || (node.nodeType !== 1 && node.nodeType !== 9 && node.nodeType !== 11)) { return; }
-            if (roots.indexOf(node) === -1) { roots.push(node); }
-        }
-        for (var i = 0; i < records.length; i++) {
-            var record = records[i];
-            addRoot(record.target);
-            if (record.type === 'attributes' && record.attributeName !== 'class') {
-                sourceRelevant = true;
+        var roots = [], removed = [], portal = false;
+        var add = function (node) { if (node && roots.indexOf(node) === -1) { roots.push(node); } };
+        records.forEach(function (record) {
+            var target = record.target;
+            if (record.type === 'attributes') {
+                // Class churn matters only inside players: a wrapper gaining a
+                // library class, or a handshake player ending its preroll.
+                if (record.attributeName !== 'class' || closest(target, PLAYER_SELECTOR)) { add(target); }
+                return;
             }
-            for (var j = 0; j < record.addedNodes.length; j++) {
-                var added = record.addedNodes[j];
-                addRoot(added);
-                discoverShadowRoots(added);
-                if (hasSourceSignal(added)) { sourceRelevant = true; }
-            }
-            for (var k = 0; k < record.removedNodes.length; k++) {
-                collectVideos(record.removedNodes[k], detachedVideos);
-            }
-        }
-        // MutationObserver callbacks run at the microtask checkpoint before
-        // rendering. Process affected roots now—never add a timer/debounce—so
-        // custom chrome cannot survive into the next paint. Only source/video
-        // changes after parsing may trigger structural cleanup; ordinary player
-        // UI churn is nativeization-only.
-        var mayClean = sourceRelevant && document.readyState !== 'loading';
-        for (var r = 0; r < roots.length; r++) { scan(roots[r], mayClean); }
-        // Handshake players often end a preroll by flipping .amp-ad off without
-        // another playing event. Class mutations still land here; promote once
-        // the ad chrome is gone, or if playback already started before inject.
-        for (var hv = 0; hv < roots.length; hv++) {
-            var handshakeVideos = [];
-            collectVideos(roots[hv], handshakeVideos);
-            for (var hi = 0; hi < handshakeVideos.length; hi++) {
-                var handshakeVideo = handshakeVideos[hi];
-                if (handshakeVideo._wblockEnhanced || handshakeVideo.getAttribute(ATTR_DONE)) { continue; }
-                if (!isHandshakePlayer(handshakeVideo) && !isIOSPreservedPlayer(handshakeVideo)) { continue; }
-                if (preserveIOSManagedPlayer(handshakeVideo)) { continue; }
-                if (ampAdActive(handshakeVideo)) { continue; }
-                if (!hasAttachedMediaPipeline(handshakeVideo)) { continue; }
-                if (!handshakeVideo._wblockHandshakeStarted && !isAlreadyPlaying(handshakeVideo)) { continue; }
-                handshakeVideo._wblockPlaybackReady = true;
-                scan(handshakeVideo, false);
-            }
-        }
-        // Re-hide overlay chrome for already-enhanced videos whose player region a
-        // mutation just touched. Custom players (LinkedIn) (re)mount or refresh
-        // their control overlay after the one-shot hide — typically on play — so
-        // the hide must be re-applied reactively, not only at scan time. Portals
-        // remounted outside the shell still need a hit-test pass, so any player
-        // with a non-empty mutation batch re-runs hideStackedChrome.
-        var anyAdded = false;
-        for (var ai = 0; ai < records.length && !anyAdded; ai++) {
-            if (records[ai].addedNodes && records[ai].addedNodes.length) { anyAdded = true; }
-        }
-        for (var e = enhancedVideos.length - 1; e >= 0; e--) {
-            var ev = enhancedVideos[e];
-            if (!ev.isConnected) {
-                if (!isTemporarilyFullscreen(ev)) { enhancedVideos.splice(e, 1); }
-                continue;
-            }
-            var shell = playerShell(ev);
-            var touched = false;
-            for (var mi = 0; mi < records.length && !touched; mi++) {
-                if (shell === records[mi].target || composedContains(shell, records[mi].target)) {
-                    touched = true; break;
-                }
-                var added = records[mi].addedNodes;
-                for (var ni = 0; ni < added.length; ni++) {
-                    if (added[ni].nodeType === 1 &&
-                        (shell === added[ni] || composedContains(shell, added[ni]))) {
-                        touched = true; break;
-                    }
-                }
-            }
-            if (touched) {
-                hideOverlappingChrome(ev);
-                hideStackedChrome(ev);
-            } else if (anyAdded) {
-                hideStackedChrome(ev);
-            }
-        }
-        // DOM moves report a removal and addition in the same batch. Release
-        // resources only for videos that remain detached after processing.
-        // iOS native fullscreen detaches <video> for the system player; wiping
-        // the tap-guard there is why Reddit's toggle comes back after expand.
-        for (var d = 0; d < detachedVideos.length; d++) {
-            if (!detachedVideos[d].isConnected && !isTemporarilyFullscreen(detachedVideos[d])) {
-                releaseVideoResources(detachedVideos[d]);
-            }
-        }
-        releaseDetachedShadowRoots();
-    }
-
-    function observeTreeRoot(root) {
-        if (!root || observedRoots.indexOf(root) !== -1 || typeof MutationObserver === 'undefined') { return; }
-        var observer = new MutationObserver(handleMutations);
-        try {
-            observer.observe(root, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: [
-                    'class', 'src', 'data-src', 'data-video-src', 'data-file',
-                    'data-video', 'data-source', 'data-url'
-                ]
+            if (target.tagName === 'VIDEO') { add(target); }
+            [].forEach.call(record.addedNodes, function (node) {
+                if (node.nodeType !== 1) { return; }
+                add(node);
+                if (node.shadowRoot) { observeRoot(node.shadowRoot); }
+                attempt(function () { [].forEach.call(node.querySelectorAll('*'), function (el) { if (el.shadowRoot) { observeRoot(el.shadowRoot); } }); });
+                var parent = node.parentNode;
+                if (parent === document.body || parent === document.documentElement || parent && parent.parentNode === document.body) { portal = true; }
             });
-        } catch (e) { return; }
-        observedRoots.push(root);
-        observedRootObservers.push(observer);
-        try {
-            root.addEventListener('loadedmetadata', onMediaSourceReady, true);
-            root.addEventListener('durationchange', onMediaSourceReady, true);
-            root.addEventListener('playing', onMediaSourceReady, true);
-        } catch (e) { /* ignore */ }
-        discoverShadowRoots(root);
-        scan(root, document.readyState !== 'loading');
-    }
-
-    function patchAttachShadow() {
-        try {
-            var original = Element.prototype.attachShadow;
-            if (!original || original._wblockPlayerCleanerPatched) { return; }
-            function patchedAttachShadow() {
-                var root = original.apply(this, arguments);
-                observeTreeRoot(root);
-                return root;
-            }
-            patchedAttachShadow._wblockPlayerCleanerPatched = true;
-            Element.prototype.attachShadow = patchedAttachShadow;
-        } catch (e) { /* fall back to discovering open roots from DOM mutations */ }
-    }
-
-    function scanAllRoots(allowStructuralCleanup) {
-        var roots = observedRoots.slice();
-        for (var i = 0; i < roots.length; i++) { scan(roots[i], allowStructuralCleanup); }
-    }
-
-    function boot() {
-        // Patch first so a custom element attaching a root during parser startup
-        // cannot outrun observation. Document and every discovered shadow root
-        // then share the same pre-paint mutation/source lifecycle.
-        patchAttachShadow();
-        observeTreeRoot(document);
-        // iOS fires these on the video before detaching it into the system
-        // player. Mark first so a childList removal in the same turn does not
-        // wipe the tap-guard.
-        document.addEventListener('webkitbeginfullscreen', function (e) {
-            var t = e.target;
-            if (t && t.tagName === 'VIDEO') { t._wblockInNativeFullscreen = true; }
-        }, true);
-        document.addEventListener('webkitendfullscreen', function (e) {
-            var t = e.target;
-            if (!t || t.tagName !== 'VIDEO') { return; }
-            t._wblockInNativeFullscreen = false;
-            if (!t.isConnected) { return; }
-            var c = containerForVideo(t);
-            if (c) { suppressChrome(c, t); }
-            hideOverlappingChrome(t);
-            hideStackedChrome(t);
-            blockCompetingClicks(t);
-            try { forceNativeControls(t); } catch (err) { /* ignore */ }
-            guardNativeControls(t);
-        }, true);
-    }
-
-    // After all stylesheets have loaded, re-run chrome hiding for enhanced
-    // videos.  At DOMContentLoaded some positioned overlays may not yet have
-    // their final computed styles (external CSS not yet applied), so the
-    // conservative sweep can miss them.  The load event guarantees styles are
-    // resolved, letting isPlayerShell() and the position checks work correctly.
-    function rehideChrome() {
-        var videos = document.querySelectorAll('video[' + ATTR_DONE + ']');
-        for (var i = 0; i < videos.length; i++) {
-            var v = videos[i];
-            if (!v._wblockEnhanced && !v._wblockCleaned && !isIOSPreservedPlayer(v)) continue;
-            var c = containerForVideo(v);
-            if (!c) continue;
-            suppressChrome(c, v);
-            blockCompetingClicks(v);
+            [].forEach.call(record.removedNodes, function (node) { collectVideos(node, removed); });
+        });
+        // Runs at the microtask checkpoint before paint, so chrome never
+        // survives into the next frame.
+        roots.forEach(scan);
+        for (var i = enhanced.length - 1; i >= 0; i--) {
+            var video = enhanced[i];
+            if (video.isConnected) { if (portal) { requestPass(video); } }
+            else if (!video._wblockInNativeFullscreen) { enhanced.splice(i, 1); }
         }
+        if (!removed.length && !records.some(function (r) { return r.removedNodes.length; })) { return; }
+        // A DOM move reports removal and insertion together; release only
+        // what stayed detached. iOS native fullscreen detaches the video for
+        // the system player, which must keep its hooks.
+        removed.forEach(function (video) {
+            if (!video.isConnected && !video._wblockInNativeFullscreen) { release(video); }
+        });
+        observedRoots.slice().forEach(function (root) {
+            if (root === document || !root.host || root.host.isConnected) { return; }
+            var videos = [];
+            collectVideos(root, videos);
+            if (videos.some(function (v) { return v._wblockInNativeFullscreen; })) { return; }
+            videos.forEach(release);
+            forgetRoot(root);
+        });
     }
 
-    // Start at document-start. DOMContentLoaded/load scans are recovery passes
-    // only; normal players are handled by the pre-paint MutationObservers.
-    boot();
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () { scanAllRoots(true); }, { once: true });
-        window.addEventListener('load', function () { scanAllRoots(true); rehideChrome(); }, { once: true });
-    } else {
-        // document-start already passed (e.g. injected late); schedule a
-        // one-time rehide after load in case stylesheets are still pending.
-        window.addEventListener('load', function () { rehideChrome(); }, { once: true });
+    // Closed shadow roots are only reachable at creation.
+    var attachShadow = Element.prototype.attachShadow;
+    if (attachShadow && !attachShadow._wblockPlayerCleaner) {
+        var patched = function () {
+            var root = attachShadow.apply(this, arguments);
+            observeRoot(root);
+            return root;
+        };
+        patched._wblockPlayerCleaner = true;
+        Element.prototype.attachShadow = patched;
     }
+
+    // iOS fires these on the video before detaching it into the system player.
+    document.addEventListener('webkitbeginfullscreen', function (event) {
+        if (event.target.tagName === 'VIDEO') { event.target._wblockInNativeFullscreen = true; }
+    }, true);
+    document.addEventListener('webkitendfullscreen', function (event) {
+        var video = event.target;
+        if (video.tagName !== 'VIDEO') { return; }
+        video._wblockInNativeFullscreen = false;
+        if (video.isConnected && video._wblockEnhanced) { restoreNativeControls(video); hideChrome(video); }
+    }, true);
+
+    observeRoot(document);
+    function rescan() { observedRoots.slice().forEach(scan); }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', rescan, { once: true });
+    }
+    // Stylesheets settle by load; positioned overlays become recognizable.
+    window.addEventListener('load', function () {
+        rescan();
+        enhanced.forEach(function (video) { hideChrome(video); });
+    }, { once: true });
 })();

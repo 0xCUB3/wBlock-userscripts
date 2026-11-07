@@ -38,6 +38,7 @@ const FIXTURE_PLAYER_LIVE_BLOB_URL = pathToFileURL(join(__dirname, 'fixture-play
 const FIXTURE_PLAYER_HANDSHAKE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-handshake.html')).href;
 const FIXTURE_PLAYER_SHADOW_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-shadow.html')).href;
 const FIXTURE_PLAYER_REDDIT_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-reddit.html')).href;
+const FIXTURE_PLAYER_FEED_CHURN_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-feed-churn.html')).href;
 const FIXTURE_PLAYER_BARE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-bare.html')).href;
 const FIXTURE_PLAYER_RELATIVE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-relative.html')).href;
 const FIXTURE_PLAYER_UPGRADE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-upgrade.html')).href;
@@ -1375,6 +1376,9 @@ async function qualityUISelectionCheck(page, scenario) {
     video.currentTime = 12;
     video.dispatchEvent(new Event('timeupdate'));
   });
+  // When to skip, where to seek, chains, Undo protection and the seek/end
+  // guards are proven in tests/rules/sponsorblock.test.mjs; these checks
+  // cover the request, notices, buttons, timer and settings wiring.
   await check(page, 'desktop', 'skips sponsors through the k-anonymous SponsorBlock endpoint', () => {
     const video = document.querySelector('#movie_player video');
     const request = window.__wblockSponsorRequest || '';
@@ -1391,31 +1395,6 @@ async function qualityUISelectionCheck(page, scenario) {
     return { pass: video.currentTime > 10 && video.currentTime < 11,
       detail: `time=${video.currentTime}` };
   });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    video.currentTime = 5;
-    video.dispatchEvent(new Event('timeupdate'));
-    video.currentTime = 12;
-    video.dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'skips a SponsorBlock segment again after Undo and re-entry', () => {
-    const video = document.querySelector('#movie_player video');
-    const notice = document.querySelector('.wblock-tc-sponsor-notice');
-    return { pass: video.currentTime === 20 && !!notice, detail: `time=${video.currentTime} notice=${!!notice}` };
-  });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    let seeking = true;
-    Object.defineProperty(video, 'seeking', { configurable: true, get: () => seeking });
-    video.currentTime = 12;
-    video.dispatchEvent(new Event('timeupdate'));
-    window.__wblockSeekingSponsorTime = video.currentTime;
-    seeking = false;
-  });
-  await check(page, 'desktop', 'does not skip a SponsorBlock segment during an in-progress seek', () => ({
-    pass: window.__wblockSeekingSponsorTime === 12,
-    detail: `time=${window.__wblockSeekingSponsorTime}`,
-  }));
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
     Object.defineProperty(video, 'duration', { configurable: true, get: () => 300 });
@@ -1508,34 +1487,6 @@ async function qualityUISelectionCheck(page, scenario) {
   await check(page, 'desktop', 'applies newly enabled SponsorBlock categories immediately', () => {
     const video = document.querySelector('#movie_player video');
     return { pass: video.currentTime === 40, detail: `time=${video.currentTime}` };
-  });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    video.currentTime = 102;
-    video.dispatchEvent(new Event('timeupdate'));
-    document.querySelector('.wblock-tc-sponsor-notice button').click();
-    video.dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'Undo stays put when one range is both Sponsor and Self-promotion', () => {
-    const video = document.querySelector('#movie_player video');
-    return { pass: video.currentTime > 100 && video.currentTime < 101, detail: `time=${video.currentTime}` };
-  });
-  await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    video.currentTime = 121;
-    video.dispatchEvent(new Event('timeupdate'));
-    window.__wblockChainSkipTime = video.currentTime;
-    document.querySelector('.wblock-tc-sponsor-notice button').click();
-    video.dispatchEvent(new Event('timeupdate'));
-    window.__wblockChainUndoTime = video.currentTime;
-    video.currentTime = 126;
-    video.dispatchEvent(new Event('timeupdate'));
-  });
-  await check(page, 'desktop', 'Undo of chained overlapping segments rewinds to the first and protects the whole range', () => {
-    const video = document.querySelector('#movie_player video');
-    return { pass: window.__wblockChainSkipTime === 140 && window.__wblockChainUndoTime > 120 &&
-        window.__wblockChainUndoTime < 121 && video.currentTime === 126,
-      detail: `skip=${window.__wblockChainSkipTime} undo=${window.__wblockChainUndoTime} later=${video.currentTime}` };
   });
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
@@ -1861,6 +1812,8 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     viewport: { width: 1280, height: 800 },
   });
   const S = 'tube-cleaner-persistent-resume';
+  // Waiting for confirmation and restoring at most once are proven in
+  // tests/rules/resume.test.mjs; these checks cover identities and storage.
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
     player.getVideoData = () => ({ video_id: 'DUMMYVID001' });
@@ -1889,10 +1842,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     document.dispatchEvent(new Event('yt-navigate-finish'));
   });
   await page.waitForTimeout(100);
-  await check(page, S, 'waits for a confirmed media event before restoring the next video', () => ({
-    pass: window.__wblockResumeCurrent === 37,
-    detail: `beforeMetadata=${window.__wblockResumeCurrent}`,
-  }));
   await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('loadedmetadata')));
   await check(page, S, 'restores the confirmed next video position', () => {
     const video = document.querySelector('#movie_player video');
@@ -1908,10 +1857,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     video.dispatchEvent(new Event('canplay'));
     video.dispatchEvent(new Event('loadedmetadata'));
   });
-  await check(page, S, 'does not yank the playhead back after a later seek', () => ({
-    pass: window.__wblockResumeCurrent === 41,
-    detail: `afterSeek=${window.__wblockResumeCurrent}`,
-  }));
   await page.evaluate(() => {
     const container = document.querySelector('#movie_player .html5-video-container');
     const next = document.createElement('video');
@@ -1938,6 +1883,8 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     viewport: { width: 1280, height: 800 },
   });
   const S = 'tube-cleaner-live-seek';
+  // When to correct a seek and when the pill is red or gray are proven in
+  // tests/rules/live.test.mjs; these checks cover a real seek and rendering.
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
     const video = player.querySelector('video');
@@ -1952,10 +1899,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
   await check(page, S, 'pulls a seek past the live edge back behind it', () => ({
     pass: window.__wblockLiveTime > 110 && window.__wblockLiveTime <= 120,
     detail: `time=${window.__wblockLiveTime}`,
-  }));
-  await page.evaluate(() => { document.querySelector('#movie_player video').currentTime = 60; });
-  await check(page, S, 'leaves a seek into the buffered past alone', () => ({
-    pass: window.__wblockLiveTime === 60, detail: `time=${window.__wblockLiveTime}`,
   }));
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
@@ -1976,30 +1919,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     return { pass: window.__wblockLiveTime === 119 && button.title === 'Watching live',
       detail: `time=${window.__wblockLiveTime} title=${button.title}` };
   });
-  await page.evaluate(() => {
-    Object.defineProperty(document.querySelector('#movie_player video'), 'paused', { configurable: true, get: () => false });
-    window.__wblockLiveHead = false;
-  });
-  await page.waitForTimeout(2300);
-  await check(page, S, 'LIVE stays red through brief drift behind the head (#1009)', () => ({
-    pass: document.querySelector('.wblock-tc-live-button').title === 'Watching live',
-    detail: `title=${document.querySelector('.wblock-tc-live-button').title}`,
-  }));
-  await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('seeked')));
-  await check(page, S, 'LIVE turns gray at once after a seek behind the head (#1009)', () => ({
-    pass: document.querySelector('.wblock-tc-live-button').title === 'Jump to live',
-    detail: `title=${document.querySelector('.wblock-tc-live-button').title}`,
-  }));
-  await page.evaluate(() => { delete document.querySelector('#movie_player video').paused; });
-  await page.evaluate(() => { window.__wblockIsLive = false; document.querySelector('#movie_player video').currentTime = 500; });
-  await check(page, S, 'does not touch seeks once the stream is not live', () => ({
-    pass: window.__wblockLiveTime === 500, detail: `time=${window.__wblockLiveTime}`,
-  }));
-  await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('seeked')));
-  await check(page, S, 'hides LIVE once the stream is not live', () => ({
-    pass: document.querySelector('.wblock-tc-live-button')?.style.display === 'none',
-    detail: `display=${document.querySelector('.wblock-tc-live-button')?.style.display}`,
-  }));
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
@@ -2713,30 +2632,27 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     return { pass: !!(metadata && metadata.title), detail: metadata ? `title=${metadata.title}` : 'no metadata' };
   });
 
-  await check(page, S, 'removes custom control chrome', () => {
+  await check(page, S, 'hides custom control chrome', () => {
     const c = document.getElementById('player-replace');
-    const bar = c ? c.querySelector('.vjs-control-bar') : null;
-    const big = c ? c.querySelector('.vjs-big-play-button') : null;
-    return { pass: !bar && !big, detail: `bar=${!!bar}, bigPlay=${!!big}` };
+    const hidden = el => !el || getComputedStyle(el).display === 'none';
+    const bar = c && c.querySelector('.vjs-control-bar');
+    const big = c && c.querySelector('.vjs-big-play-button');
+    return { pass: hidden(bar) && hidden(big), detail: `bar=${bar && getComputedStyle(bar).display}, bigPlay=${big && getComputedStyle(big).display}` };
   });
 
-  await check(page, S, 'marks container done + drops video-js class', () => {
+  await check(page, S, 'marks container done', () => {
     const c = document.getElementById('player-replace');
-    const done = !!(c && c.hasAttribute('data-wblock-player-cleaner'));
-    const declassed = !!(c && !c.classList.contains('video-js'));
-    return { pass: done && declassed, detail: `done=${done}, declassed=${declassed}` };
+    return { pass: !!(c && c.hasAttribute('data-wblock-player-cleaner')) };
   });
 
-  await check(page, S, 'removes Video.js fluid padding without doubling the player box', () => {
+  await check(page, S, 'keeps the Video.js fluid layout without doubling the player box', () => {
     const c = document.getElementById('player-replace');
     const v = c && c.querySelector('video');
     if (!c || !v) return { pass: false, detail: 'missing player' };
     const cr = c.getBoundingClientRect();
     const vr = v.getBoundingClientRect();
-    const style = getComputedStyle(c);
-    const pass = !c.classList.contains('vjs-fluid') && parseFloat(style.paddingBottom) === 0 &&
-      Math.abs(cr.height - vr.height) < 2;
-    return { pass, detail: `class=${c.className} padding=${style.paddingBottom} heights=${cr.height}/${vr.height}` };
+    const pass = cr.height > 0 && Math.abs(cr.height - vr.height) < 2;
+    return { pass, detail: `class=${c.className} heights=${cr.height}/${vr.height}` };
   });
 
   await check(page, S, 'overrides document.hidden (background playback)', () => {
@@ -2780,19 +2696,9 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     viewport: { width: 900, height: 700 },
   });
   const S = 'player-cleaner-caption-preference-off';
-
-  // On a slow machine WebKit shows the default track after Player Cleaner
-  // starts listening.
-  await autoSelectDefaultTrack(page, '#player-captions video');
-  await check(page, S, 'preserves the page default subtitle state without a saved preference', () => {
-    const video = document.querySelector('#player-captions video');
-    const element = video?.querySelector('track');
-    const saved = JSON.parse(localStorage.getItem('wblock.playerCleaner.preferences') || '{}');
-    return {
-      pass: element?.default === true && saved.subtitleLanguage === undefined,
-      detail: `default=${element?.default} saved=${JSON.stringify(saved)}`,
-    };
-  });
+  // Which caption changes count as the user's and how a saved preference
+  // applies are proven in tests/rules/captions.test.mjs; these checks cover
+  // the native menu, storage across a refresh, and a real user gesture.
 
   await page.evaluate(() => {
     const video = document.querySelector('#player-captions video');
@@ -2810,35 +2716,6 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
       pass: track?.mode === 'disabled' && saved.subtitleLanguage === '',
       detail: `mode=${track?.mode} saved=${JSON.stringify(saved)}`,
     };
-  });
-
-  await page.evaluate(() => {
-    const video = document.querySelector('#player-captions video');
-    video.dispatchEvent(new Event('loadedmetadata'));
-    video.dispatchEvent(new Event('durationchange'));
-  });
-  await check(page, S, 'does not re-enable captions when preference observers replay', () => {
-    const video = document.querySelector('#player-captions video');
-    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
-    return { pass: track?.mode === 'disabled', detail: `mode=${track?.mode}` };
-  });
-
-  await page.evaluate(() => {
-    const old = document.getElementById('player-captions');
-    const fresh = document.createElement('div');
-    fresh.className = 'video-js';
-    fresh.id = 'player-captions-remount';
-    fresh.innerHTML = '<video data-test-original="1" width="640" height="360" preload="metadata"><source src="https://example.com/media/captions.mp4" type="video/mp4"><track kind="captions" src="captions-default.vtt" srclang="en" label="English" default></video><div class="vjs-control-bar"></div>';
-    old.replaceWith(fresh);
-    // A click-mounted player: WebKit's automatic pick lands while the
-    // mount's user activation is still live.
-    setTimeout(() => { fresh.querySelector('track[default]').track.mode = 'showing'; }, 300);
-  });
-  await page.waitForTimeout(600);
-  await check(page, S, 'keeps captions off across a player remount with a default track', () => {
-    const video = document.querySelector('#player-captions-remount video[data-wblock-player-cleaner]');
-    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
-    return { pass: !!video && track?.mode === 'disabled', detail: `video=${!!video} mode=${track?.mode}` };
   });
 
   await page.reload({ waitUntil: 'domcontentloaded' });
@@ -2887,14 +2764,14 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     ['p-src', 'https://example.com/a.mp4'],
     ['p-source-child', 'https://example.com/b.mp4'],
   ];
-  await check(page, S, 'cleans players with element-owned direct sources', (cases) => {
+  await check(page, S, 'enhances players with element-owned direct sources', (cases) => {
     const bad = cases.filter(([id, expected]) => {
       const v = document.querySelector(`#${id} video`);
       const source = v && (v.currentSrc || v.getAttribute('src') ||
         (v.querySelector('source') && v.querySelector('source').src));
-      return !(v && v._wblockCleaned && v.controls && source === expected);
+      return !(v && v._wblockEnhanced && v.controls && source === expected);
     });
-    return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 cleaned' };
+    return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 enhanced' };
   }, { arg: directCases });
 
   const initializingCases = ['p-dom', 'p-videojs', 'p-jwplayer'];
@@ -3206,6 +3083,134 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
   await browser.close();
 }
 
+// Reddit's live feed player on iOS: the shadow <video> has an MSE blob while
+// the host carries the HLS URL. WebKit can play that URL natively, so the
+// player is promoted and nativeized up front instead of staying with Reddit
+// until a tap (which Reddit's own toggle then swallowed). The host's
+// caption-url becomes a native track and its post metadata feeds Now Playing.
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Reddit iPhone MSE feed player)', {
+    device: iphone,
+    hasTouch: true,
+    fixture: FIXTURE_PLAYER_REDDIT_URL + '?mse=1',
+    scriptSource: playerUserscript,
+    readySignal: 'shreddit-player',
+  });
+  const S = 'player-cleaner-reddit-iphone-mse';
+  const shadowVideo = () => {
+    const host = document.querySelector('shreddit-player');
+    return host && host.shadowRoot && host.shadowRoot.querySelector('video');
+  };
+
+  await check(page, S, 'promotes the host HLS URL over the MSE blob', `(() => {
+    const video = (${shadowVideo})();
+    const host = document.querySelector('shreddit-player');
+    return { pass: !!(video && video.src === host.getAttribute('src')), detail: video ? video.src : 'no video' };
+  })()`);
+  await check(page, S, 'nativeizes the promoted video without a tap', `(() => {
+    const video = (${shadowVideo})();
+    return { pass: !!(video && video.controls && video.getAttribute('data-wblock-player-cleaner') === '1'),
+      detail: video ? 'controls=' + video.controls : 'no video' };
+  })()`);
+  await check(page, S, 'adds caption-url as a native English track', `(() => {
+    const video = (${shadowVideo})();
+    const track = video && video.querySelector('track[data-wblock-src$="wh_ben_en.vtt"]');
+    return { pass: !!(track && track.srclang === 'en' && track.kind === 'subtitles' && track.label),
+      detail: track ? track.srclang + ' ' + track.label : 'no track' };
+  })()`);
+  await check(page, S, 'hides Reddit chrome over the promoted video', `(() => {
+    const host = document.querySelector('shreddit-player');
+    const ui = host.shadowRoot.querySelector('shreddit-media-ui');
+    return { pass: !!(ui && getComputedStyle(ui).display === 'none') };
+  })()`);
+  const hasMediaSession = await page.evaluate(() => !!(navigator.mediaSession && window.MediaMetadata));
+  if (hasMediaSession) {
+    await page.evaluate(() => {
+      const host = document.querySelector('shreddit-player');
+      host.shadowRoot.querySelector('video').dispatchEvent(new Event('play'));
+    });
+    await check(page, S, 'names the post in Now Playing', () => {
+      const metadata = navigator.mediaSession.metadata;
+      return { pass: !!(metadata && metadata.title === 'Fixture post title' && metadata.artist === 'r/fixtures'),
+        detail: metadata ? `${metadata.title} / ${metadata.artist}` : 'no metadata' };
+    });
+  }
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// Feed pages mutate constantly around their players. Those mutations used
+// to re-run the layout-reading chrome hide for every enhanced player on
+// every batch. Only a player's own signals may trigger a chrome pass now.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (feed churn around players)', {
+    fixture: FIXTURE_PLAYER_FEED_CHURN_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#player-b video[data-wblock-player-cleaner]',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-feed-churn';
+  await check(page, S, 'hides skin chrome of a player inside the page header', () => {
+    const controls = document.querySelector('.hero-controls');
+    const nav = document.getElementById('site-nav');
+    return { pass: !!(controls && getComputedStyle(controls).display === 'none' && getComputedStyle(nav).display !== 'none'),
+      detail: `controls=${controls && getComputedStyle(controls).display} nav=${getComputedStyle(nav).display}` };
+  });
+  await check(page, S, 'fits a cropped video to its visible box so native controls show', () => {
+    const video = document.getElementById('crop-video');
+    const box = document.getElementById('crop').getBoundingClientRect();
+    const r = video.getBoundingClientRect();
+    return { pass: !!(video.controls && Math.abs(r.bottom - box.bottom) < 1.5 && Math.abs(r.top - box.top) < 1.5),
+      detail: `video=${r.top.toFixed(0)}-${r.bottom.toFixed(0)} box=${box.top.toFixed(0)}-${box.bottom.toFixed(0)}` };
+  });
+  await check(page, S, 'leaves page copy and a site bottom sheet over players visible', () => {
+    const visible = id => { const el = document.getElementById(id); return !!el && getComputedStyle(el).display !== 'none'; };
+    const enhancedHero = !!document.querySelector('#hero-bg[data-wblock-player-cleaner]');
+    return { pass: enhancedHero && visible('hero-copy') && visible('bottom-sheet'),
+      detail: `hero=${enhancedHero} copy=${visible('hero-copy')} sheet=${visible('bottom-sheet')}` };
+  });
+  await page.waitForTimeout(400);
+  const before = await page.evaluate(() => { window.startChurn(); return window.__hitTests; });
+  await page.waitForTimeout(1500);
+  const after = await page.evaluate(() => { clearInterval(window.__churnTimer); return window.__hitTests; });
+  record(S, 'unrelated feed churn runs no chrome passes', after - before === 0,
+    `hit tests during churn=${after - before}`);
+  await page.evaluate(() => {
+    const player = document.getElementById('player-a');
+    const bar = document.createElement('div');
+    bar.className = 'vjs-control-bar remounted';
+    player.appendChild(bar);
+  });
+  await check(page, S, 'still re-hides chrome remounted inside a player', () => {
+    const bar = document.querySelector('#player-a .remounted');
+    return { pass: !!(bar && getComputedStyle(bar).display === 'none') };
+  });
+  await page.evaluate(() => {
+    const portal = document.createElement('div');
+    portal.id = 'portal-chrome';
+    const r = document.querySelector('#player-b video').getBoundingClientRect();
+    portal.style.cssText = `position:fixed;left:${r.left}px;top:${r.bottom - 40}px;width:${r.width}px;height:40px;background:red;z-index:9`;
+    document.body.appendChild(portal);
+  });
+  await check(page, S, 'still hides body-level portal chrome over a player', () => {
+    const portal = document.getElementById('portal-chrome');
+    return { pass: !!(portal && getComputedStyle(portal).display === 'none') };
+  });
+  await page.evaluate(() => {
+    const v = document.querySelector('#player-a video');
+    Object.defineProperty(v, 'duration', { configurable: true, get: () => 200 });
+    Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 0, set: t => { window.__seekTo = t; } });
+    v.focus();
+    v.dispatchEvent(new KeyboardEvent('keydown', { key: '5', bubbles: true, cancelable: true }));
+  });
+  await check(page, S, 'number keys jump to that tenth of the video', () => {
+    return { pass: window.__seekTo === 100, detail: `seek=${window.__seekTo}` };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 {
   const { browser, page, pageErrors } = await runScenario('Player Cleaner (bare/custom players)', {
     fixture: FIXTURE_PLAYER_BARE_URL,
@@ -3464,8 +3469,9 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
 }
 
 // ---- Scenario: Player Cleaner PBS iPhone preserved MSE ---------------------
-// iOS must leave the PBS blob pipeline and site controls in charge, while still
-// collapsing the oversized mobile shell and removing PBS-only leftover chrome.
+// iOS must leave the PBS blob pipeline, its controls, and its layout to the
+// site: hiding its chrome with no native controls to replace it left only
+// a tap target and a blank card.
 {
   const iphone = devices['iPhone 13'];
   const { browser, page, pageErrors } = await runScenario('Player Cleaner (PBS iPhone preserved MSE)', {
@@ -3488,17 +3494,6 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
       ' airplay=' + video.getAttribute('x-webkit-airplay') : 'no video' };
   });
 
-  await check(page, S, 'collapses the oversized PBS mobile shell to the video', () => {
-    const video = document.getElementById('pbs-video');
-    const shell = document.getElementById('player-videojs');
-    if (!video || !shell) return { pass: false, detail: 'missing video or shell' };
-    const vr = video.getBoundingClientRect();
-    const sr = shell.getBoundingClientRect();
-    const bottomGap = Math.abs(sr.bottom - vr.bottom);
-    const pass = bottomGap <= 1 && Math.abs(sr.height - vr.height) <= 1 && sr.height < 300;
-    return { pass, detail: `shell=${sr.width.toFixed(1)}x${sr.height.toFixed(1)} video=${vr.width.toFixed(1)}x${vr.height.toFixed(1)} gap=${bottomGap.toFixed(1)}` };
-  });
-
   await page.evaluate(() => {
     window.__pbsPaused = false;
     window.__pbsTapToggles = 0;
@@ -3509,16 +3504,11 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     detail: `paused=${window.__pbsPaused} toggles=${window.__pbsTapToggles}`,
   }));
 
-  await check(page, S, 'hides initial and remounted PBS chrome on iOS', () => {
-    const selectors = ['.vjs-control-bar', '.vjs-pbs-top-icons', '#pbs-late-more'];
-    const visible = selectors.filter((selector) => {
-      const el = document.querySelector(selector);
-      if (!el) return true;
-      const style = getComputedStyle(el);
-      return style.display !== 'none' && style.visibility !== 'hidden';
-    });
-    return { pass: visible.length === 0, detail: visible.join(' ') || 'all hidden' };
-  }, { timeout: 2500, interval: 100 });
+  await check(page, S, 'leaves the PBS controls visible on iOS', () => {
+    const bar = document.querySelector('.vjs-control-bar');
+    const visible = !!(bar && getComputedStyle(bar).display !== 'none' && !bar.closest('[data-wblock-pc-hidden]'));
+    return { pass: visible, detail: bar ? getComputedStyle(bar).display : 'no bar' };
+  });
 
   await check(page, S, 'keeps protected PBS error and preroll UI visible', () => {
     const ids = ['pbs-error', 'pbs-preroll', 'pbs-protected-wrap'];
@@ -3760,8 +3750,11 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
   });
 
   await check(page, S, 'hides unknown controls bar', () => {
+    // Nested inside the hidden controls wrapper: hidden through its ancestor.
     const el = document.querySelector('.xq7-controls-bar');
-    return { pass: !!(el && el.style.display === 'none'), detail: el ? `display=${el.style.display}` : 'no element' };
+    const hidden = !!(el && (el.style.display === 'none' || el.closest('[data-wblock-pc-hidden]')) &&
+      el.getClientRects().length === 0);
+    return { pass: hidden, detail: el ? `display=${el.style.display} rects=${el.getClientRects().length}` : 'no element' };
   });
 
   await check(page, S, 'video click does not bubble to the player shell (no double-toggle)', () => {
@@ -4006,11 +3999,12 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
 
   await check(page, S, 'nativeizes within one frame of insertion', beforeFirstFrame, { arg: '__wblockEarlyPlayerTiming' });
 
-  await check(page, S, 'shows native controls with custom chrome removed', () => {
+  await check(page, S, 'shows native controls with custom chrome hidden', () => {
     const c = document.getElementById('early-player');
     const v = c && c.querySelector('video');
     const custom = c && c.querySelector('.vjs-control-bar');
-    return { pass: !!(v && v.controls && !custom), detail: `controls=${!!(v && v.controls)} custom=${!!custom}` };
+    const hidden = !custom || getComputedStyle(custom).display === 'none';
+    return { pass: !!(v && v.controls && hidden), detail: `controls=${!!(v && v.controls)} customHidden=${hidden}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
@@ -4089,11 +4083,9 @@ for (const config of [
     });
     window.dispatchEvent(new Event('blur'));
   }, config.selector);
-  await page.waitForTimeout(200);
-  await check(page, config.key, 'does not enter PiP merely because the window loses focus', () => ({
-    pass: window.__wblockPiPMode === 'inline',
-    detail: `pip=${window.__wblockPiPMode}`,
-  }));
+  // Focus loss never entering PiP and manual PiP staying open are proven in
+  // tests/rules/auto-pip.test.mjs; these checks cover the real visibility
+  // getters and the page's own handlers.
   await page.evaluate(() => {
     window.__wblockNativeHidden = true;
     window.__wblockNativeVisibility = 'hidden';
@@ -4104,25 +4096,6 @@ for (const config of [
       window.__wblockPiPMode === 'picture-in-picture',
     detail: `pageHidden=${document.hidden} pageState=${document.visibilityState} pip=${window.__wblockPiPMode}`,
   }));
-  if (config.name === 'Tube Cleaner') {
-    await page.evaluate((selector) => {
-      const video = document.querySelector(selector);
-      // End the cleaner-owned PiP session, then model the user entering PiP
-      // manually from Safari's native controls.
-      video.webkitPresentationMode = 'inline';
-      video.dispatchEvent(new Event('webkitpresentationmodechanged'));
-      video.webkitPresentationMode = 'picture-in-picture';
-      video.dispatchEvent(new Event('webkitpresentationmodechanged'));
-      window.__wblockPiPMode = 'picture-in-picture';
-      window.__wblockNativeHidden = false;
-      window.__wblockNativeVisibility = 'visible';
-      document.dispatchEvent(new Event('visibilitychange'));
-    }, config.selector);
-    await check(page, config.key, 'does not close PiP entered manually by the user', () => ({
-      pass: window.__wblockPiPMode === 'picture-in-picture',
-      detail: `pip=${window.__wblockPiPMode}`,
-    }));
-  }
   if (config.name === 'Tube Cleaner') {
     await page.evaluate((selector) => {
       const video = document.querySelector(selector);
@@ -4912,14 +4885,14 @@ for (const config of [
       return { pass: cleaned.length === 0, detail: cleaned.length ? `cleaned: ${cleaned.join(',')}` : '0/3 cleaned (pipeline preserved)' };
     }, { arg: blobCases });
 
-    await check(page, S, 'still cleans direct http-source players', (cleanCases) => {
+    await check(page, S, 'still enhances direct http-source players', (cleanCases) => {
       const bad = cleanCases.filter(([id, expected]) => {
         const v = document.getElementById(id).querySelector('video');
         const source = v && (v.currentSrc || v.getAttribute('src') ||
           (v.querySelector('source') && v.querySelector('source').src));
-        return !(v && v._wblockCleaned && v.controls === true && source === expected);
+        return !(v && v._wblockEnhanced && v.controls === true && source === expected);
       });
-      return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 cleaned' };
+      return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 enhanced' };
     }, { arg: cleanCases });
 
     // iOS WebKit only loads ManagedMediaSource attachments while remote
@@ -5213,6 +5186,22 @@ for (const config of [
     readySignal: '#hero-video[data-wblock-player-cleaner]',
   });
   const S = 'player-cleaner-ios-videojs';
+
+  await check(page, S, 'nativeizes a direct-file player on iOS', () => {
+    const video = document.getElementById('late-video');
+    return { pass: !!(video && video.controls && video._wblockEnhanced) };
+  });
+  await page.evaluate(() => {
+    document.getElementById('late-video').src = 'blob:https://videojs.org/11111111-1111-1111-1111-111111111111';
+  });
+  await check(page, S, 'hands the player back when it switches to an MSE blob on iOS', () => {
+    const video = document.getElementById('late-video');
+    const controls = document.getElementById('late-controls');
+    const chromeVisible = getComputedStyle(controls).display !== 'none';
+    const pass = !!(video && !video.controls && !video._wblockEnhanced && chromeVisible &&
+      video.disableRemotePlayback && video.getAttribute('x-webkit-airplay') === 'deny');
+    return { pass, detail: `controls=${video.controls} enhanced=${!!video._wblockEnhanced} chrome=${chromeVisible} airplay=${video.getAttribute('x-webkit-airplay')}` };
+  });
 
   await check(page, S, 'promotes the Media Chrome HLS URL and nativeizes on iOS', () => {
     const video = document.getElementById('hero-video');

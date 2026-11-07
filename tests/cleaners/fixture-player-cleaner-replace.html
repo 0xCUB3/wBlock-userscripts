@@ -9,6 +9,8 @@
   .video-js { position: relative; width: 960px; max-width: 100%; aspect-ratio: 16 / 9; margin: 24px auto; background: #000; }
   .vjs-fluid { height: 0; padding-bottom: 56.25%; aspect-ratio: auto; }
   .video-js video { width: 100%; height: 100%; background: #222; }
+  /* Video.js positions the tech inside the fluid padding box. */
+  .vjs-fluid video { position: absolute; inset: 0; }
   .vjs-control-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: rgba(0,0,0,.7); }
   .vjs-big-play-button { position: absolute; top: 40%; left: 45%; width: 60px; height: 60px; background: rgba(0,0,0,.6); border-radius: 50%; }
 </style>

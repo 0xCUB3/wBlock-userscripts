@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.68
+// @version      0.1.69
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -102,7 +102,6 @@
 
     var AUTO_PIP_KEY = 'wblock.tubeCleaner.autoPiP';
     var autoPiPEnabled = true;
-    var pipActive = false;
 
     function getAutoPiP() {
         try {
@@ -136,51 +135,53 @@
     function autoPiPAllowed() { return autoPiPEnabled && featureEnabled('pictureInPicture'); }
     function hidePiPAllowed() { return IS_IOS ? featureEnabled('backgroundPlayback') : autoPiPAllowed(); }
 
-    function enterPiP(video) {
-        if (!video) return;
-        if (isPiPActive(video)) return;
-        if (video.paused || video.ended) return;
+    // When to enter or leave PiP: a pure reducer shared with Player Cleaner,
+    // proven and held to tests/rules/auto-pip.rule.mjs. It only ever closes
+    // PiP it opened itself; PiP the user entered from Safari's controls stays
+    // under the user's control. Keep it self-contained; the test evaluates its
+    // source on its own.
+    // @gdp-begin autoPiPStep
+    function autoPiPStep(config, state, event) {
+        var op = event.op;
+        var wantsIn = op === 'hide' && event.hideAllowed || op === 'blur' && config.blurEnters && event.hideAllowed ||
+            op === 'scrollOut' && event.autoAllowed;
+        var wantsOut = op === 'show' && event.focused || op === 'focus' && !event.hidden && event.focused ||
+            op === 'scrollIn' && event.autoAllowed;
+        var entering = wantsIn && event.playing && !event.inPiP;
+        var leaving = wantsOut && state.ours && event.inPiP;
+        // PiP that ended on its own (closed, or a refused request) is no
+        // longer ours to close.
+        var forget = op === 'left' || wantsOut && state.ours && !event.inPiP;
+        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving };
+    }
+    // @gdp-end
+
+    // Returns false when the browser offers no way in.
+    function requestPiP(video, onRefused) {
         try {
             if (supportsWebkitPiP(video) && typeof video.webkitSetPresentationMode === 'function') {
-                // Track only PiP entered by Tube Cleaner. PiP entered manually
-                // from Safari's controls must remain under the user's control.
-                pipActive = true;
                 video.webkitSetPresentationMode('picture-in-picture');
                 log('PiP entered');
-            } else if (typeof video.requestPictureInPicture === 'function') {
-                pipActive = true;
-                var request = video.requestPictureInPicture();
-                if (request && request.catch) {
-                    request.catch(function (e) {
-                        pipActive = false;
-                        log('PiP request rejected', e);
-                    });
-                }
-                log('PiP entered via API');
+                return true;
             }
-        } catch (e) {
-            pipActive = false;
-            warn('enterPiP failed', e);
-        }
+            if (typeof video.requestPictureInPicture === 'function') {
+                var request = video.requestPictureInPicture();
+                if (request && request.catch) request.catch(function (e) { log('PiP request rejected', e); onRefused(); });
+                log('PiP entered via API');
+                return true;
+            }
+        } catch (e) { warn('enterPiP failed', e); }
+        return false;
     }
 
-    function exitPiP(video) {
-        if (!video || !pipActive) return;
-        if (!isPiPActive(video)) {
-            pipActive = false;
-            return;
-        }
+    function leavePiP(video) {
         try {
             if (supportsWebkitPiP(video) && typeof video.webkitSetPresentationMode === 'function') {
                 video.webkitSetPresentationMode('inline');
-                pipActive = false;
                 log('PiP exited');
             } else if (document.pictureInPictureElement && typeof document.exitPictureInPicture === 'function') {
                 var request = document.exitPictureInPicture();
-                if (request && request.catch) {
-                    request.catch(function (e) { log('PiP exit rejected', e); });
-                }
-                pipActive = false;
+                if (request && request.catch) request.catch(function (e) { log('PiP exit rejected', e); });
             }
         } catch (e) { warn('exitPiP failed', e); }
     }
@@ -190,66 +191,49 @@
     function setupAutoPiP(video, watchScroll) {
         if (!autoPiPAllowed() && !hidePiPAllowed()) return function () {};
         video._wblockAutoPiPHooked = true;
-        // Tab switch: enter PiP when tab hides, exit when visible.
-        // Note: enableBackgroundPlayback() overrides document.hidden to always
-        // return false, so we use _realHidden which tracks the true state.
-        function onVisibilityChange() {
-            if (_realHidden) {
-                if (hidePiPAllowed()) enterPiP(video);
-            } else if (document.hasFocus() && isPiPActive(video)) {
-                exitPiP(video);
-            }
+        // iPhone can suspend a video before its hidden event is delivered, so
+        // there focus loss enters while the page still owns the gesture.
+        // Elsewhere losing focus doesn't mean the video is obscured: another
+        // window may simply be active beside Safari.
+        var config = { blurEnters: IS_IPHONE };
+        var state = { ours: false, enter: false, exit: false };
+        function send(op) {
+            state = autoPiPStep(config, state, {
+                op: op, autoAllowed: autoPiPAllowed(), hideAllowed: hidePiPAllowed(),
+                playing: !video.paused && !video.ended, focused: document.hasFocus(), hidden: _realHidden,
+                inPiP: isPiPActive(video)
+            });
+            if (state.enter && !requestPiP(video, function () { send('left'); })) send('left');
+            if (state.exit) leavePiP(video);
         }
-
-        // Losing keyboard focus does not mean the video is obscured on macOS:
-        // another visible window may simply be active beside Safari. Enter PiP
-        // only for actual page hiding or when the video scrolls out of view.
-        function onFocus() {
-            if (_realHidden) return;
-            if (document.hasFocus() && isPiPActive(video)) {
-                exitPiP(video);
-            }
-        }
-        function onBlur() {
-            // iPhone can suspend a video before its hidden event is delivered.
-            // Enter while the page still owns an active playback gesture.
-            if (IS_IPHONE && hidePiPAllowed()) enterPiP(video);
-        }
+        // enableBackgroundPlayback() makes document.hidden always false, so
+        // the real visibility comes from observeRealVisibility.
+        function onVisibilityChange() { send(_realHidden ? 'hide' : 'show'); }
+        function onFocus() { send('focus'); }
+        function onBlur() { send('blur'); }
 
         var removeVisibilityObserver = observeRealVisibility(onVisibilityChange);
         window.addEventListener('focus', onFocus);
         window.addEventListener('blur', onBlur);
 
-        // Scroll out of view: use IntersectionObserver.
-        // On mobile YouTube the watch player is normally position:fixed (sticky).
-        // Tube Cleaner overrides it to position:absolute so it scrolls with the
-        // page. Without this guard the observer would enter PiP every time the
-        // user scrolls past the video to read comments.
+        // Scroll out of view. On mobile YouTube the watch player is normally
+        // position:fixed (sticky); Tube Cleaner makes it scroll with the page,
+        // and without this guard scrolling to the comments would enter PiP.
         var stickyContainer = document.getElementById('player-container-id');
         var skipScrollPiP = !!(stickyContainer && stickyContainer.classList.contains('sticky-player'));
         var scrollObserver = null;
         if (watchScroll && !skipScrollPiP) {
             scrollObserver = new IntersectionObserver(function (entries) {
-                if (!autoPiPAllowed()) return;
-                entries.forEach(function (entry) {
-                    if (!entry.isIntersecting) {
-                        enterPiP(video);
-                    } else if (entry.isIntersecting && isPiPActive(video)) {
-                        exitPiP(video);
-                    }
-                });
+                entries.forEach(function (entry) { send(entry.isIntersecting ? 'scrollIn' : 'scrollOut'); });
             }, { threshold: 0.1 });
             scrollObserver.observe(video);
         }
 
-        // Listen for presentation mode changes
         function onPresentationModeChange() {
-            if (video.webkitPresentationMode !== 'picture-in-picture') {
-                pipActive = false;
-            }
+            if (video.webkitPresentationMode !== 'picture-in-picture') send('left');
             log('presentation mode changed:', video.webkitPresentationMode);
         }
-        function onLeavePictureInPicture() { pipActive = false; }
+        function onLeavePictureInPicture() { send('left'); }
         video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
         video.addEventListener('leavepictureinpicture', onLeavePictureInPicture);
 
@@ -766,6 +750,128 @@
     updateRealVisibility();
     document.addEventListener('visibilitychange', onRealVisibilityChange, true);
 
+    // ------------------------------------------------------------------
+    // Background recovery (macOS)
+    //
+    // Masking visibility keeps YouTube from pausing a hidden tab, but Safari
+    // itself can pause playing media when the tab or Tab Group switches
+    // (#12). With Background Playback on, a pause around the page becoming
+    // really hidden is resumed a bounded number of times within a short
+    // window. A pause the user asked for (Now Playing, a media key, an
+    // in-page pause before switching away) is never undone. iOS keeps playback alive through PiP instead.
+    //
+    // backgroundRecoveryStep is the whole decision: a pure reducer, proven
+    // and held to tests/rules/background-recovery.rule.mjs. Keep it
+    // self-contained; the test evaluates its source on its own.
+    // ------------------------------------------------------------------
+
+    // @gdp-begin backgroundRecoveryStep
+    function backgroundRecoveryStep(config, state, event) {
+        var op = event.op, t = event.t;
+        var inWindow = t <= state.hiddenAt + config.window;
+        // Safari can deliver its pause just before the visibility change.
+        var pausedJustBefore = state.pauseSeen && t <= state.pausedAt + config.lead;
+        var arming = op === 'hide' && config.enabled && (state.playing || pausedJustBefore);
+        var lostWhileHidden = op === 'pause' && state.hidden && !state.intent && inWindow && state.retries < config.budget;
+        var resumeNow = op === 'tick' && state.pending && state.hidden && state.retries < config.budget && inWindow;
+        var retries = op === 'hide' ? 0 : resumeNow ? state.retries + 1 : state.retries;
+        var pending = state.pending;
+        if (op === 'hide') pending = arming && !state.playing;
+        else if (op === 'show' || op === 'play' || op === 'intent' || op === 'reset') pending = false;
+        else if (op === 'pause') pending = state.armed && lostWhileHidden;
+        else if (op === 'tick') pending = resumeNow && retries < config.budget && inWindow;
+        return {
+            hidden: op === 'hide' ? true : op === 'show' ? false : state.hidden,
+            playing: op === 'play' ? true : op === 'pause' || op === 'reset' ? false : state.playing,
+            armed: op === 'hide' ? arming : op === 'show' || op === 'intent' || op === 'reset' ? false : state.armed,
+            pending: pending,
+            intent: op === 'hide' ? false : op === 'intent' ? true : state.intent,
+            // Only a pause the user didn't ask for can be Safari's.
+            pauseSeen: op === 'pause' ? !state.intent : op === 'intent' || op === 'reset' ? false : state.pauseSeen,
+            retries: retries,
+            hiddenAt: op === 'hide' ? t : state.hiddenAt,
+            pausedAt: op === 'pause' && !state.intent ? t : state.pausedAt,
+            resume: resumeNow
+        };
+    }
+    // @gdp-end
+
+    var BACKGROUND_RECOVERY = { enabled: true, budget: 3, window: 6000, lead: 400 };
+    var pauseIntentListeners = [];
+
+    // Every Media Session pause or stop the page registers (Tube Cleaner's
+    // own, YouTube's, YouTube Music's) first tells recovery that the user
+    // asked for this pause, so Now Playing and media keys keep working even
+    // right after a Tab Group switch.
+    (function patchMediaSessionIntent() {
+        try {
+            var proto = typeof MediaSession !== 'undefined' && MediaSession.prototype;
+            var original = proto && proto.setActionHandler;
+            if (!original || original._wblockTubeCleaner) return;
+            var patched = function (action, handler) {
+                if ((action === 'pause' || action === 'stop') && typeof handler === 'function') {
+                    var inner = handler;
+                    handler = function () {
+                        pauseIntentListeners.slice().forEach(function (listener) { try { listener(); } catch (e) { /* ignore */ } });
+                        return inner.apply(this, arguments);
+                    };
+                }
+                return original.call(this, action, handler);
+            };
+            patched._wblockTubeCleaner = true;
+            proto.setActionHandler = patched;
+        } catch (e) { /* recovery still honors in-page pauses */ }
+    })();
+
+    function setupBackgroundRecovery(video, resumePlayback) {
+        if (IS_IOS || !featureEnabled('backgroundPlayback')) return function () {};
+        var state = { hidden: _realHidden, playing: !video.paused && !video.ended, armed: false, pending: false,
+            intent: false, pauseSeen: false, retries: 0, hiddenAt: 0, pausedAt: 0, resume: false };
+        var timer = null;
+        function now() { return Math.round(typeof performance !== 'undefined' ? performance.now() : Date.now()); }
+        function send(op) {
+            state = backgroundRecoveryStep(BACKGROUND_RECOVERY, state, { op: op, t: now() });
+            log('background recovery', op, state.armed ? 'armed' : '', state.pending ? 'pending' : '', state.retries);
+            if (state.resume) {
+                log('resuming playback paused by a background switch');
+                try { resumePlayback(); } catch (e) { /* the next tick retries */ }
+            }
+            if (state.pending && timer === null) {
+                timer = setTimeout(function () { timer = null; send('tick'); }, 300);
+            } else if (!state.pending && timer !== null) {
+                clearTimeout(timer);
+                timer = null;
+            }
+        }
+        function onPlay() { send('play'); }
+        // A pause made in the page while it is visible is the user's: the
+        // reducer arms only for a video playing at hide time (or paused within
+        // the short lead before it). Now Playing and media keys go through
+        // the Media Session hook above. User activation is no signal here: it
+        // outlasts a click, so Safari's own pause right after one would look
+        // intentional.
+        function onPause() { send('pause'); }
+        function onReset() { send('reset'); }
+        function onIntent() { send('intent'); }
+        var stopVisibility = observeRealVisibility(function () { send(_realHidden ? 'hide' : 'show'); });
+        video.addEventListener('playing', onPlay);
+        video.addEventListener('pause', onPause);
+        video.addEventListener('ended', onReset);
+        video.addEventListener('emptied', onReset);
+        pauseIntentListeners.push(onIntent);
+        return function () {
+            stopVisibility();
+            video.removeEventListener('playing', onPlay);
+            video.removeEventListener('pause', onPause);
+            video.removeEventListener('ended', onReset);
+            video.removeEventListener('emptied', onReset);
+            var index = pauseIntentListeners.indexOf(onIntent);
+            if (index !== -1) pauseIntentListeners.splice(index, 1);
+            if (timer !== null) clearTimeout(timer);
+            timer = null;
+        };
+    }
+
     function enableBackgroundPlayback() {
         try {
             Object.defineProperty(document, 'hidden', {
@@ -1049,6 +1155,11 @@
         // Audio-only song mode has no PiP support and continues through the
         // shadowed visibility state; music videos need PiP under lock.
         var removeAutoPiP = setupAutoPiP(video, false);
+        var removeRecovery = setupBackgroundRecovery(video, function () {
+            if (musicAdShowing(player)) return;
+            if (typeof player.playVideo === 'function') player.playVideo();
+            else video.play().catch(function () {});
+        });
 
         if (typeof MutationObserver !== 'undefined') {
             musicClassObserver = new MutationObserver(function () {
@@ -1076,6 +1187,7 @@
             document.removeEventListener('pointercancel', onSeekCancel, true);
             document.removeEventListener('touchcancel', onSeekCancel, true);
             removeAutoPiP();
+            removeRecovery();
             if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
             else video.removeAttribute('title');
             if (seekResumeTimer !== null) clearTimeout(seekResumeTimer);
@@ -1263,14 +1375,44 @@
         } catch (e) { /* leave playback where it is */ }
     }
 
+    // The live decisions: pure functions proven and held to
+    // tests/rules/live.rule.mjs. Times are milliseconds. Keep them
+    // self-contained; the test evaluates their source on its own.
+    // @gdp-begin liveSeekCorrection
+    function liveSeekCorrection(event) {
+        var correct = !event.correcting && event.live && event.hasEdge && event.edge + 1000 < event.pos;
+        return { correct: correct, target: correct ? Math.max(0, event.edge - 500) : event.pos };
+    }
+    // @gdp-end
+
+    // Playback drifts past YouTube's live-head cutoff (about 9 seconds) and
+    // catches up on its own. Only a seek or pause turns the pill gray right
+    // away; drift has to outlast config.drift first.
+    // @gdp-begin liveIndicatorStep
+    function liveIndicatorStep(config, state, event) {
+        var startsBehind = event.live && !event.atHead && !state.behind;
+        var since = startsBehind ? event.t : state.since;
+        var holds = event.live && !event.atHead && !event.paused && !event.seeked && state.pressed &&
+            event.t < since + config.drift;
+        return {
+            visible: event.live,
+            behind: event.live ? !event.atHead : state.behind,
+            since: since,
+            pressed: event.live && !holds ? event.atHead : state.pressed
+        };
+    }
+    // @gdp-end
+
     function setupLiveSeekGuard(player, video) {
         var correcting = false;
         function onSeeking() {
-            if (correcting || !isYouTubeLive(player)) return;
             var edge = bufferedLiveEdge(video);
-            if (edge === null || !(video.currentTime > edge + 1)) return;
+            var decision = liveSeekCorrection({ live: !correcting && isYouTubeLive(player), correcting: correcting,
+                hasEdge: edge !== null, edge: edge === null ? 0 : Math.round(edge * 1000),
+                pos: Math.max(0, Math.round(video.currentTime * 1000)) });
+            if (!decision.correct) return;
             correcting = true;
-            try { video.currentTime = Math.max(0, edge - 0.5); }
+            try { video.currentTime = decision.target / 1000; }
             catch (e) { /* leave the stream where YouTube puts it */ }
             setTimeout(function () { correcting = false; }, 0);
         }
@@ -1315,6 +1457,35 @@
         } catch (e) { /* ignore */ }
     }
 
+    // Whether to seek to the saved position: a pure reducer, proven and held
+    // to tests/rules/resume.rule.mjs. YouTube reuses one <video> across SPA
+    // navigations, so a restore for a new video waits for a media event that
+    // confirms the switch, and a restore happens at most once per activation.
+    // Times are milliseconds. Keep it self-contained; the test evaluates its
+    // source on its own.
+    // @gdp-begin resumeRestoreStep
+    function resumeRestoreStep(config, state, event) {
+        var begin = event.op === 'begin';
+        var waiting = begin ? event.waitFor : event.op === 'metadata' ? false : state.waiting;
+        var fresh = begin || !state.restored && !state.cancelled;
+        var attempts = (event.op === 'check' || event.op === 'metadata') && fresh && !waiting && event.current && event.ready;
+        var farAway = Math.abs(event.now - config.saved) > 750;
+        var atEnd = event.duration <= config.saved + 500;
+        var seeks = attempts && config.hasSaved && !atEnd && farAway && !(config.carriedSame && event.now > 250);
+        var restores = attempts && !(seeks && event.fails);
+        return {
+            waiting: waiting,
+            restored: begin ? restores : state.restored || restores,
+            cancelled: begin ? false : state.cancelled || event.op === 'cancel',
+            seek: seeks,
+            target: seeks ? Math.min(config.saved, Math.max(0, event.duration - 100)) : 0,
+            // A saved position at the very end means the video was finished.
+            ended: attempts && config.hasSaved && atEnd,
+            done: restores
+        };
+    }
+    // @gdp-end
+
     function setupPlaybackPosition(player, video) {
         var videoId = youtubeVideoIdentity(player);
         if (!videoId) { playbackCarry = null; return; }
@@ -1324,30 +1495,32 @@
         var carried = playbackCarry && playbackCarry.identity === videoId ? playbackCarry : null;
         playbackCarry = null;
         var cancelled = false;
-        var restored = false;
         var stateApplied = !carried;
-        var waitingForMediaTransition = !!(previousIdentity && previousIdentity !== videoId);
         var writeTimer = null;
         var saved = readPlaybackPosition(videoId);
+        var resumeConfig = { hasSaved: saved !== null, saved: saved === null ? 0 : Math.max(0, Math.round(saved * 1000)),
+            carriedSame: !!(carried && previousIdentity === videoId) };
+        var resume = { waiting: false, restored: false, cancelled: false, seek: false, target: 0, ended: false, done: false };
 
-        function restore() {
-            if (cancelled || restored || waitingForMediaTransition || activeVideo !== video ||
-                youtubeVideoIdentity(player) !== videoId) return;
-            if (video.readyState < 1 || !isFinite(video.duration) || video.duration <= 0) return;
-            restored = true;
-            var positionApplied = true;
-            if (saved !== null) {
-                if (saved >= video.duration - 0.5) {
-                    writePlaybackPosition(videoId, 0, video.duration, true);
-                } else if (Math.abs(video.currentTime - saved) > 0.75 &&
-                    !(carried && previousIdentity === videoId && video.currentTime > 0.25)) {
-                    try { video.currentTime = Math.min(saved, Math.max(0, video.duration - 0.1)); }
-                    catch (e) { positionApplied = false; }
-                }
+        // The decision is resumeRestoreStep; this feeds it the element.
+        function sendResume(op) {
+            var ready = video.readyState >= 1 && isFinite(video.duration) && video.duration > 0;
+            var event = {
+                op: op, waitFor: !!(previousIdentity && previousIdentity !== videoId),
+                current: activeVideo === video && youtubeVideoIdentity(player) === videoId, ready: ready,
+                duration: ready ? Math.round(video.duration * 1000) : 0,
+                now: Math.max(0, Math.round((video.currentTime || 0) * 1000)), fails: false
+            };
+            var next = resumeRestoreStep(resumeConfig, resume, event);
+            if (next.seek) {
+                try { video.currentTime = next.target / 1000; }
+                catch (e) { event.fails = true; next = resumeRestoreStep(resumeConfig, resume, event); }
             }
-            if (!positionApplied) { restored = false; return; }
-            applyState();
+            resume = next;
+            if (next.ended) writePlaybackPosition(videoId, 0, video.duration, true);
+            if (next.done) applyState();
         }
+        function restore() { sendResume('check'); }
 
         function applyState() {
             if (cancelled || stateApplied || !carried || activeVideo !== video) return;
@@ -1376,11 +1549,8 @@
         function onTimeUpdate() { schedulePersist(); }
         function onPause() { schedulePersist(); }
         function onMetadata() {
-            if (waitingForMediaTransition) {
-                waitingForMediaTransition = false;
-                video._wblockConfirmedVideoId = videoId;
-            }
-            restore();
+            if (resume.waiting) video._wblockConfirmedVideoId = videoId;
+            sendResume('metadata');
         }
         function onPageHide() { persist(true); }
 
@@ -1392,11 +1562,13 @@
         video.addEventListener('pause', onPause);
         video.addEventListener('ended', onEnded);
         window.addEventListener('pagehide', onPageHide);
+        sendResume('begin');
         restore();
 
         registerCleanup(function () {
             if (writeTimer !== null) clearTimeout(writeTimer);
             cancelled = true;
+            sendResume('cancel');
             persist(true);
             video.removeEventListener('loadedmetadata', onMetadata);
             video.removeEventListener('durationchange', onMetadata);
@@ -1434,7 +1606,6 @@
             previousVideo._wblockMediaSessionHooked = false;
         }
         activeVideo = null;
-        pipActive = false;
     }
 
     // Grow a regular watch-page player toward a narrow video's natural aspect
@@ -1696,6 +1867,10 @@
         // Safari's native controls; playback remains owned by the video element.
         if (featureEnabled('toolbar')) buildToolbar(player, video);
         registerCleanup(setupAutoPiP(video, true));
+        registerCleanup(setupBackgroundRecovery(video, function () {
+            var request = video.play();
+            if (request && request.catch) request.catch(function () {});
+        }));
         setupMediaSession(player, video);
         setupLiveSeekGuard(player, video);
         if (featureEnabled('chapters')) setupChapters(player, video);
@@ -2267,15 +2442,33 @@
         return youtubeVideoIdentity(findPlayer());
     }
 
+    // Runs on every timeupdate, so the answer is kept per video.
+    var sponsorBlockChannelCache = { videoId: null, channelId: null };
+
     function sponsorBlockChannelId() {
+        var player = findPlayer();
+        var videoId = youtubeUrlVideoId() || youtubePlayerVideoId(player);
+        if (videoId && sponsorBlockChannelCache.videoId === videoId) return sponsorBlockChannelCache.channelId;
+        var channelId = null;
         try {
-            var details = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails;
-            if (details && details.channelId) return details.channelId;
-            var link = document.querySelector('#owner a[href*="/channel/"], #owner a[href^="/@"], ' +
-                'ytd-channel-name a[href], ytm-slim-owner-renderer a[href]');
-            if (link) return new URL(link.href, location.href).pathname;
+            var response = player && typeof player.getPlayerResponse === 'function' ? player.getPlayerResponse() : null;
+            var details = response && response.videoDetails;
+            if (!(details && details.channelId)) {
+                // ytInitialPlayerResponse describes the first page load only;
+                // after in-app navigation it names the wrong channel.
+                var initial = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails;
+                if (initial && (!videoId || !initial.videoId || initial.videoId === videoId)) details = initial;
+            }
+            if (details && details.channelId) {
+                channelId = details.channelId;
+            } else {
+                var link = document.querySelector('#owner a[href*="/channel/"], #owner a[href^="/@"], ' +
+                    'ytd-channel-name a[href], ytm-slim-owner-renderer a[href]');
+                if (link) channelId = new URL(link.href, location.href).pathname;
+            }
         } catch (e) { /* ignore */ }
-        return null;
+        if (videoId && channelId) sponsorBlockChannelCache = { videoId: videoId, channelId: channelId };
+        return channelId;
     }
 
     function sponsorBlockChannelExcluded(settings) {
@@ -2328,6 +2521,63 @@
         return function () { clearTimeout(fadeTimer); clearTimeout(removeTimer); if (notice.parentNode) notice.remove(); };
     }
 
+    // SponsorBlock's decisions: two pure reducers, proven and held to
+    // tests/rules/sponsor-scan.rule.mjs and tests/rules/sponsor-time.rule.mjs.
+    // Times are milliseconds. Keep them self-contained; the tests evaluate
+    // their source on their own.
+    //
+    // The scan folds the segments, sorted by start: it chooses the first
+    // eligible segment playback is inside, then extends an automatic skip
+    // over every eligible automatic segment chained onto it by overlap. The
+    // same range is often submitted under two categories (Sponsor and
+    // Self-promotion); skipping them one at a time made Undo rewind only to
+    // the last one, and protecting only that one let the other re-skip it.
+    // @gdp-begin sponsorSegmentScan
+    function sponsorSegmentScan(context, acc, seg) {
+        var eligible = seg.mode !== 'off' && seg.skip && seg.segEnd >= seg.segStart + context.minDuration &&
+            !(context.undone && context.undoneStart <= seg.segStart && seg.segStart < context.undoneEnd);
+        var picks = !acc.found && eligible && seg.segStart <= context.now && context.now + 50 < seg.segEnd;
+        var chains = acc.found && acc.auto && eligible && seg.mode === 'auto' && acc.start <= seg.segStart &&
+            seg.segStart < acc.end && acc.end < seg.segEnd;
+        return {
+            found: acc.found || picks,
+            auto: picks ? seg.mode === 'auto' : acc.auto,
+            start: picks ? seg.segStart : acc.start,
+            end: picks || chains ? seg.segEnd : acc.end,
+            notified: picks ? seg.segNotified : acc.notified
+        };
+    }
+    // @gdp-end
+
+    // Each timeupdate with the scan's result, and each Undo. Seeking a Safari
+    // video to its exact duration replays it instead of ending it, so a skip
+    // stops 1 ms short (or wraps to 0 for a looping video). Undo protects the
+    // skipped range while playback stays inside it; leaving ends that, and a
+    // later re-entry skips again.
+    // @gdp-begin sponsorTimeStep
+    function sponsorTimeStep(state, event) {
+        var live = event.op === 'time' && event.enabled && !event.seeking && !event.ended &&
+            (!event.hasDuration || event.now + 50 < event.duration);
+        var leaves = live && (event.now < state.undoneStart || event.now >= state.undoneEnd);
+        var skips = live && event.found && event.auto;
+        var undoes = event.op === 'undo';
+        var clamped = event.hasDuration && event.end + 1 >= event.duration;
+        var seek = 0;
+        if (undoes) seek = event.start + 10;
+        else if (skips) seek = clamped ? (event.loop ? 0 : Math.max(0, event.duration - 1)) : event.end;
+        return {
+            undone: undoes ? true : leaves ? false : state.undone,
+            undoneStart: undoes ? event.start : state.undoneStart,
+            undoneEnd: undoes ? event.end : state.undoneEnd,
+            active: live,
+            skip: skips,
+            notify: live && event.found && !event.auto && !event.notified,
+            rewind: undoes,
+            seek: seek
+        };
+    }
+    // @gdp-end
+
     function setupSponsorBlock(player, video) {
         var videoId = sponsorBlockVideoId();
         if (!player || !video || !videoId || !window.crypto || !crypto.subtle || !window.fetch) return;
@@ -2335,7 +2585,8 @@
         var controller = null;
         var requested = false;
         var segments = [];
-        var undone = null;
+        var timing = { undone: false, undoneStart: 0, undoneEnd: 0, active: false, skip: false, notify: false,
+            rewind: false, seek: 0 };
         var notified = {};
         var removeNotice = null;
         var boundaryTimer = null;
@@ -2352,41 +2603,54 @@
             return item.UUID || item.category + ':' + item.segment.join(':');
         }
 
-        function segmentState(item, settings) {
-            var key = segmentKey(item);
-            var mode = settings.modes[item.category] || 'off';
-            var eligible = mode !== 'off' &&
-                !(undone && item.segment[0] >= undone[0] && item.segment[0] < undone[1]) &&
-                (!item.actionType || item.actionType === 'skip') &&
-                item.segment[1] - item.segment[0] >= settings.minimumDuration;
-            return { key: key, mode: mode, eligible: eligible };
+        function msOf(seconds) { return Math.max(0, Math.round(seconds * 1000)); }
+
+        // One segment as the scan reads it.
+        function scanInput(item, settings) {
+            return {
+                segStart: msOf(item.segment[0]), segEnd: msOf(item.segment[1]),
+                mode: settings.modes[item.category] || 'off',
+                skip: !item.actionType || item.actionType === 'skip',
+                segNotified: !!notified[segmentKey(item)]
+            };
         }
 
-        // Undo and ask-mode notification state lasts only until playback leaves
-        // that range. Staying inside after Undo remains protected, while a
-        // later re-entry behaves like the first visit.
-        function clearExitedSegmentState(now) {
-            if (undone && (now < undone[0] || now >= undone[1])) undone = null;
+        function scanContext(settings, nowMs) {
+            return {
+                now: nowMs, minDuration: msOf(settings.minimumDuration),
+                // Protection from Undo lasts while playback is inside the range.
+                undone: timing.undone && nowMs >= timing.undoneStart && nowMs < timing.undoneEnd,
+                undoneStart: timing.undoneStart, undoneEnd: timing.undoneEnd
+            };
+        }
+
+        // Folds the sorted segments through the proven scan; also returns the
+        // segment it chose, for the notice.
+        function scanSegments(settings, nowMs) {
+            var context = scanContext(settings, nowMs);
+            var result = { found: false, auto: false, start: 0, end: 0, notified: false };
+            var chosen = null;
+            for (var i = 0; i < segments.length; i++) {
+                var picked = result.found;
+                result = sponsorSegmentScan(context, result, scanInput(segments[i], settings));
+                if (!picked && result.found) chosen = segments[i];
+            }
+            return { result: result, item: chosen };
+        }
+
+        // A segment the scan would choose at its own start is eligible.
+        function segmentEligible(item, settings) {
+            var input = scanInput(item, settings);
+            return sponsorSegmentScan(scanContext(settings, input.segStart), { found: false, auto: false, start: 0, end: 0, notified: false }, input).found;
+        }
+
+        // Skip-button state lasts only until playback leaves that segment, so
+        // a later re-entry offers the button again.
+        function clearExitedNotices(now) {
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
                 if (now < item.segment[0] || now >= item.segment[1]) delete notified[segmentKey(item)];
             }
-        }
-
-        // An automatic skip covers the entered segment plus every automatic
-        // segment chained onto it by overlap. The same range is often submitted
-        // under two categories (Sponsor and Self-promotion); skipping them one
-        // at a time made Undo rewind only to the last one, and protecting only
-        // that one let the other re-skip it.
-        function autoSkipEnd(item, settings) {
-            var end = item.segment[1];
-            for (var i = 0; i < segments.length; i++) {
-                var other = segments[i];
-                var state = segmentState(other, settings);
-                if (state.eligible && state.mode === 'auto' && other.segment[0] >= item.segment[0] &&
-                    other.segment[0] < end && other.segment[1] > end) end = other.segment[1];
-            }
-            return end;
         }
 
         // Keep timeupdate as a throttling/background fallback, but normally arm
@@ -2399,17 +2663,15 @@
                 return;
             }
             var next = null;
-            var nextState = null;
             for (var i = 0; i < segments.length; i++) {
                 var item = segments[i];
-                var state = segmentState(item, settings);
-                if (!state.eligible || state.mode === 'ask' && notified[state.key] || item.segment[0] <= now) continue;
+                if (item.segment[0] <= now || !segmentEligible(item, settings)) continue;
+                if ((settings.modes[item.category] || 'off') === 'ask' && notified[segmentKey(item)]) continue;
                 next = item;
-                nextState = state;
                 break;
             }
             if (!next) { clearBoundaryTimer(); return; }
-            var key = nextState.key + '@' + next.segment[0] + ':' + video.playbackRate;
+            var key = segmentKey(next) + '@' + next.segment[0] + ':' + video.playbackRate;
             if (!force && boundaryTimer !== null && boundaryKey === key) return;
             clearBoundaryTimer();
             boundaryKey = key;
@@ -2423,56 +2685,50 @@
         }
 
         function onTimeUpdate(forceSchedule) {
-            if (timingSuspended || video.seeking) { clearBoundaryTimer(); return; }
+            if (timingSuspended) { clearBoundaryTimer(); return; }
             var settings = loadSponsorBlockSettings();
-            if (!settings.enabled || sponsorBlockDisabledVideos[videoId] || sponsorBlockChannelExcluded(settings)) {
-                clearBoundaryTimer();
-                return;
-            }
             var now = video.currentTime;
+            var nowMs = msOf(now);
             var duration = video.duration;
             var hasDuration = isFinite(duration) && duration > 0;
-            // Once the media sits at its end, a segment whose SponsorBlock end
-            // time overshoots the real duration would keep re-seeking the
-            // element. YouTube treats any seek from its ended state as a
-            // replay request, so that loop restarts the video.
-            if (video.ended || (hasDuration && now >= duration - 0.05)) { clearBoundaryTimer(); return; }
-            clearExitedSegmentState(now);
-            for (var i = 0; i < segments.length; i++) {
-                var item = segments[i];
-                var state = segmentState(item, settings);
-                if (!state.eligible) continue;
-                if (now >= item.segment[0] && now < item.segment[1] - 0.05) {
-                    if (state.mode === 'ask') {
-                        if (!notified[state.key]) {
-                            notified[state.key] = true;
-                            if (removeNotice) removeNotice();
-                            removeNotice = showSponsorBlockNotice(player, item, 'skip', function () {
-                                try { video.currentTime = item.segment[1]; } catch (e) { /* ignore */ }
-                            });
-                        }
-                        scheduleNextBoundary(settings, now, true);
-                        return;
-                    }
-                    var start = item.segment[0];
-                    var end = autoSkipEnd(item, settings);
-                    var target = end;
-                    // Seeking a Safari media element to its exact duration
-                    // replays the video instead of ending it (the SponsorBlock
-                    // extension works around the same WebKit behavior). Stop
-                    // just short of the end so playback finishes on its own.
-                    if (hasDuration && target >= duration - 0.001) target = video.loop ? 0 : Math.max(0, duration - 0.001);
-                    try { video.currentTime = target; } catch (e) { return; }
-                    if (settings.showNotice) {
-                        if (removeNotice) removeNotice();
-                        removeNotice = showSponsorBlockNotice(player, item, 'undo', function () {
-                            undone = [start, end];
-                            try { video.currentTime = start + 0.01; } catch (e) { /* ignore */ }
-                        });
-                    }
-                    scheduleNextBoundary(settings, end, true);
-                    return;
+            var scanned = scanSegments(settings, nowMs);
+            timing = sponsorTimeStep(timing, {
+                op: 'time', now: nowMs, duration: hasDuration ? msOf(duration) : 0, hasDuration: hasDuration,
+                ended: !!video.ended, seeking: !!video.seeking, loop: !!video.loop,
+                enabled: settings.enabled && !sponsorBlockDisabledVideos[videoId] && !sponsorBlockChannelExcluded(settings),
+                found: scanned.result.found, auto: scanned.result.auto, start: scanned.result.start,
+                end: scanned.result.end, notified: scanned.result.notified
+            });
+            // Seeking, ended, at the very end (a seek there restarts the video
+            // in YouTube), or switched off: nothing to do and no timer.
+            if (!timing.active) { clearBoundaryTimer(); return; }
+            clearExitedNotices(now);
+            var item = scanned.item;
+            if (timing.notify) {
+                notified[segmentKey(item)] = true;
+                if (removeNotice) removeNotice();
+                removeNotice = showSponsorBlockNotice(player, item, 'skip', function () {
+                    try { video.currentTime = item.segment[1]; } catch (e) { /* ignore */ }
+                });
+            }
+            if (scanned.result.found && !scanned.result.auto) {
+                scheduleNextBoundary(settings, now, true);
+                return;
+            }
+            if (timing.skip) {
+                var skipped = { start: scanned.result.start, end: scanned.result.end };
+                try { video.currentTime = timing.seek / 1000; } catch (e) { return; }
+                if (settings.showNotice) {
+                    if (removeNotice) removeNotice();
+                    removeNotice = showSponsorBlockNotice(player, item, 'undo', function () {
+                        timing = sponsorTimeStep(timing, { op: 'undo', now: msOf(video.currentTime), duration: 0,
+                            hasDuration: false, ended: false, seeking: false, loop: false, enabled: true, found: true,
+                            auto: true, start: skipped.start, end: skipped.end, notified: false });
+                        try { video.currentTime = timing.seek / 1000; } catch (e) { /* ignore */ }
+                    });
                 }
+                scheduleNextBoundary(settings, skipped.end / 1000, true);
+                return;
             }
             scheduleNextBoundary(settings, now, !!forceSchedule);
         }
@@ -3037,7 +3293,14 @@
             }
         }
 
-        function refreshChapters() {
+        // Video whose retry window ran out without chapters. Live streams fire
+        // durationchange for every segment; each one used to restart a 10 s
+        // window of full data walks for a video that has no chapters. Data and
+        // navigation events still restart it (hydration can arrive silently).
+        var exhaustedFor = null;
+
+        function refreshChapters(event) {
+            if (event && event.type === 'durationchange' && exhaustedFor === currentChapterVideoId()) return;
             if (applyChapters(video)) {
                 stopRetry();
             } else if (timer === null) {
@@ -3046,7 +3309,12 @@
                 attempts = 0;
                 timer = setInterval(function () {
                     attempts++;
-                    if (applyChapters(video) || attempts >= 40) stopRetry();
+                    if (applyChapters(video)) {
+                        stopRetry();
+                    } else if (attempts >= 40) {
+                        exhaustedFor = currentChapterVideoId();
+                        stopRetry();
+                    }
                 }, 250);
             }
         }
@@ -3398,6 +3666,7 @@
         function cycleTrackMode(track) {
             if (pipPumpRestorePending) return;
             pipPumpRestorePending = true;
+            pumpedWhileHidden = true;
             subtitleApplying = true;
             track.mode = 'hidden';
             pipCaptionPumpTicks++;
@@ -3483,7 +3752,30 @@
         function onSubtitleRestoreSignal() {
             if (getSubtitlePreference()) { applyNativeSubtitlePreference(); }
         }
+        // Safari's caption menus learn the selection from mode changes WebKit
+        // delivers while the page renders. The pump's flips happen while it
+        // doesn't, and one that gets dropped leaves fullscreen's menu saying
+        // Off while cues still paint (#11). Re-assert the showing track, in
+        // two tasks, once the page is visible again and whenever native
+        // fullscreen starts. The user's preference is left as it is.
+        var pumpedWhileHidden = false;
+        function resyncSubtitleSelection() {
+            var showing = nativeSubtitleTracks(video).filter(function (track) { return track.mode === 'showing'; })[0];
+            if (!showing || cancelled) return;
+            subtitleApplying = true;
+            try { showing.mode = 'hidden'; } catch (e) { /* ignore */ }
+            setTimeout(function () {
+                try { if (!cancelled && showing.mode === 'hidden') showing.mode = 'showing'; } catch (e) { /* ignore */ }
+                setTimeout(function () { subtitleApplying = false; }, 0);
+            }, 0);
+        }
+        var stopSubtitleVisibility = observeRealVisibility(function () {
+            if (_realHidden || !pumpedWhileHidden) return;
+            pumpedWhileHidden = false;
+            resyncSubtitleSelection();
+        });
         video.addEventListener('timeupdate', onPiPCaptionTick);
+        video.addEventListener('webkitbeginfullscreen', resyncSubtitleSelection);
         video.addEventListener('loadedmetadata', onSubtitleRestoreSignal);
         video.addEventListener('durationchange', onSubtitleRestoreSignal);
         document.addEventListener('yt-player-state-change', onSubtitleRestoreSignal);
@@ -3498,6 +3790,8 @@
             cancelled = true;
             stopRetry();
             video.removeEventListener('timeupdate', onPiPCaptionTick);
+            video.removeEventListener('webkitbeginfullscreen', resyncSubtitleSelection);
+            stopSubtitleVisibility();
             video.removeEventListener('loadedmetadata', onSubtitleRestoreSignal);
             video.removeEventListener('durationchange', onSubtitleRestoreSignal);
             document.removeEventListener('yt-player-state-change', onSubtitleRestoreSignal);
@@ -4050,12 +4344,52 @@
         if (mobileQualityCleanup) mobileQualityCleanup();
     }
 
+    // The restore decision: a pure reducer, proven and held to
+    // tests/rules/quality-watch.rule.mjs. A saved quality is restored only
+    // after real progress; once restored, a stall of stallLimit while playing,
+    // visible, not seeking and not in an ad falls back to Auto once, and
+    // healthyLimit of good playback ends the watch. Times are milliseconds.
+    // Keep it self-contained; the test evaluates its source on its own.
+    // @gdp-begin qualityWatchStep
+    function qualityWatchStep(config, state, event) {
+        var op = event.op, t = event.t, pos = event.pos;
+        var elapsed = Math.min(Math.max(0, t - state.prevCheck), config.maxElapsed);
+        var stalledNext = pos === state.prevPos ? state.stalled + elapsed : 0;
+        var idle = event.paused || event.seeking || event.hidden || event.ad;
+        var ticking = op === 'tick' && state.phase === 'monitoring';
+        var starts = op === 'sample' && state.phase === 'waiting' && !event.paused && !event.seeking && !event.ended &&
+            event.ready && !event.ad && state.lastPos < pos && pos <= state.lastPos + config.maxAdvance;
+        var monitors = op === 'restored' && state.phase === 'restoring';
+        var falls = ticking && !event.ended && !idle && stalledNext >= config.stallLimit;
+        var healthy = ticking && !event.ended && !idle && stalledNext < config.stallLimit &&
+            state.observed + elapsed >= config.healthyLimit;
+        var phase = state.phase;
+        if (op === 'cancel' || ticking && (event.ended || falls || healthy)) phase = 'done';
+        else if (starts) phase = 'restoring';
+        else if (monitors) phase = 'monitoring';
+        return {
+            phase: phase,
+            lastPos: op === 'sample' || op === 'baseline' ? pos : state.lastPos,
+            prevPos: monitors || ticking ? pos : state.prevPos,
+            prevCheck: monitors || ticking ? t : state.prevCheck,
+            stalled: monitors ? 0 : ticking ? (idle ? 0 : stalledNext) : state.stalled,
+            observed: monitors ? 0 : ticking && !idle ? state.observed + elapsed : state.observed,
+            fallbacks: falls ? state.fallbacks + 1 : state.fallbacks,
+            start: starts,
+            fallback: falls
+        };
+    }
+    // @gdp-end
+
+    var QUALITY_WATCH = { stallLimit: 8000, healthyLimit: 20000, maxAdvance: 3000, maxElapsed: 1000 };
+
     function restoreMobileQuality(preferred) {
         cancelMobileQualityRestore();
         var video = activeVideo;
         var player = findPlayer();
         if (!video || !player || QUALITY_ORDER.indexOf(preferred) === -1) return;
-        var lastTime = video.currentTime;
+        var state = { phase: 'waiting', lastPos: 0, prevPos: 0, prevCheck: 0, stalled: 0, observed: 0,
+            fallbacks: 0, start: false, fallback: false };
         var monitor = null;
         function stop() {
             video.removeEventListener('timeupdate', onProgress);
@@ -4063,52 +4397,37 @@
             monitor = null;
             if (mobileQualityCleanup === stop) mobileQualityCleanup = null;
         }
+        // A newer choice, another video or a changed preference ends this one.
         function current() {
             return activeVideo === video && getPreferredQuality() === preferred;
         }
-        function onProgress() {
-            if (!current()) { stop(); return; }
-            var advance = video.currentTime - lastTime;
-            lastTime = video.currentTime;
-            if (video.paused || video.seeking || video.ended || video.readyState < 2 ||
-                player.classList.contains('ad-showing') || advance <= 0 || advance > 3) return;
-            stop();
+        function send(op) {
+            state = qualityWatchStep(QUALITY_WATCH, state, {
+                op: op, t: Date.now(), pos: Math.max(0, Math.round((video.currentTime || 0) * 1000)),
+                paused: !!video.paused, seeking: !!video.seeking, ended: !!video.ended, ready: video.readyState >= 2,
+                ad: player.classList.contains('ad-showing'), hidden: _realHidden
+            });
+            if (state.start) begin();
+            // Recover this video without forgetting the user's choice for the
+            // next one or repeatedly forcing a stalled stream.
+            if (state.fallback) setQuality('auto');
+            if (state.phase === 'done') stop();
+        }
+        function begin() {
+            video.removeEventListener('timeupdate', onProgress);
             // Use the same bounded request as a manual choice, never pin a
             // rendition before the stream has begun producing frames.
             setQuality(preferred, function (worked) {
-                if (!worked || !current()) return;
+                if (!worked || !current()) { send('cancel'); return; }
                 storageRemove('yt-player-quality');
-                var previousTime = video.currentTime;
-                var previousCheck = Date.now();
-                var stalled = 0;
-                var observed = 0;
                 mobileQualityCleanup = stop;
-                monitor = setInterval(function () {
-                    if (!current() || video.ended) { stop(); return; }
-                    var now = Date.now();
-                    var elapsed = Math.min(1000, Math.max(0, now - previousCheck));
-                    previousCheck = now;
-                    if (video.paused || video.seeking || document.hidden ||
-                        player.classList.contains('ad-showing')) {
-                        stalled = 0;
-                        previousTime = video.currentTime;
-                        return;
-                    }
-                    observed += elapsed;
-                    stalled = video.currentTime !== previousTime ? 0 : stalled + elapsed;
-                    previousTime = video.currentTime;
-                    if (stalled >= 8000) {
-                        stop();
-                        // Recover this video without forgetting the user's choice
-                        // for the next one or repeatedly forcing a stalled stream.
-                        setQuality('auto');
-                    } else if (observed >= 20000) {
-                        stop();
-                    }
-                }, 500);
+                send('restored');
+                monitor = setInterval(function () { send(current() ? 'tick' : 'cancel'); }, 500);
             });
         }
+        function onProgress() { send(current() ? 'sample' : 'cancel'); }
         mobileQualityCleanup = stop;
+        send('baseline');
         video.addEventListener('timeupdate', onProgress);
     }
 
@@ -4366,24 +4685,18 @@
         liveBtn.type = 'button';
         liveBtn.style.cssText = btnStyle;
         liveBtn.textContent = '\u25CF LIVE';
-        // Playback drifts past YouTube's live-head cutoff (about 9 seconds)
-        // and catches up on its own. Only a seek or pause turns the pill gray
-        // right away; drift has to outlast LIVE_DRIFT_MS first.
-        var LIVE_DRIFT_MS = 10000;
-        var liveBehindSince = 0;
+        var liveState = { visible: false, pressed: false, behind: false, since: 0 };
         function updateLiveBtn(event) {
             var live = isYouTubeLive(player);
-            liveBtn.style.display = live ? '' : 'none';
+            liveState = liveIndicatorStep({ drift: 10000 }, liveState, {
+                live: live, atHead: live && isAtYouTubeLiveHead(player, video), paused: !!video.paused,
+                seeked: !!(event && event.type === 'seeked'), t: Date.now()
+            });
+            liveBtn.style.display = liveState.visible ? '' : 'none';
             if (!live) return;
-            var atHead = isAtYouTubeLiveHead(player, video);
-            var now = Date.now();
-            if (atHead) liveBehindSince = 0;
-            else if (!liveBehindSince) liveBehindSince = now;
-            if (!atHead && !video.paused && !(event && event.type === 'seeked') &&
-                liveBtn.getAttribute('aria-pressed') === 'true' && now - liveBehindSince < LIVE_DRIFT_MS) return;
-            liveBtn.style.color = atHead ? '#ff4e45' : '#aaa';
-            liveBtn.title = atHead ? 'Watching live' : 'Jump to live';
-            liveBtn.setAttribute('aria-pressed', atHead ? 'true' : 'false');
+            liveBtn.style.color = liveState.pressed ? '#ff4e45' : '#aaa';
+            liveBtn.title = liveState.pressed ? 'Watching live' : 'Jump to live';
+            liveBtn.setAttribute('aria-pressed', liveState.pressed ? 'true' : 'false');
         }
         updateLiveBtn();
         liveBtn.addEventListener('click', function (e) {
