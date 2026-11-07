@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.69
+// @version      0.1.70
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -13,6 +13,7 @@
 // @description:ru  Добавляет YouTube нативные элементы управления Safari, главы, субтитры, SponsorBlock, картинку-в-картинке, фоновое воспроизведение, выбор качества и аудиорежим.
 // @description:zh-Hans  为 YouTube 添加 Safari 原生控件、章节、字幕、SponsorBlock、画中画、后台播放、画质选择和纯音频模式。
 // @author       wBlock
+// @homepageURL  https://github.com/0xCUB3/wBlock-userscripts
 // @match        https://www.youtube.com/*
 // @match        https://youtube.com/*
 // @match        https://m.youtube.com/*
