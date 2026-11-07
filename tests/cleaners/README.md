@@ -81,6 +81,17 @@ Player Cleaner scenarios:
   A host tap-anywhere toggle must not see click, pointerup, or touchend from the video.
   iOS native fullscreen detaches the media element; the tap-guard and Reddit hide
   must survive that detach and re-apply on `webkitendfullscreen`.
+  With `?mse=1` it models the live feed player instead: the shadow `<video>`
+  has an MSE blob while the host carries the HLS URL, `caption-url`, and post
+  metadata. On iPhone the host URL must be promoted and nativeized without a
+  tap, the caption file must become a native English track, and Now Playing
+  must name the post.
+- `fixture-player-cleaner-feed-churn.html` — enhanced players surrounded by a
+  feed that toggles classes, updates counters, and appends comments every
+  frame. Counts `elementsFromPoint` calls: unrelated churn must trigger no
+  chrome pass, while chrome remounted inside a player and body-level portal
+  chrome over a player must still be hidden. Also covers a player inside the
+  page `<header>` (videojs.org) and the YouTube-style number-key seek.
 - `fixture-player-cleaner-bare.html` — modern/custom players whose wrapper is
   not a recognized library class (Mux-style or bespoke). Verifies the bare-video
   fallback: a controls-less `<video>` in an unknown wrapper is enhanced in place

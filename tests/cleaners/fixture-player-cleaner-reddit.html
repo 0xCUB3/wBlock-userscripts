@@ -39,7 +39,22 @@
         host.addEventListener('touchend', togglePlayback);
       }
     });
-    document.documentElement.appendChild(document.createElement('shreddit-player'));
+    // ?mse models the live feed player: the host carries the HLS URL,
+    // captions, and post metadata while the shadow video gets an MSE blob.
+    var mse = /[?&]mse\b/.test(location.search);
+    var player = document.createElement('shreddit-player');
+    if (mse) {
+      player.setAttribute('src', 'https://v.redd.it/fixture/HLSPlaylist.m3u8?f=hd');
+      player.setAttribute('caption-url', 'https://v.redd.it/fixture/wh_ben_en.vtt');
+      player.setAttribute('post-title', 'Fixture post title');
+      player.setAttribute('subreddit-name', 'fixtures');
+    }
+    document.documentElement.appendChild(player);
+    if (mse) {
+      var shadowVideo = player.shadowRoot.querySelector('video');
+      shadowVideo.removeAttribute('src');
+      shadowVideo.src = 'blob:https://www.reddit.com/00000000-0000-0000-0000-000000000000';
+    }
   })();
 </script>
 </head>

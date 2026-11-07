@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Feed churn around enhanced players</title>
+<style>
+  body { margin: 0; font: 14px sans-serif; }
+  .video-js { position: relative; width: 640px; aspect-ratio: 16 / 9; background: #000; }
+  .video-js video { width: 100%; height: 100%; }
+  .vjs-control-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; background: #333; }
+  .post { padding: 8px; border-bottom: 1px solid #ccc; }
+  .post.active { background: #eef; }
+</style>
+<script>
+  // Count hit-test calls: each chrome pass over an on-screen player makes
+  // several. Unrelated feed churn must not trigger any.
+  window.__hitTests = 0;
+  var nativeElementsFromPoint = document.elementsFromPoint;
+  document.elementsFromPoint = function () {
+    window.__hitTests++;
+    return nativeElementsFromPoint.apply(document, arguments);
+  };
+</script>
+</head>
+<body>
+  <!-- videojs.org-style hero: an unknown positioned skin inside the page header. -->
+  <header id="site-header">
+    <nav id="site-nav"><a href="#">Docs</a> <button type="button">Menu</button></nav>
+    <div class="hero-skin" style="position:relative;width:640px;aspect-ratio:16/9;background:#000">
+      <video id="hero-video" style="width:100%;height:100%"></video>
+      <div class="hero-controls" style="position:absolute;left:0;right:0;bottom:0;height:40px;background:#444">controls</div>
+    </div>
+  </header>
+  <div class="video-js" id="player-a"><video></video><div class="vjs-control-bar"></div></div>
+  <div class="video-js" id="player-b"><video></video><div class="vjs-control-bar"></div></div>
+  <main id="feed"></main>
+  <script>
+    document.querySelectorAll('.video-js video, #hero-video').forEach(function (v) {
+      v.src = 'blob:https://example.com/00000000-0000-0000-0000-000000000000';
+    });
+    var feed = document.getElementById('feed');
+    for (var i = 0; i < 40; i++) {
+      var post = document.createElement('div');
+      post.className = 'post';
+      post.innerHTML = '<span class="votes">' + i + '</span> <span class="title">Post ' + i + '</span>';
+      feed.appendChild(post);
+    }
+    // Feed-style churn: class toggles, vote counters, and appended comments,
+    // none of it inside a player and none of it at body level.
+    window.startChurn = function () {
+      var tick = 0;
+      window.__churnTimer = setInterval(function () {
+        tick++;
+        var posts = feed.children;
+        posts[tick % posts.length].classList.toggle('active');
+        posts[(tick * 7) % posts.length].querySelector('.votes').textContent = String(tick);
+        var comment = document.createElement('div');
+        comment.className = 'comment';
+        comment.textContent = 'comment ' + tick;
+        posts[(tick * 3) % posts.length].appendChild(comment);
+      }, 16);
+    };
+  </script>
+</body>
+</html>

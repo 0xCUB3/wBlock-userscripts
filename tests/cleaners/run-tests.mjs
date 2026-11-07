@@ -38,6 +38,7 @@ const FIXTURE_PLAYER_LIVE_BLOB_URL = pathToFileURL(join(__dirname, 'fixture-play
 const FIXTURE_PLAYER_HANDSHAKE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-handshake.html')).href;
 const FIXTURE_PLAYER_SHADOW_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-shadow.html')).href;
 const FIXTURE_PLAYER_REDDIT_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-reddit.html')).href;
+const FIXTURE_PLAYER_FEED_CHURN_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-feed-churn.html')).href;
 const FIXTURE_PLAYER_BARE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-bare.html')).href;
 const FIXTURE_PLAYER_RELATIVE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-relative.html')).href;
 const FIXTURE_PLAYER_UPGRADE_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-upgrade.html')).href;
@@ -3206,6 +3207,121 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
   await browser.close();
 }
 
+// Reddit's live feed player on iOS: the shadow <video> has an MSE blob while
+// the host carries the HLS URL. WebKit can play that URL natively, so the
+// player is promoted and nativeized up front instead of staying with Reddit
+// until a tap (which Reddit's own toggle then swallowed). The host's
+// caption-url becomes a native track and its post metadata feeds Now Playing.
+{
+  const iphone = devices['iPhone 13'];
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Reddit iPhone MSE feed player)', {
+    device: iphone,
+    hasTouch: true,
+    fixture: FIXTURE_PLAYER_REDDIT_URL + '?mse=1',
+    scriptSource: playerUserscript,
+    readySignal: 'shreddit-player',
+  });
+  const S = 'player-cleaner-reddit-iphone-mse';
+  const shadowVideo = () => {
+    const host = document.querySelector('shreddit-player');
+    return host && host.shadowRoot && host.shadowRoot.querySelector('video');
+  };
+
+  await check(page, S, 'promotes the host HLS URL over the MSE blob', `(() => {
+    const video = (${shadowVideo})();
+    const host = document.querySelector('shreddit-player');
+    return { pass: !!(video && video.src === host.getAttribute('src')), detail: video ? video.src : 'no video' };
+  })()`);
+  await check(page, S, 'nativeizes the promoted video without a tap', `(() => {
+    const video = (${shadowVideo})();
+    return { pass: !!(video && video.controls && video.getAttribute('data-wblock-player-cleaner') === '1'),
+      detail: video ? 'controls=' + video.controls : 'no video' };
+  })()`);
+  await check(page, S, 'adds caption-url as a native English track', `(() => {
+    const video = (${shadowVideo})();
+    const track = video && video.querySelector('track[data-wblock-src$="wh_ben_en.vtt"]');
+    return { pass: !!(track && track.srclang === 'en' && track.kind === 'subtitles' && track.label),
+      detail: track ? track.srclang + ' ' + track.label : 'no track' };
+  })()`);
+  await check(page, S, 'hides Reddit chrome over the promoted video', `(() => {
+    const host = document.querySelector('shreddit-player');
+    const ui = host.shadowRoot.querySelector('shreddit-media-ui');
+    return { pass: !!(ui && getComputedStyle(ui).display === 'none') };
+  })()`);
+  const hasMediaSession = await page.evaluate(() => !!(navigator.mediaSession && window.MediaMetadata));
+  if (hasMediaSession) {
+    await page.evaluate(() => {
+      const host = document.querySelector('shreddit-player');
+      host.shadowRoot.querySelector('video').dispatchEvent(new Event('play'));
+    });
+    await check(page, S, 'names the post in Now Playing', () => {
+      const metadata = navigator.mediaSession.metadata;
+      return { pass: !!(metadata && metadata.title === 'Fixture post title' && metadata.artist === 'r/fixtures'),
+        detail: metadata ? `${metadata.title} / ${metadata.artist}` : 'no metadata' };
+    });
+  }
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// Feed pages mutate constantly around their players. Those mutations used
+// to re-run the layout-reading chrome hide for every enhanced player on
+// every batch. Only a player's own signals may trigger a chrome pass now.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (feed churn around players)', {
+    fixture: FIXTURE_PLAYER_FEED_CHURN_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#player-b video[data-wblock-player-cleaner]',
+    viewport: { width: 1280, height: 800 },
+  });
+  const S = 'player-cleaner-feed-churn';
+  await check(page, S, 'hides skin chrome of a player inside the page header', () => {
+    const controls = document.querySelector('.hero-controls');
+    const nav = document.getElementById('site-nav');
+    return { pass: !!(controls && getComputedStyle(controls).display === 'none' && getComputedStyle(nav).display !== 'none'),
+      detail: `controls=${controls && getComputedStyle(controls).display} nav=${getComputedStyle(nav).display}` };
+  });
+  await page.waitForTimeout(400);
+  const before = await page.evaluate(() => { window.startChurn(); return window.__hitTests; });
+  await page.waitForTimeout(1500);
+  const after = await page.evaluate(() => { clearInterval(window.__churnTimer); return window.__hitTests; });
+  record(S, 'unrelated feed churn runs no chrome passes', after - before === 0,
+    `hit tests during churn=${after - before}`);
+  await page.evaluate(() => {
+    const player = document.getElementById('player-a');
+    const bar = document.createElement('div');
+    bar.className = 'vjs-control-bar remounted';
+    player.appendChild(bar);
+  });
+  await check(page, S, 'still re-hides chrome remounted inside a player', () => {
+    const bar = document.querySelector('#player-a .remounted');
+    return { pass: !!(bar && getComputedStyle(bar).display === 'none') };
+  });
+  await page.evaluate(() => {
+    const portal = document.createElement('div');
+    portal.id = 'portal-chrome';
+    const r = document.querySelector('#player-b video').getBoundingClientRect();
+    portal.style.cssText = `position:fixed;left:${r.left}px;top:${r.bottom - 40}px;width:${r.width}px;height:40px;background:red;z-index:9`;
+    document.body.appendChild(portal);
+  });
+  await check(page, S, 'still hides body-level portal chrome over a player', () => {
+    const portal = document.getElementById('portal-chrome');
+    return { pass: !!(portal && getComputedStyle(portal).display === 'none') };
+  });
+  await page.evaluate(() => {
+    const v = document.querySelector('#player-a video');
+    Object.defineProperty(v, 'duration', { configurable: true, get: () => 200 });
+    Object.defineProperty(v, 'currentTime', { configurable: true, get: () => 0, set: t => { window.__seekTo = t; } });
+    v.focus();
+    v.dispatchEvent(new KeyboardEvent('keydown', { key: '5', bubbles: true, cancelable: true }));
+  });
+  await check(page, S, 'number keys jump to that tenth of the video', () => {
+    return { pass: window.__seekTo === 100, detail: `seek=${window.__seekTo}` };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 {
   const { browser, page, pageErrors } = await runScenario('Player Cleaner (bare/custom players)', {
     fixture: FIXTURE_PLAYER_BARE_URL,
@@ -3760,8 +3876,11 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
   });
 
   await check(page, S, 'hides unknown controls bar', () => {
+    // Nested inside the hidden controls wrapper: hidden through its ancestor.
     const el = document.querySelector('.xq7-controls-bar');
-    return { pass: !!(el && el.style.display === 'none'), detail: el ? `display=${el.style.display}` : 'no element' };
+    const hidden = !!(el && (el.style.display === 'none' || el.closest('[data-wblock-pc-hidden]')) &&
+      el.getClientRects().length === 0);
+    return { pass: hidden, detail: el ? `display=${el.style.display} rects=${el.getClientRects().length}` : 'no element' };
   });
 
   await check(page, S, 'video click does not bubble to the player shell (no double-toggle)', () => {
