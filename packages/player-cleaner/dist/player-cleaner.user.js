@@ -221,40 +221,77 @@
         return document.pictureInPictureElement === video || video.webkitPresentationMode === 'picture-in-picture';
     }
 
-    function setPiP(video, on) {
-        if (on === inPiP(video) || (on && (video.paused || video.ended))) { return; }
+    function requestPiP(video, onRefused) {
+        return !!attempt(function () {
+            if (video.webkitSupportsPresentationMode && video.webkitSetPresentationMode) {
+                video.webkitSetPresentationMode('picture-in-picture');
+                return true;
+            }
+            if (video.requestPictureInPicture) {
+                video.requestPictureInPicture().catch(onRefused);
+                return true;
+            }
+            return false;
+        });
+    }
+
+    function leavePiP(video) {
         attempt(function () {
             if (video.webkitSupportsPresentationMode && video.webkitSetPresentationMode) {
-                video.webkitSetPresentationMode(on ? 'picture-in-picture' : 'inline');
-            } else if (on && video.requestPictureInPicture) {
-                video.requestPictureInPicture().catch(function () {});
-            } else if (!on && document.exitPictureInPicture) {
+                video.webkitSetPresentationMode('inline');
+            } else if (document.exitPictureInPicture) {
                 document.exitPictureInPicture().catch(function () {});
             }
         });
     }
 
+    // When to enter or leave PiP: the reducer Tube Cleaner ships too, proven
+    // and held to tests/rules/auto-pip.rule.mjs. It only closes PiP it opened
+    // itself, so PiP the user entered stays open on return.
+    // @gdp-begin autoPiPStep
+    function autoPiPStep(config, state, event) {
+        var op = event.op;
+        var wantsIn = op === 'hide' && event.hideAllowed || op === 'blur' && config.blurEnters && event.hideAllowed ||
+            op === 'scrollOut' && event.autoAllowed;
+        var wantsOut = op === 'show' && event.focused || op === 'focus' && !event.hidden && event.focused ||
+            op === 'scrollIn' && event.autoAllowed;
+        var entering = wantsIn && event.playing && !event.inPiP;
+        var leaving = wantsOut && state.ours && event.inPiP;
+        // PiP that ended on its own (closed, or a refused request) is no
+        // longer ours to close.
+        var forget = op === 'left' || wantsOut && state.ours && !event.inPiP;
+        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving };
+    }
+    // @gdp-end
+
     function setupAutoPiP(video) {
         if (!once(video, 'autoPiP')) { return; }
         video._wblockAutoPiPHooked = true;
         // Window focus alone cannot tell whether another window covers
-        // Safari, so blur never triggers PiP; tab hiding and scrolling do.
-        listen(video, document, 'visibilitychange', function () {
-            if (!autoPiPEnabled) { return; }
-            if (reallyHidden) { setPiP(video, true); }
-            else if (document.hasFocus()) { setPiP(video, false); }
+        // Safari, so blur never enters PiP; tab hiding and scrolling do.
+        var state = { ours: false, enter: false, exit: false };
+        function send(op) {
+            state = autoPiPStep({ blurEnters: false }, state, {
+                op: op, autoAllowed: autoPiPEnabled, hideAllowed: autoPiPEnabled,
+                playing: !video.paused && !video.ended, focused: document.hasFocus(), hidden: reallyHidden, inPiP: inPiP(video)
+            });
+            if (state.enter && !requestPiP(video, function () { send('left'); })) { send('left'); }
+            if (state.exit) { leavePiP(video); }
+        }
+        listen(video, document, 'visibilitychange', function () { send(reallyHidden ? 'hide' : 'show'); });
+        listen(video, window, 'focus', function () { send('focus'); });
+        listen(video, video, 'webkitpresentationmodechanged', function () {
+            if (video.webkitPresentationMode !== 'picture-in-picture') { send('left'); }
         });
-        listen(video, window, 'focus', function () {
-            if (autoPiPEnabled && !reallyHidden && document.hasFocus()) { setPiP(video, false); }
-        });
+        listen(video, video, 'leavepictureinpicture', function () { send('left'); });
         listen(video, window, 'pagehide', function (event) {
             if (event && event.persisted) { return; }
             attempt(function () { video.pause(); });
-            setPiP(video, false);
+            if (inPiP(video)) { leavePiP(video); }
         });
         if (typeof IntersectionObserver === 'undefined') { return; }
         var observer = new IntersectionObserver(function (entries) {
-            if (autoPiPEnabled) { setPiP(video, !entries[entries.length - 1].isIntersecting); }
+            send(entries[entries.length - 1].isIntersecting ? 'scrollIn' : 'scrollOut');
         }, { threshold: 0.1 });
         observer.observe(video);
         onCleanup(video, function () { observer.disconnect(); });
@@ -299,6 +336,34 @@
         });
     }
 
+    // Caption preference decisions: pure functions proven and held to
+    // tests/rules/captions.rule.mjs. WebKit turns on a <track default> by
+    // itself, sometimes repeatedly while it loads; that is the page's choice,
+    // not the user's, and so is a default track switching on right after it
+    // appears. Keep them self-contained; the test evaluates their source.
+    // @gdp-begin captionChoiceStep
+    function captionChoiceStep(config, state, event) {
+        var change = event.op === 'change';
+        var automatic = change && event.showing === 'default' && !(event.active && state.seenAt + config.settle < event.t);
+        var saves = change && !automatic;
+        return {
+            seenAt: event.op === 'tracks' ? event.t : state.seenAt,
+            revert: automatic,
+            save: saves,
+            saveOff: saves && event.showing === 'none',
+            savedLang: saves && event.showing !== 'none' ? event.lang : 0
+        };
+    }
+    // @gdp-end
+
+    // Without a saved preference the page decides; otherwise only the saved
+    // language shows.
+    // @gdp-begin subtitleModeFor
+    function subtitleModeFor(event) {
+        return { touch: event.known, show: event.known && !event.off && event.prefLang === event.trackLang };
+    }
+    // @gdp-end
+
     function setupPreferences(video) {
         if (!once(video, 'preferences')) { return; }
         var preferences = loadPreferences();
@@ -310,9 +375,9 @@
 
         function applySubtitles() {
             var language = loadPreferences().subtitleLanguage;
-            if (language === null) { return; }
             subtitleTracks(video).forEach(function (track) {
-                attempt(function () { track.mode = language && track.language === language ? 'showing' : 'disabled'; });
+                var mode = subtitleModeFor({ known: language !== null, off: !language, prefLang: language, trackLang: track.language });
+                if (mode.touch) { attempt(function () { track.mode = mode.show ? 'showing' : 'disabled'; }); }
             });
         }
 
@@ -345,19 +410,19 @@
             });
         }
 
-        // WebKit turns on a <track default> by itself, sometimes repeatedly
-        // while it loads. That is the page's choice, not the user's, and so is
-        // a default track switching on right after it appears.
-        var tracksSeenAt = Date.now();
-        function automatic(track) {
+        var captions = { seenAt: Date.now(), revert: false, save: false, saveOff: false, savedLang: 0 };
+        function sendCaptions(op, showing) {
+            var isDefault = !!showing && [].some.call(video.querySelectorAll('track[default]'), function (el) { return el.track === showing; });
             var activation = navigator.userActivation;
-            if (activation && activation.isActive && Date.now() - tracksSeenAt > 3000) { return false; }
-            return [].some.call(video.querySelectorAll('track[default]'), function (el) { return el.track === track; });
+            captions = captionChoiceStep({ settle: 3000 }, captions, {
+                op: op, t: Date.now(), showing: !showing ? 'none' : isDefault ? 'default' : 'other',
+                lang: showing ? showing.language || '' : '', active: !!(activation && activation.isActive)
+            });
+            if (captions.revert) { applySubtitles(); }
+            else if (captions.save) { savePreference('subtitleLanguage', captions.saveOff ? '' : captions.savedLang); }
         }
         function onTrackChange() {
-            var showing = subtitleTracks(video).filter(function (track) { return track.mode === 'showing'; })[0];
-            if (showing && automatic(showing)) { applySubtitles(); return; }
-            savePreference('subtitleLanguage', showing ? showing.language || '' : '');
+            sendCaptions('change', subtitleTracks(video).filter(function (track) { return track.mode === 'showing'; })[0]);
         }
 
         listen(video, video, 'loadedmetadata', restore);
@@ -372,7 +437,7 @@
         listen(video, video, 'pause', function () { save(true); });
         listen(video, video, 'ended', function () { save(true); });
         if (video.textTracks) {
-            listen(video, video.textTracks, 'addtrack', function () { tracksSeenAt = Date.now(); });
+            listen(video, video.textTracks, 'addtrack', function () { sendCaptions('tracks', null); });
             listen(video, video.textTracks, 'change', onTrackChange);
         }
         onCleanup(video, function () { save(true); });
@@ -528,7 +593,7 @@
             else if (key === 'l' || key === 'L' || key === 'ArrowRight') { seek(video, video.currentTime + 5); showToast(video, '+5s'); }
             else if (key === 'k' || key === 'K') { if (video.paused) { video.play().catch(function () {}); } else { video.pause(); } }
             else if (key === 'm' || key === 'M') { video.muted = !video.muted; showToast(video, video.muted ? 'Muted' : 'Unmuted'); }
-            else if (key === 'p' || key === 'P') { setPiP(video, !inPiP(video)); }
+            else if (key === 'p' || key === 'P') { if (inPiP(video)) { leavePiP(video); } else { requestPiP(video, function () {}); } }
             else if (key === 'f' || key === 'F') { toggleFullscreen(video); }
             else { handled = false; }
             if (handled) { event.preventDefault(); }

@@ -1812,6 +1812,8 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     viewport: { width: 1280, height: 800 },
   });
   const S = 'tube-cleaner-persistent-resume';
+  // Waiting for confirmation and restoring at most once are proven in
+  // tests/rules/resume.test.mjs; these checks cover identities and storage.
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
     player.getVideoData = () => ({ video_id: 'DUMMYVID001' });
@@ -1840,10 +1842,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     document.dispatchEvent(new Event('yt-navigate-finish'));
   });
   await page.waitForTimeout(100);
-  await check(page, S, 'waits for a confirmed media event before restoring the next video', () => ({
-    pass: window.__wblockResumeCurrent === 37,
-    detail: `beforeMetadata=${window.__wblockResumeCurrent}`,
-  }));
   await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('loadedmetadata')));
   await check(page, S, 'restores the confirmed next video position', () => {
     const video = document.querySelector('#movie_player video');
@@ -1859,10 +1857,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     video.dispatchEvent(new Event('canplay'));
     video.dispatchEvent(new Event('loadedmetadata'));
   });
-  await check(page, S, 'does not yank the playhead back after a later seek', () => ({
-    pass: window.__wblockResumeCurrent === 41,
-    detail: `afterSeek=${window.__wblockResumeCurrent}`,
-  }));
   await page.evaluate(() => {
     const container = document.querySelector('#movie_player .html5-video-container');
     const next = document.createElement('video');
@@ -1889,6 +1883,8 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     viewport: { width: 1280, height: 800 },
   });
   const S = 'tube-cleaner-live-seek';
+  // When to correct a seek and when the pill is red or gray are proven in
+  // tests/rules/live.test.mjs; these checks cover a real seek and rendering.
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
     const video = player.querySelector('video');
@@ -1903,10 +1899,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
   await check(page, S, 'pulls a seek past the live edge back behind it', () => ({
     pass: window.__wblockLiveTime > 110 && window.__wblockLiveTime <= 120,
     detail: `time=${window.__wblockLiveTime}`,
-  }));
-  await page.evaluate(() => { document.querySelector('#movie_player video').currentTime = 60; });
-  await check(page, S, 'leaves a seek into the buffered past alone', () => ({
-    pass: window.__wblockLiveTime === 60, detail: `time=${window.__wblockLiveTime}`,
   }));
   await page.evaluate(() => {
     const player = document.getElementById('movie_player');
@@ -1927,30 +1919,6 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     return { pass: window.__wblockLiveTime === 119 && button.title === 'Watching live',
       detail: `time=${window.__wblockLiveTime} title=${button.title}` };
   });
-  await page.evaluate(() => {
-    Object.defineProperty(document.querySelector('#movie_player video'), 'paused', { configurable: true, get: () => false });
-    window.__wblockLiveHead = false;
-  });
-  await page.waitForTimeout(2300);
-  await check(page, S, 'LIVE stays red through brief drift behind the head (#1009)', () => ({
-    pass: document.querySelector('.wblock-tc-live-button').title === 'Watching live',
-    detail: `title=${document.querySelector('.wblock-tc-live-button').title}`,
-  }));
-  await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('seeked')));
-  await check(page, S, 'LIVE turns gray at once after a seek behind the head (#1009)', () => ({
-    pass: document.querySelector('.wblock-tc-live-button').title === 'Jump to live',
-    detail: `title=${document.querySelector('.wblock-tc-live-button').title}`,
-  }));
-  await page.evaluate(() => { delete document.querySelector('#movie_player video').paused; });
-  await page.evaluate(() => { window.__wblockIsLive = false; document.querySelector('#movie_player video').currentTime = 500; });
-  await check(page, S, 'does not touch seeks once the stream is not live', () => ({
-    pass: window.__wblockLiveTime === 500, detail: `time=${window.__wblockLiveTime}`,
-  }));
-  await page.evaluate(() => document.querySelector('#movie_player video').dispatchEvent(new Event('seeked')));
-  await check(page, S, 'hides LIVE once the stream is not live', () => ({
-    pass: document.querySelector('.wblock-tc-live-button')?.style.display === 'none',
-    detail: `display=${document.querySelector('.wblock-tc-live-button')?.style.display}`,
-  }));
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
 }
@@ -2728,19 +2696,9 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     viewport: { width: 900, height: 700 },
   });
   const S = 'player-cleaner-caption-preference-off';
-
-  // On a slow machine WebKit shows the default track after Player Cleaner
-  // starts listening.
-  await autoSelectDefaultTrack(page, '#player-captions video');
-  await check(page, S, 'preserves the page default subtitle state without a saved preference', () => {
-    const video = document.querySelector('#player-captions video');
-    const element = video?.querySelector('track');
-    const saved = JSON.parse(localStorage.getItem('wblock.playerCleaner.preferences') || '{}');
-    return {
-      pass: element?.default === true && saved.subtitleLanguage === undefined,
-      detail: `default=${element?.default} saved=${JSON.stringify(saved)}`,
-    };
-  });
+  // Which caption changes count as the user's and how a saved preference
+  // applies are proven in tests/rules/captions.test.mjs; these checks cover
+  // the native menu, storage across a refresh, and a real user gesture.
 
   await page.evaluate(() => {
     const video = document.querySelector('#player-captions video');
@@ -2758,35 +2716,6 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
       pass: track?.mode === 'disabled' && saved.subtitleLanguage === '',
       detail: `mode=${track?.mode} saved=${JSON.stringify(saved)}`,
     };
-  });
-
-  await page.evaluate(() => {
-    const video = document.querySelector('#player-captions video');
-    video.dispatchEvent(new Event('loadedmetadata'));
-    video.dispatchEvent(new Event('durationchange'));
-  });
-  await check(page, S, 'does not re-enable captions when preference observers replay', () => {
-    const video = document.querySelector('#player-captions video');
-    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
-    return { pass: track?.mode === 'disabled', detail: `mode=${track?.mode}` };
-  });
-
-  await page.evaluate(() => {
-    const old = document.getElementById('player-captions');
-    const fresh = document.createElement('div');
-    fresh.className = 'video-js';
-    fresh.id = 'player-captions-remount';
-    fresh.innerHTML = '<video data-test-original="1" width="640" height="360" preload="metadata"><source src="https://example.com/media/captions.mp4" type="video/mp4"><track kind="captions" src="captions-default.vtt" srclang="en" label="English" default></video><div class="vjs-control-bar"></div>';
-    old.replaceWith(fresh);
-    // A click-mounted player: WebKit's automatic pick lands while the
-    // mount's user activation is still live.
-    setTimeout(() => { fresh.querySelector('track[default]').track.mode = 'showing'; }, 300);
-  });
-  await page.waitForTimeout(600);
-  await check(page, S, 'keeps captions off across a player remount with a default track', () => {
-    const video = document.querySelector('#player-captions-remount video[data-wblock-player-cleaner]');
-    const track = Array.from(video?.textTracks || []).find(t => t.kind === 'subtitles' || t.kind === 'captions');
-    return { pass: !!video && track?.mode === 'disabled', detail: `video=${!!video} mode=${track?.mode}` };
   });
 
   await page.reload({ waitUntil: 'domcontentloaded' });
@@ -4154,11 +4083,9 @@ for (const config of [
     });
     window.dispatchEvent(new Event('blur'));
   }, config.selector);
-  await page.waitForTimeout(200);
-  await check(page, config.key, 'does not enter PiP merely because the window loses focus', () => ({
-    pass: window.__wblockPiPMode === 'inline',
-    detail: `pip=${window.__wblockPiPMode}`,
-  }));
+  // Focus loss never entering PiP and manual PiP staying open are proven in
+  // tests/rules/auto-pip.test.mjs; these checks cover the real visibility
+  // getters and the page's own handlers.
   await page.evaluate(() => {
     window.__wblockNativeHidden = true;
     window.__wblockNativeVisibility = 'hidden';
@@ -4169,25 +4096,6 @@ for (const config of [
       window.__wblockPiPMode === 'picture-in-picture',
     detail: `pageHidden=${document.hidden} pageState=${document.visibilityState} pip=${window.__wblockPiPMode}`,
   }));
-  if (config.name === 'Tube Cleaner') {
-    await page.evaluate((selector) => {
-      const video = document.querySelector(selector);
-      // End the cleaner-owned PiP session, then model the user entering PiP
-      // manually from Safari's native controls.
-      video.webkitPresentationMode = 'inline';
-      video.dispatchEvent(new Event('webkitpresentationmodechanged'));
-      video.webkitPresentationMode = 'picture-in-picture';
-      video.dispatchEvent(new Event('webkitpresentationmodechanged'));
-      window.__wblockPiPMode = 'picture-in-picture';
-      window.__wblockNativeHidden = false;
-      window.__wblockNativeVisibility = 'visible';
-      document.dispatchEvent(new Event('visibilitychange'));
-    }, config.selector);
-    await check(page, config.key, 'does not close PiP entered manually by the user', () => ({
-      pass: window.__wblockPiPMode === 'picture-in-picture',
-      detail: `pip=${window.__wblockPiPMode}`,
-    }));
-  }
   if (config.name === 'Tube Cleaner') {
     await page.evaluate((selector) => {
       const video = document.querySelector(selector);

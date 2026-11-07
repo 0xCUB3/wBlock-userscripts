@@ -102,7 +102,6 @@
 
     var AUTO_PIP_KEY = 'wblock.tubeCleaner.autoPiP';
     var autoPiPEnabled = true;
-    var pipActive = false;
 
     function getAutoPiP() {
         try {
@@ -136,51 +135,53 @@
     function autoPiPAllowed() { return autoPiPEnabled && featureEnabled('pictureInPicture'); }
     function hidePiPAllowed() { return IS_IOS ? featureEnabled('backgroundPlayback') : autoPiPAllowed(); }
 
-    function enterPiP(video) {
-        if (!video) return;
-        if (isPiPActive(video)) return;
-        if (video.paused || video.ended) return;
+    // When to enter or leave PiP: a pure reducer shared with Player Cleaner,
+    // proven and held to tests/rules/auto-pip.rule.mjs. It only ever closes
+    // PiP it opened itself; PiP the user entered from Safari's controls stays
+    // under the user's control. Keep it self-contained; the test evaluates its
+    // source on its own.
+    // @gdp-begin autoPiPStep
+    function autoPiPStep(config, state, event) {
+        var op = event.op;
+        var wantsIn = op === 'hide' && event.hideAllowed || op === 'blur' && config.blurEnters && event.hideAllowed ||
+            op === 'scrollOut' && event.autoAllowed;
+        var wantsOut = op === 'show' && event.focused || op === 'focus' && !event.hidden && event.focused ||
+            op === 'scrollIn' && event.autoAllowed;
+        var entering = wantsIn && event.playing && !event.inPiP;
+        var leaving = wantsOut && state.ours && event.inPiP;
+        // PiP that ended on its own (closed, or a refused request) is no
+        // longer ours to close.
+        var forget = op === 'left' || wantsOut && state.ours && !event.inPiP;
+        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving };
+    }
+    // @gdp-end
+
+    // Returns false when the browser offers no way in.
+    function requestPiP(video, onRefused) {
         try {
             if (supportsWebkitPiP(video) && typeof video.webkitSetPresentationMode === 'function') {
-                // Track only PiP entered by Tube Cleaner. PiP entered manually
-                // from Safari's controls must remain under the user's control.
-                pipActive = true;
                 video.webkitSetPresentationMode('picture-in-picture');
                 log('PiP entered');
-            } else if (typeof video.requestPictureInPicture === 'function') {
-                pipActive = true;
-                var request = video.requestPictureInPicture();
-                if (request && request.catch) {
-                    request.catch(function (e) {
-                        pipActive = false;
-                        log('PiP request rejected', e);
-                    });
-                }
-                log('PiP entered via API');
+                return true;
             }
-        } catch (e) {
-            pipActive = false;
-            warn('enterPiP failed', e);
-        }
+            if (typeof video.requestPictureInPicture === 'function') {
+                var request = video.requestPictureInPicture();
+                if (request && request.catch) request.catch(function (e) { log('PiP request rejected', e); onRefused(); });
+                log('PiP entered via API');
+                return true;
+            }
+        } catch (e) { warn('enterPiP failed', e); }
+        return false;
     }
 
-    function exitPiP(video) {
-        if (!video || !pipActive) return;
-        if (!isPiPActive(video)) {
-            pipActive = false;
-            return;
-        }
+    function leavePiP(video) {
         try {
             if (supportsWebkitPiP(video) && typeof video.webkitSetPresentationMode === 'function') {
                 video.webkitSetPresentationMode('inline');
-                pipActive = false;
                 log('PiP exited');
             } else if (document.pictureInPictureElement && typeof document.exitPictureInPicture === 'function') {
                 var request = document.exitPictureInPicture();
-                if (request && request.catch) {
-                    request.catch(function (e) { log('PiP exit rejected', e); });
-                }
-                pipActive = false;
+                if (request && request.catch) request.catch(function (e) { log('PiP exit rejected', e); });
             }
         } catch (e) { warn('exitPiP failed', e); }
     }
@@ -190,66 +191,49 @@
     function setupAutoPiP(video, watchScroll) {
         if (!autoPiPAllowed() && !hidePiPAllowed()) return function () {};
         video._wblockAutoPiPHooked = true;
-        // Tab switch: enter PiP when tab hides, exit when visible.
-        // Note: enableBackgroundPlayback() overrides document.hidden to always
-        // return false, so we use _realHidden which tracks the true state.
-        function onVisibilityChange() {
-            if (_realHidden) {
-                if (hidePiPAllowed()) enterPiP(video);
-            } else if (document.hasFocus() && isPiPActive(video)) {
-                exitPiP(video);
-            }
+        // iPhone can suspend a video before its hidden event is delivered, so
+        // there focus loss enters while the page still owns the gesture.
+        // Elsewhere losing focus doesn't mean the video is obscured: another
+        // window may simply be active beside Safari.
+        var config = { blurEnters: IS_IPHONE };
+        var state = { ours: false, enter: false, exit: false };
+        function send(op) {
+            state = autoPiPStep(config, state, {
+                op: op, autoAllowed: autoPiPAllowed(), hideAllowed: hidePiPAllowed(),
+                playing: !video.paused && !video.ended, focused: document.hasFocus(), hidden: _realHidden,
+                inPiP: isPiPActive(video)
+            });
+            if (state.enter && !requestPiP(video, function () { send('left'); })) send('left');
+            if (state.exit) leavePiP(video);
         }
-
-        // Losing keyboard focus does not mean the video is obscured on macOS:
-        // another visible window may simply be active beside Safari. Enter PiP
-        // only for actual page hiding or when the video scrolls out of view.
-        function onFocus() {
-            if (_realHidden) return;
-            if (document.hasFocus() && isPiPActive(video)) {
-                exitPiP(video);
-            }
-        }
-        function onBlur() {
-            // iPhone can suspend a video before its hidden event is delivered.
-            // Enter while the page still owns an active playback gesture.
-            if (IS_IPHONE && hidePiPAllowed()) enterPiP(video);
-        }
+        // enableBackgroundPlayback() makes document.hidden always false, so
+        // the real visibility comes from observeRealVisibility.
+        function onVisibilityChange() { send(_realHidden ? 'hide' : 'show'); }
+        function onFocus() { send('focus'); }
+        function onBlur() { send('blur'); }
 
         var removeVisibilityObserver = observeRealVisibility(onVisibilityChange);
         window.addEventListener('focus', onFocus);
         window.addEventListener('blur', onBlur);
 
-        // Scroll out of view: use IntersectionObserver.
-        // On mobile YouTube the watch player is normally position:fixed (sticky).
-        // Tube Cleaner overrides it to position:absolute so it scrolls with the
-        // page. Without this guard the observer would enter PiP every time the
-        // user scrolls past the video to read comments.
+        // Scroll out of view. On mobile YouTube the watch player is normally
+        // position:fixed (sticky); Tube Cleaner makes it scroll with the page,
+        // and without this guard scrolling to the comments would enter PiP.
         var stickyContainer = document.getElementById('player-container-id');
         var skipScrollPiP = !!(stickyContainer && stickyContainer.classList.contains('sticky-player'));
         var scrollObserver = null;
         if (watchScroll && !skipScrollPiP) {
             scrollObserver = new IntersectionObserver(function (entries) {
-                if (!autoPiPAllowed()) return;
-                entries.forEach(function (entry) {
-                    if (!entry.isIntersecting) {
-                        enterPiP(video);
-                    } else if (entry.isIntersecting && isPiPActive(video)) {
-                        exitPiP(video);
-                    }
-                });
+                entries.forEach(function (entry) { send(entry.isIntersecting ? 'scrollIn' : 'scrollOut'); });
             }, { threshold: 0.1 });
             scrollObserver.observe(video);
         }
 
-        // Listen for presentation mode changes
         function onPresentationModeChange() {
-            if (video.webkitPresentationMode !== 'picture-in-picture') {
-                pipActive = false;
-            }
+            if (video.webkitPresentationMode !== 'picture-in-picture') send('left');
             log('presentation mode changed:', video.webkitPresentationMode);
         }
-        function onLeavePictureInPicture() { pipActive = false; }
+        function onLeavePictureInPicture() { send('left'); }
         video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
         video.addEventListener('leavepictureinpicture', onLeavePictureInPicture);
 
@@ -1391,14 +1375,44 @@
         } catch (e) { /* leave playback where it is */ }
     }
 
+    // The live decisions: pure functions proven and held to
+    // tests/rules/live.rule.mjs. Times are milliseconds. Keep them
+    // self-contained; the test evaluates their source on its own.
+    // @gdp-begin liveSeekCorrection
+    function liveSeekCorrection(event) {
+        var correct = !event.correcting && event.live && event.hasEdge && event.edge + 1000 < event.pos;
+        return { correct: correct, target: correct ? Math.max(0, event.edge - 500) : event.pos };
+    }
+    // @gdp-end
+
+    // Playback drifts past YouTube's live-head cutoff (about 9 seconds) and
+    // catches up on its own. Only a seek or pause turns the pill gray right
+    // away; drift has to outlast config.drift first.
+    // @gdp-begin liveIndicatorStep
+    function liveIndicatorStep(config, state, event) {
+        var startsBehind = event.live && !event.atHead && !state.behind;
+        var since = startsBehind ? event.t : state.since;
+        var holds = event.live && !event.atHead && !event.paused && !event.seeked && state.pressed &&
+            event.t < since + config.drift;
+        return {
+            visible: event.live,
+            behind: event.live ? !event.atHead : state.behind,
+            since: since,
+            pressed: event.live && !holds ? event.atHead : state.pressed
+        };
+    }
+    // @gdp-end
+
     function setupLiveSeekGuard(player, video) {
         var correcting = false;
         function onSeeking() {
-            if (correcting || !isYouTubeLive(player)) return;
             var edge = bufferedLiveEdge(video);
-            if (edge === null || !(video.currentTime > edge + 1)) return;
+            var decision = liveSeekCorrection({ live: !correcting && isYouTubeLive(player), correcting: correcting,
+                hasEdge: edge !== null, edge: edge === null ? 0 : Math.round(edge * 1000),
+                pos: Math.max(0, Math.round(video.currentTime * 1000)) });
+            if (!decision.correct) return;
             correcting = true;
-            try { video.currentTime = Math.max(0, edge - 0.5); }
+            try { video.currentTime = decision.target / 1000; }
             catch (e) { /* leave the stream where YouTube puts it */ }
             setTimeout(function () { correcting = false; }, 0);
         }
@@ -1443,6 +1457,35 @@
         } catch (e) { /* ignore */ }
     }
 
+    // Whether to seek to the saved position: a pure reducer, proven and held
+    // to tests/rules/resume.rule.mjs. YouTube reuses one <video> across SPA
+    // navigations, so a restore for a new video waits for a media event that
+    // confirms the switch, and a restore happens at most once per activation.
+    // Times are milliseconds. Keep it self-contained; the test evaluates its
+    // source on its own.
+    // @gdp-begin resumeRestoreStep
+    function resumeRestoreStep(config, state, event) {
+        var begin = event.op === 'begin';
+        var waiting = begin ? event.waitFor : event.op === 'metadata' ? false : state.waiting;
+        var fresh = begin || !state.restored && !state.cancelled;
+        var attempts = (event.op === 'check' || event.op === 'metadata') && fresh && !waiting && event.current && event.ready;
+        var farAway = Math.abs(event.now - config.saved) > 750;
+        var atEnd = event.duration <= config.saved + 500;
+        var seeks = attempts && config.hasSaved && !atEnd && farAway && !(config.carriedSame && event.now > 250);
+        var restores = attempts && !(seeks && event.fails);
+        return {
+            waiting: waiting,
+            restored: begin ? restores : state.restored || restores,
+            cancelled: begin ? false : state.cancelled || event.op === 'cancel',
+            seek: seeks,
+            target: seeks ? Math.min(config.saved, Math.max(0, event.duration - 100)) : 0,
+            // A saved position at the very end means the video was finished.
+            ended: attempts && config.hasSaved && atEnd,
+            done: restores
+        };
+    }
+    // @gdp-end
+
     function setupPlaybackPosition(player, video) {
         var videoId = youtubeVideoIdentity(player);
         if (!videoId) { playbackCarry = null; return; }
@@ -1452,30 +1495,32 @@
         var carried = playbackCarry && playbackCarry.identity === videoId ? playbackCarry : null;
         playbackCarry = null;
         var cancelled = false;
-        var restored = false;
         var stateApplied = !carried;
-        var waitingForMediaTransition = !!(previousIdentity && previousIdentity !== videoId);
         var writeTimer = null;
         var saved = readPlaybackPosition(videoId);
+        var resumeConfig = { hasSaved: saved !== null, saved: saved === null ? 0 : Math.max(0, Math.round(saved * 1000)),
+            carriedSame: !!(carried && previousIdentity === videoId) };
+        var resume = { waiting: false, restored: false, cancelled: false, seek: false, target: 0, ended: false, done: false };
 
-        function restore() {
-            if (cancelled || restored || waitingForMediaTransition || activeVideo !== video ||
-                youtubeVideoIdentity(player) !== videoId) return;
-            if (video.readyState < 1 || !isFinite(video.duration) || video.duration <= 0) return;
-            restored = true;
-            var positionApplied = true;
-            if (saved !== null) {
-                if (saved >= video.duration - 0.5) {
-                    writePlaybackPosition(videoId, 0, video.duration, true);
-                } else if (Math.abs(video.currentTime - saved) > 0.75 &&
-                    !(carried && previousIdentity === videoId && video.currentTime > 0.25)) {
-                    try { video.currentTime = Math.min(saved, Math.max(0, video.duration - 0.1)); }
-                    catch (e) { positionApplied = false; }
-                }
+        // The decision is resumeRestoreStep; this feeds it the element.
+        function sendResume(op) {
+            var ready = video.readyState >= 1 && isFinite(video.duration) && video.duration > 0;
+            var event = {
+                op: op, waitFor: !!(previousIdentity && previousIdentity !== videoId),
+                current: activeVideo === video && youtubeVideoIdentity(player) === videoId, ready: ready,
+                duration: ready ? Math.round(video.duration * 1000) : 0,
+                now: Math.max(0, Math.round((video.currentTime || 0) * 1000)), fails: false
+            };
+            var next = resumeRestoreStep(resumeConfig, resume, event);
+            if (next.seek) {
+                try { video.currentTime = next.target / 1000; }
+                catch (e) { event.fails = true; next = resumeRestoreStep(resumeConfig, resume, event); }
             }
-            if (!positionApplied) { restored = false; return; }
-            applyState();
+            resume = next;
+            if (next.ended) writePlaybackPosition(videoId, 0, video.duration, true);
+            if (next.done) applyState();
         }
+        function restore() { sendResume('check'); }
 
         function applyState() {
             if (cancelled || stateApplied || !carried || activeVideo !== video) return;
@@ -1504,11 +1549,8 @@
         function onTimeUpdate() { schedulePersist(); }
         function onPause() { schedulePersist(); }
         function onMetadata() {
-            if (waitingForMediaTransition) {
-                waitingForMediaTransition = false;
-                video._wblockConfirmedVideoId = videoId;
-            }
-            restore();
+            if (resume.waiting) video._wblockConfirmedVideoId = videoId;
+            sendResume('metadata');
         }
         function onPageHide() { persist(true); }
 
@@ -1520,11 +1562,13 @@
         video.addEventListener('pause', onPause);
         video.addEventListener('ended', onEnded);
         window.addEventListener('pagehide', onPageHide);
+        sendResume('begin');
         restore();
 
         registerCleanup(function () {
             if (writeTimer !== null) clearTimeout(writeTimer);
             cancelled = true;
+            sendResume('cancel');
             persist(true);
             video.removeEventListener('loadedmetadata', onMetadata);
             video.removeEventListener('durationchange', onMetadata);
@@ -1562,7 +1606,6 @@
             previousVideo._wblockMediaSessionHooked = false;
         }
         activeVideo = null;
-        pipActive = false;
     }
 
     // Grow a regular watch-page player toward a narrow video's natural aspect
@@ -4642,24 +4685,18 @@
         liveBtn.type = 'button';
         liveBtn.style.cssText = btnStyle;
         liveBtn.textContent = '\u25CF LIVE';
-        // Playback drifts past YouTube's live-head cutoff (about 9 seconds)
-        // and catches up on its own. Only a seek or pause turns the pill gray
-        // right away; drift has to outlast LIVE_DRIFT_MS first.
-        var LIVE_DRIFT_MS = 10000;
-        var liveBehindSince = 0;
+        var liveState = { visible: false, pressed: false, behind: false, since: 0 };
         function updateLiveBtn(event) {
             var live = isYouTubeLive(player);
-            liveBtn.style.display = live ? '' : 'none';
+            liveState = liveIndicatorStep({ drift: 10000 }, liveState, {
+                live: live, atHead: live && isAtYouTubeLiveHead(player, video), paused: !!video.paused,
+                seeked: !!(event && event.type === 'seeked'), t: Date.now()
+            });
+            liveBtn.style.display = liveState.visible ? '' : 'none';
             if (!live) return;
-            var atHead = isAtYouTubeLiveHead(player, video);
-            var now = Date.now();
-            if (atHead) liveBehindSince = 0;
-            else if (!liveBehindSince) liveBehindSince = now;
-            if (!atHead && !video.paused && !(event && event.type === 'seeked') &&
-                liveBtn.getAttribute('aria-pressed') === 'true' && now - liveBehindSince < LIVE_DRIFT_MS) return;
-            liveBtn.style.color = atHead ? '#ff4e45' : '#aaa';
-            liveBtn.title = atHead ? 'Watching live' : 'Jump to live';
-            liveBtn.setAttribute('aria-pressed', atHead ? 'true' : 'false');
+            liveBtn.style.color = liveState.pressed ? '#ff4e45' : '#aaa';
+            liveBtn.title = liveState.pressed ? 'Watching live' : 'Jump to live';
+            liveBtn.setAttribute('aria-pressed', liveState.pressed ? 'true' : 'false');
         }
         updateLiveBtn();
         liveBtn.addEventListener('click', function (e) {

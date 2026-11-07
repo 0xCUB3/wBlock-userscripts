@@ -8,7 +8,7 @@
 // mutated copy apart.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { proveSteps } from 'gdp-wired';
+import { proveDecision, proveSteps } from 'gdp-wired';
 
 export function shippedFunction(slug, name) {
   const source = readFileSync(new URL(`../../packages/${slug}/dist/${slug}.user.js`, import.meta.url), 'utf8');
@@ -40,4 +40,21 @@ export function proveAndHold({ title, rule, laws, stepLaws = [], naive, slug, fn
 
   const cross = rule.crossCheck(laws, stepLaws);
   assert.equal(cross.failure, undefined, cross.failure);
+}
+
+// The same for a pure function: each law proven (kernel checked), the
+// shipped function compared on aimed draws, and a mutated copy told apart.
+export function proveAndHoldFun({ title, fn: rule, laws, slug, name, draw, mutate, trials = 20000 }) {
+  for (const law of laws) {
+    const verdict = proveDecision(law);
+    assert.deepEqual({ proven: verdict.proven, checked: verdict.checked }, { proven: true, checked: true }, JSON.stringify(verdict).slice(0, 400));
+  }
+  console.log(`PASS: ${title}: ${laws.length} laws proven and kernel-checked`);
+  const shipped = shippedFunction(slug, name);
+  const held = rule.compare(values => shipped(values), { trials, draw });
+  assert.equal(held.failure, undefined, held.failure);
+  console.log(`PASS: ${title}: the shipped ${name} matches the rule on ${held.checked} fields`);
+  const mutant = rule.compare(values => mutate(shipped)(values), { trials, draw });
+  assert.ok(mutant.failure, `${title}: compare must tell a mutated ${name} apart`);
+  console.log(`PASS: ${title}: compare catches a mutated ${name}`);
 }
