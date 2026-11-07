@@ -2714,30 +2714,27 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     return { pass: !!(metadata && metadata.title), detail: metadata ? `title=${metadata.title}` : 'no metadata' };
   });
 
-  await check(page, S, 'removes custom control chrome', () => {
+  await check(page, S, 'hides custom control chrome', () => {
     const c = document.getElementById('player-replace');
-    const bar = c ? c.querySelector('.vjs-control-bar') : null;
-    const big = c ? c.querySelector('.vjs-big-play-button') : null;
-    return { pass: !bar && !big, detail: `bar=${!!bar}, bigPlay=${!!big}` };
+    const hidden = el => !el || getComputedStyle(el).display === 'none';
+    const bar = c && c.querySelector('.vjs-control-bar');
+    const big = c && c.querySelector('.vjs-big-play-button');
+    return { pass: hidden(bar) && hidden(big), detail: `bar=${bar && getComputedStyle(bar).display}, bigPlay=${big && getComputedStyle(big).display}` };
   });
 
-  await check(page, S, 'marks container done + drops video-js class', () => {
+  await check(page, S, 'marks container done', () => {
     const c = document.getElementById('player-replace');
-    const done = !!(c && c.hasAttribute('data-wblock-player-cleaner'));
-    const declassed = !!(c && !c.classList.contains('video-js'));
-    return { pass: done && declassed, detail: `done=${done}, declassed=${declassed}` };
+    return { pass: !!(c && c.hasAttribute('data-wblock-player-cleaner')) };
   });
 
-  await check(page, S, 'removes Video.js fluid padding without doubling the player box', () => {
+  await check(page, S, 'keeps the Video.js fluid layout without doubling the player box', () => {
     const c = document.getElementById('player-replace');
     const v = c && c.querySelector('video');
     if (!c || !v) return { pass: false, detail: 'missing player' };
     const cr = c.getBoundingClientRect();
     const vr = v.getBoundingClientRect();
-    const style = getComputedStyle(c);
-    const pass = !c.classList.contains('vjs-fluid') && parseFloat(style.paddingBottom) === 0 &&
-      Math.abs(cr.height - vr.height) < 2;
-    return { pass, detail: `class=${c.className} padding=${style.paddingBottom} heights=${cr.height}/${vr.height}` };
+    const pass = cr.height > 0 && Math.abs(cr.height - vr.height) < 2;
+    return { pass, detail: `class=${c.className} heights=${cr.height}/${vr.height}` };
   });
 
   await check(page, S, 'overrides document.hidden (background playback)', () => {
@@ -2888,14 +2885,14 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     ['p-src', 'https://example.com/a.mp4'],
     ['p-source-child', 'https://example.com/b.mp4'],
   ];
-  await check(page, S, 'cleans players with element-owned direct sources', (cases) => {
+  await check(page, S, 'enhances players with element-owned direct sources', (cases) => {
     const bad = cases.filter(([id, expected]) => {
       const v = document.querySelector(`#${id} video`);
       const source = v && (v.currentSrc || v.getAttribute('src') ||
         (v.querySelector('source') && v.querySelector('source').src));
-      return !(v && v._wblockCleaned && v.controls && source === expected);
+      return !(v && v._wblockEnhanced && v.controls && source === expected);
     });
-    return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 cleaned' };
+    return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 enhanced' };
   }, { arg: directCases });
 
   const initializingCases = ['p-dom', 'p-videojs', 'p-jwplayer'];
@@ -3281,6 +3278,12 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     return { pass: !!(controls && getComputedStyle(controls).display === 'none' && getComputedStyle(nav).display !== 'none'),
       detail: `controls=${controls && getComputedStyle(controls).display} nav=${getComputedStyle(nav).display}` };
   });
+  await check(page, S, 'leaves page copy and a site bottom sheet over players visible', () => {
+    const visible = id => { const el = document.getElementById(id); return !!el && getComputedStyle(el).display !== 'none'; };
+    const enhancedHero = !!document.querySelector('#hero-bg[data-wblock-player-cleaner]');
+    return { pass: enhancedHero && visible('hero-copy') && visible('bottom-sheet'),
+      detail: `hero=${enhancedHero} copy=${visible('hero-copy')} sheet=${visible('bottom-sheet')}` };
+  });
   await page.waitForTimeout(400);
   const before = await page.evaluate(() => { window.startChurn(); return window.__hitTests; });
   await page.waitForTimeout(1500);
@@ -3580,8 +3583,9 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
 }
 
 // ---- Scenario: Player Cleaner PBS iPhone preserved MSE ---------------------
-// iOS must leave the PBS blob pipeline and site controls in charge, while still
-// collapsing the oversized mobile shell and removing PBS-only leftover chrome.
+// iOS must leave the PBS blob pipeline, its controls, and its layout to the
+// site: hiding its chrome with no native controls to replace it left only
+// a tap target and a blank card.
 {
   const iphone = devices['iPhone 13'];
   const { browser, page, pageErrors } = await runScenario('Player Cleaner (PBS iPhone preserved MSE)', {
@@ -3604,17 +3608,6 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
       ' airplay=' + video.getAttribute('x-webkit-airplay') : 'no video' };
   });
 
-  await check(page, S, 'collapses the oversized PBS mobile shell to the video', () => {
-    const video = document.getElementById('pbs-video');
-    const shell = document.getElementById('player-videojs');
-    if (!video || !shell) return { pass: false, detail: 'missing video or shell' };
-    const vr = video.getBoundingClientRect();
-    const sr = shell.getBoundingClientRect();
-    const bottomGap = Math.abs(sr.bottom - vr.bottom);
-    const pass = bottomGap <= 1 && Math.abs(sr.height - vr.height) <= 1 && sr.height < 300;
-    return { pass, detail: `shell=${sr.width.toFixed(1)}x${sr.height.toFixed(1)} video=${vr.width.toFixed(1)}x${vr.height.toFixed(1)} gap=${bottomGap.toFixed(1)}` };
-  });
-
   await page.evaluate(() => {
     window.__pbsPaused = false;
     window.__pbsTapToggles = 0;
@@ -3625,16 +3618,11 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
     detail: `paused=${window.__pbsPaused} toggles=${window.__pbsTapToggles}`,
   }));
 
-  await check(page, S, 'hides initial and remounted PBS chrome on iOS', () => {
-    const selectors = ['.vjs-control-bar', '.vjs-pbs-top-icons', '#pbs-late-more'];
-    const visible = selectors.filter((selector) => {
-      const el = document.querySelector(selector);
-      if (!el) return true;
-      const style = getComputedStyle(el);
-      return style.display !== 'none' && style.visibility !== 'hidden';
-    });
-    return { pass: visible.length === 0, detail: visible.join(' ') || 'all hidden' };
-  }, { timeout: 2500, interval: 100 });
+  await check(page, S, 'leaves the PBS controls visible on iOS', () => {
+    const bar = document.querySelector('.vjs-control-bar');
+    const visible = !!(bar && getComputedStyle(bar).display !== 'none' && !bar.closest('[data-wblock-pc-hidden]'));
+    return { pass: visible, detail: bar ? getComputedStyle(bar).display : 'no bar' };
+  });
 
   await check(page, S, 'keeps protected PBS error and preroll UI visible', () => {
     const ids = ['pbs-error', 'pbs-preroll', 'pbs-protected-wrap'];
@@ -4125,11 +4113,12 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
 
   await check(page, S, 'nativeizes within one frame of insertion', beforeFirstFrame, { arg: '__wblockEarlyPlayerTiming' });
 
-  await check(page, S, 'shows native controls with custom chrome removed', () => {
+  await check(page, S, 'shows native controls with custom chrome hidden', () => {
     const c = document.getElementById('early-player');
     const v = c && c.querySelector('video');
     const custom = c && c.querySelector('.vjs-control-bar');
-    return { pass: !!(v && v.controls && !custom), detail: `controls=${!!(v && v.controls)} custom=${!!custom}` };
+    const hidden = !custom || getComputedStyle(custom).display === 'none';
+    return { pass: !!(v && v.controls && hidden), detail: `controls=${!!(v && v.controls)} customHidden=${hidden}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
@@ -5031,14 +5020,14 @@ for (const config of [
       return { pass: cleaned.length === 0, detail: cleaned.length ? `cleaned: ${cleaned.join(',')}` : '0/3 cleaned (pipeline preserved)' };
     }, { arg: blobCases });
 
-    await check(page, S, 'still cleans direct http-source players', (cleanCases) => {
+    await check(page, S, 'still enhances direct http-source players', (cleanCases) => {
       const bad = cleanCases.filter(([id, expected]) => {
         const v = document.getElementById(id).querySelector('video');
         const source = v && (v.currentSrc || v.getAttribute('src') ||
           (v.querySelector('source') && v.querySelector('source').src));
-        return !(v && v._wblockCleaned && v.controls === true && source === expected);
+        return !(v && v._wblockEnhanced && v.controls === true && source === expected);
       });
-      return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 cleaned' };
+      return { pass: bad.length === 0, detail: bad.length ? `bad: ${bad.map(([id]) => id).join(',')}` : '2/2 enhanced' };
     }, { arg: cleanCases });
 
     // iOS WebKit only loads ManagedMediaSource attachments while remote
@@ -5332,6 +5321,22 @@ for (const config of [
     readySignal: '#hero-video[data-wblock-player-cleaner]',
   });
   const S = 'player-cleaner-ios-videojs';
+
+  await check(page, S, 'nativeizes a direct-file player on iOS', () => {
+    const video = document.getElementById('late-video');
+    return { pass: !!(video && video.controls && video._wblockEnhanced) };
+  });
+  await page.evaluate(() => {
+    document.getElementById('late-video').src = 'blob:https://videojs.org/11111111-1111-1111-1111-111111111111';
+  });
+  await check(page, S, 'hands the player back when it switches to an MSE blob on iOS', () => {
+    const video = document.getElementById('late-video');
+    const controls = document.getElementById('late-controls');
+    const chromeVisible = getComputedStyle(controls).display !== 'none';
+    const pass = !!(video && !video.controls && !video._wblockEnhanced && chromeVisible &&
+      video.disableRemotePlayback && video.getAttribute('x-webkit-airplay') === 'deny');
+    return { pass, detail: `controls=${video.controls} enhanced=${!!video._wblockEnhanced} chrome=${chromeVisible} airplay=${video.getAttribute('x-webkit-airplay')}` };
+  });
 
   await check(page, S, 'promotes the Media Chrome HLS URL and nativeizes on iOS', () => {
     const video = document.getElementById('hero-video');

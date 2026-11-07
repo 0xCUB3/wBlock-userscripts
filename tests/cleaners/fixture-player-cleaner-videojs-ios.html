@@ -24,7 +24,8 @@
 
   <!-- Same blob pipeline, but no discoverable native URL. iOS must leave it alone. -->
   <div id="opaque-only" class="media-default-skin">
-    <video id="opaque-video" playsinline></video>
+    <!-- plyr.io-style: the MSE blob plays while an http <source> fallback sits in the markup. -->
+    <video id="opaque-video" playsinline><source src="https://example.com/fallback.mp4" type="video/mp4"></video>
     <div class="media-controls" id="opaque-controls">Play</div>
   </div>
 
@@ -58,6 +59,12 @@
   <div id="classic" class="video-js">
     <video id="classic-video" playsinline></video>
     <div class="vjs-control-bar" id="classic-controls">Play</div>
+  </div>
+
+  <!-- Starts on a direct file, then the player attaches an MSE blob. -->
+  <div id="late" class="media-default-skin">
+    <video id="late-video" playsinline src="https://example.com/late/start.mp4"></video>
+    <div class="media-controls" id="late-controls">Play</div>
   </div>
 
   <script>

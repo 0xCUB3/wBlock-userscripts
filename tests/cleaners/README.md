@@ -53,10 +53,10 @@ Player Cleaner scenarios:
   sources are also nativeized in place because that framework continues using
   its generated shell after startup; the shell remains intact and its chrome is
   hidden without lifecycle errors.
-- `fixture-player-cleaner-replace.html` — a clean http(s) source, exercising the
-  full cleanup path: the original `<video>` is retained (avoiding a second media
-  load and preserving buffered state, poster, and caption tracks), the custom
-  chrome is dropped, and controls survive an adversarial player.
+- `fixture-player-cleaner-replace.html` — a clean http(s) source in a fluid
+  video.js shell: the original `<video>` keeps its source, poster, and caption
+  track, the custom chrome is hidden in place without changing the player's
+  layout, and controls survive an adversarial player.
 - `fixture-player-cleaner-videojs-ios.html` — videojs.org-style Media Chrome
   player: React still owns the HLS URL while the element only has an MSE
   blob. On iOS the script promotes that URL and nativeizes; a blob with no
@@ -67,8 +67,9 @@ Player Cleaner scenarios:
 - `fixture-player-cleaner-discovery.html` — five players exposing the media URL
   through different mechanisms (video.src, `<source>` child, descendant
   `data-src`, a mocked video.js `currentSource()`, a mocked JW Player playlist
-  item); each must resolve to the right clean source. Negative cases ensure a
-  poster `data-src` and a DASH `.mpd` never replace a working blob/MSE stream.
+  item). Only an element-owned source enables a player; API and data-attribute
+  hints never replace a source, and a poster `data-src` or DASH `.mpd` never
+  replaces a working blob/MSE stream.
 - `fixture-player-cleaner-shadow.html` — reproduces Archive.org's `<play-av>`:
   JW Player and its `<video>` live inside a shadow root. Verifies document-start
   `attachShadow` capture, one-frame nativeization, in-place pipeline retention,
@@ -99,14 +100,12 @@ Player Cleaner scenarios:
   loop` video and an already-native video are left untouched.
 - `fixture-player-cleaner-relative.html` — players whose media URL is
   root-relative (a `<base>` makes it resolve to http(s)), as media APIs commonly
-  expose (`/download/<item>/movie.mp4`). Verifies discovery resolves
-  relative URLs from a JW playlist and from `data-src` to absolute before
-  swapping in a clean `<video>`.
+  expose (`/download/<item>/movie.mp4`). Verifies source-less players with only
+  such hints keep their setup DOM until the element gets a source.
 - `fixture-player-cleaner-upgrade.html` — a Plyr-style player that exposes only
   an opaque `blob:` src at first scan (the plyr.io "slow to switch to native"
-  case). Native controls must appear immediately; a clean source then becomes
-  available through a mock player API without a DOM mutation. `loadedmetadata`
-  must trigger event-driven cleanup while retaining the original media element.
+  case). Native controls must appear immediately, and a clean source later
+  exposed through a mock player API must not replace the blob pipeline.
 - `fixture-player-cleaner-early.html` — creates a known custom player from a
   `<head>` script and records insertion, nativeization, and DOMContentLoaded
   timestamps. Enforces pre-paint transformation within one frame, without a
@@ -200,13 +199,11 @@ node tests/cleaners/probe-live.mjs https://videojs.org/  # specific URL(s)
   startup and anti-flash CSS, native controls, chrome hiding, toolbar,
   background-playback override, auto-PiP hooks, iOS code paths, `playsinline`,
   controls surviving YouTube's attempts to
-  remove them. Player Cleaner: custom-player detection, source discovery across
-  video.js/JW/Plyr/data-attributes (including root-relative URLs resolved
-  against the document base and rejection of poster/DASH false positives), the
-  clean-source cleanup path (original media
-  element/state retention and chrome removal), the opaque-source enhance-in-place
-  path, event-driven upgrade once a clean source appears, pre-paint timing for
-  known wrappers, bounded per-video resources across SPA swaps, the bare-video
+  remove them. Player Cleaner: custom-player detection, element-owned source
+  rules (API and data-attribute hints never replace a source), in-place
+  enhancement that keeps the original media element and its state, generic
+  chrome hiding that leaves page content alone, iOS promotion of a site's
+  native HLS/MP4 URL, pre-paint timing for known wrappers, bounded per-video resources across SPA swaps, the bare-video
   fallback for unrecognized/custom players (and its ambient and
   already-native skip guards), sidecar subtitle/chapter recovery, persistent
   speed/volume/mute/subtitle/resume preferences, fallback system Now Playing
