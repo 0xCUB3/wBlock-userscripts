@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.68
+// @version      0.1.69
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2267,15 +2267,33 @@
         return youtubeVideoIdentity(findPlayer());
     }
 
+    // Runs on every timeupdate, so the answer is kept per video.
+    var sponsorBlockChannelCache = { videoId: null, channelId: null };
+
     function sponsorBlockChannelId() {
+        var player = findPlayer();
+        var videoId = youtubeUrlVideoId() || youtubePlayerVideoId(player);
+        if (videoId && sponsorBlockChannelCache.videoId === videoId) return sponsorBlockChannelCache.channelId;
+        var channelId = null;
         try {
-            var details = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails;
-            if (details && details.channelId) return details.channelId;
-            var link = document.querySelector('#owner a[href*="/channel/"], #owner a[href^="/@"], ' +
-                'ytd-channel-name a[href], ytm-slim-owner-renderer a[href]');
-            if (link) return new URL(link.href, location.href).pathname;
+            var response = player && typeof player.getPlayerResponse === 'function' ? player.getPlayerResponse() : null;
+            var details = response && response.videoDetails;
+            if (!(details && details.channelId)) {
+                // ytInitialPlayerResponse describes the first page load only;
+                // after in-app navigation it names the wrong channel.
+                var initial = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails;
+                if (initial && (!videoId || !initial.videoId || initial.videoId === videoId)) details = initial;
+            }
+            if (details && details.channelId) {
+                channelId = details.channelId;
+            } else {
+                var link = document.querySelector('#owner a[href*="/channel/"], #owner a[href^="/@"], ' +
+                    'ytd-channel-name a[href], ytm-slim-owner-renderer a[href]');
+                if (link) channelId = new URL(link.href, location.href).pathname;
+            }
         } catch (e) { /* ignore */ }
-        return null;
+        if (videoId && channelId) sponsorBlockChannelCache = { videoId: videoId, channelId: channelId };
+        return channelId;
     }
 
     function sponsorBlockChannelExcluded(settings) {
@@ -3037,7 +3055,14 @@
             }
         }
 
-        function refreshChapters() {
+        // Video whose retry window ran out without chapters. Live streams fire
+        // durationchange for every segment; each one used to restart a 10 s
+        // window of full data walks for a video that has no chapters. Data and
+        // navigation events still restart it (hydration can arrive silently).
+        var exhaustedFor = null;
+
+        function refreshChapters(event) {
+            if (event && event.type === 'durationchange' && exhaustedFor === currentChapterVideoId()) return;
             if (applyChapters(video)) {
                 stopRetry();
             } else if (timer === null) {
@@ -3046,7 +3071,12 @@
                 attempts = 0;
                 timer = setInterval(function () {
                     attempts++;
-                    if (applyChapters(video) || attempts >= 40) stopRetry();
+                    if (applyChapters(video)) {
+                        stopRetry();
+                    } else if (attempts >= 40) {
+                        exhaustedFor = currentChapterVideoId();
+                        stopRetry();
+                    }
                 }, 250);
             }
         }
@@ -4088,7 +4118,7 @@
                     var now = Date.now();
                     var elapsed = Math.min(1000, Math.max(0, now - previousCheck));
                     previousCheck = now;
-                    if (video.paused || video.seeking || document.hidden ||
+                    if (video.paused || video.seeking || _realHidden ||
                         player.classList.contains('ad-showing')) {
                         stalled = 0;
                         previousTime = video.currentTime;
