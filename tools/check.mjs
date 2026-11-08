@@ -2,12 +2,12 @@ import {readFile, readdir, stat} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
-import {cleanerDistribution} from './distribution.mjs';
+import {cleanerDistribution, darkReaderDistribution} from './distribution.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const raw = 'https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main';
 const specs = [
-  ['tube-cleaner', '0.1.70'], ['player-cleaner', '0.1.48'], ['dearrow', '0.1.5'], ['dark-reader', '4.9.128-wblock.12']
+  ['tube-cleaner', '0.1.70'], ['player-cleaner', '0.1.48'], ['dearrow', '0.1.5'], ['dark-reader', '4.9.128-wblock.13']
 ];
 const fail = message => { throw new Error(message); };
 const metadata = text => {
@@ -47,8 +47,9 @@ const a = metadata(adapter), b = metadata(dark), c = metadata(dm);
 if (a.fields.get('version') !== specs[specs.length - 1][1] || b.fields.get('version') !== specs[specs.length - 1][1] || c.fields.get('version') !== specs[specs.length - 1][1]) fail('dark-reader: version mismatch');
 const darkUrl = `${raw}/packages/dark-reader/dist/dark-reader`;
 for (const x of [a,b,c]) if (x.fields.get('downloadURL') !== `${darkUrl}.user.js` || x.fields.get('updateURL') !== `${darkUrl}.meta.js`) fail('dark-reader: URL mismatch');
-if (dark !== `${vendor.trimEnd()}\n${adapter}`) fail('dark-reader: generated userscript drift');
+if (dark !== darkReaderDistribution(vendor, adapter)) fail('dark-reader: generated userscript drift');
 if (dm !== `${b.block}\n`) fail('dark-reader: generated metadata drift');
+if (!dark.startsWith('// ==UserScript==')) fail('dark-reader: metadata is not at the top');
 execFileSync(process.execPath, ['--check', join(root, 'packages/dark-reader/dist/dark-reader.user.js')]);
 all.push(`${b.fields.get('namespace')}\u0000${b.fields.get('name')}`);
 if (new Set(all).size !== all.length) fail('duplicate identities');

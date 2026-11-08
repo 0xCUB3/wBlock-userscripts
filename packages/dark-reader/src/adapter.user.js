@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dark Reader
 // @namespace    com.skula.wblock
-// @version      4.9.128-wblock.12
+// @version      4.9.128-wblock.13
 // @description  Makes websites dark by restyling their colors, from the Dark Reader project. Some sites may look off, since it doesn't include Dark Reader's site fixes.
 // @author       Dark Reader Ltd. and wBlock
 // @match        http://*/*

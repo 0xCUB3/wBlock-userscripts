@@ -1,7 +1,7 @@
 import {readFile, writeFile, mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {cleanerDistribution} from './distribution.mjs';
+import {cleanerDistribution, darkReaderDistribution} from './distribution.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const packages = ['tube-cleaner', 'player-cleaner', 'dearrow'];
@@ -20,7 +20,6 @@ for (const slug of packages) {
 }
 const vendor = await readFile(join(root, 'packages/dark-reader/vendor/darkreader-api.min.js'), 'utf8');
 const adapter = await readFile(join(root, 'packages/dark-reader/src/adapter.user.js'), 'utf8');
-const bundled = `${vendor.trimEnd()}\n${adapter}`;
-await writeFile(join(root, 'packages/dark-reader/dist/dark-reader.user.js'), bundled);
+await writeFile(join(root, 'packages/dark-reader/dist/dark-reader.user.js'), darkReaderDistribution(vendor, adapter));
 await writeFile(join(root, 'packages/dark-reader/dist/dark-reader.meta.js'), metadata(adapter));
 console.log('Built cleaner and Dark Reader distributions.');
