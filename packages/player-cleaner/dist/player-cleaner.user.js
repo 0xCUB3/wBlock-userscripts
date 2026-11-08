@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.47
+// @version      0.1.48
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -22,6 +22,11 @@
 // @exclude      https://music.youtube.com/*
 // @exclude      https://www.youtube-nocookie.com/*
 // @exclude      https://youtube-nocookie.com/*
+// @exclude      /^https?:\/\/([^\/]*\.)?amazon\.[a-z.]+(:\d+)?\//
+// @exclude      /^https?:\/\/([^\/]*\.)?(x|twitter)\.com(:\d+)?\//
+// @exclude      https://drive.google.com/*
+// @exclude      https://docs.google.com/*
+// @exclude      https://youtube.googleapis.com/*
 // @run-at       document-start
 // @inject-into  page
 // @grant        none
@@ -50,13 +55,10 @@
         /iP(?:hone|ad|od)/i.test(navigator.userAgent || '') ||
         (/Mac/i.test(navigator.platform || '') && navigator.maxTouchPoints > 1);
 
-    // Sites whose players break under any media-element change. X hides
-    // posts with the video, Google Drive re-asserts YouTube controls over
-    // native ones, and on iOS Nat Geo's BAM player stays black.
-    if (/(^|\.)amazon\.[a-z.]+$/i.test(host) ||
-        /(^|\.)(x|twitter)\.com$/i.test(host) ||
-        /^(drive\.google|docs\.google|youtube\.googleapis)\.com$/i.test(host) ||
-        (IS_IOS && /(^|\.)nationalgeographic\.com$/i.test(host))) { return; }
+    // Sites whose players break under any media-element change are
+    // excluded in the metadata (Amazon, X, Google Drive). On iOS only,
+    // Nat Geo's BAM player stays black.
+    if (IS_IOS && /(^|\.)nationalgeographic\.com$/i.test(host)) { return; }
 
     var ATTR_DONE = 'data-wblock-player-cleaner';
     var HIDDEN_ATTR = 'data-wblock-pc-hidden';
@@ -1065,6 +1067,9 @@
             var x = vr.left + vr.width * p[0], y = vr.top + vr.height * p[1];
             if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) { return; }
             var stack = attempt(function () { return document.elementsFromPoint(x, y); }) || [];
+            // A point the video doesn't paint (cut off by a scroller) holds
+            // page UI next to it, such as a pager below search results.
+            if (!stack.some(function (hit) { return hit === video || !!hit.shadowRoot && contains(hit.shadowRoot, video); })) { return; }
             for (var i = 0; i < stack.length && stack[i] !== video; i++) {
                 var hit = stack[i];
                 // WebKit often reports a shadow host instead of the overlay

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord search results with a pagination dock (Player Cleaner)</title>
+<style>
+  /* Discord's search panel: an overflow-hidden column with the results
+     scroller and an in-flow pagination dock below it. */
+  html, body { margin: 0; height: 100%; background: #313338; color: #dbdee1; font: 16px/1.4 sans-serif; }
+  .app { display: flex; height: 100%; }
+  .chat { flex: 1; }
+  .searchResultsWrap { display: flex; flex: 0 0 auto; flex-direction: column; overflow: hidden; position: relative; width: 100%; max-width: 418px; height: 100%; }
+  .searchHeader { flex: 0 0 auto; height: 48px; }
+  .scroller { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 16px 16px 0; }
+  .result { margin-bottom: 16px; padding-left: 56px; }
+  .result p { margin: 0 0 8px; }
+  .wrapper { position: relative; width: 300px; height: 300px; background: #000; }
+  .wrapper video { display: block; width: 300px; height: 300px; }
+  .videoControls { position: absolute; left: 0; right: 0; bottom: 0; height: 32px; display: flex; gap: 8px; background: rgba(0,0,0,.6); }
+  .paginationDock { flex: 0 0 auto; z-index: 2; border-top: 1px solid #444; padding: 0 16px; background: #2b2d31; }
+  .pageControl { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+</style>
+</head>
+<body>
+  <div class="app">
+    <div class="chat"></div>
+    <section class="searchResultsWrap" aria-label="Search Results">
+      <div class="searchHeader">25 Results</div>
+      <div class="scroller" id="scroller">
+        <div class="result"><p>first result</p><p>some message text</p><p>more text</p></div>
+        <div class="result" id="result-video">
+          <p>clip.mp4</p>
+          <div class="wrapper" id="video-wrapper">
+            <video id="result-clip" preload="metadata"></video>
+            <div class="videoControls" id="video-controls">
+              <button type="button">Play</button>
+              <div role="slider" aria-label="seek" style="flex:1"></div>
+              <button type="button">Full</button>
+            </div>
+          </div>
+        </div>
+        <div class="result"><p>later result</p></div>
+      </div>
+      <div class="paginationDock" id="pagination-dock">
+        <div class="pageControl" id="page-control">
+          <button type="button">Back</button>
+          <span><button type="button">1</button> <button type="button">2</button> <button type="button">3</button></span>
+          <button type="button">Next</button>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+    // Scroll the clip so only its top 20px show above the pagination dock;
+    // the rest is clipped by the scroller and lies behind the dock.
+    var clip = document.getElementById('result-clip');
+    var dock = document.getElementById('pagination-dock');
+    var spacer = document.querySelector('.result');
+    var gap = dock.getBoundingClientRect().top - clip.getBoundingClientRect().top;
+    spacer.style.height = Math.max(0, spacer.offsetHeight + gap - 20) + 'px';
+    try { clip.src = 'blob:https://discord.com/00000000-0000-0000-0000-000000000000'; } catch (e) {}
+  </script>
+</body>
+</html>

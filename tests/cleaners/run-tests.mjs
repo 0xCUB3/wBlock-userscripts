@@ -48,6 +48,7 @@ const FIXTURE_PLAYER_ESPN_URL = pathToFileURL(join(__dirname, 'fixture-player-cl
 const FIXTURE_PLAYER_PBS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-pbs.html')).href;
 const FIXTURE_PLAYER_PBS_HOST = join(__dirname, 'fixture-player-cleaner-pbs-host.html');
 const FIXTURE_PLAYER_DISCORD_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-discord.html')).href;
+const FIXTURE_PLAYER_DISCORD_SEARCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-discord-search.html')).href;
 const FIXTURE_PLAYER_TWITCH_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-twitch.html')).href;
 const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-fox.html')).href;
 const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
@@ -5330,6 +5331,28 @@ for (const config of [
       pass: !!(visible(field) && visible(composer) && unmarked(field) && unmarked(composer)),
       detail: `field=${field && getComputedStyle(field).display} composer=${composer && getComputedStyle(composer).display}`,
     };
+  });
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// Search results scrolled under an in-flow pagination dock (Discord)
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (search result under pagination dock)', {
+    fixture: FIXTURE_PLAYER_DISCORD_SEARCH_URL,
+    scriptSource: playerUserscript,
+    readySignal: '#result-clip[data-wblock-player-cleaner]',
+    viewport: { width: 390, height: 844 },
+  });
+  const S = 'player-cleaner-discord-search';
+  await check(page, S, 'hides the clip\'s own control bar', () => {
+    const bar = document.getElementById('video-controls');
+    return { pass: getComputedStyle(bar).display === 'none', detail: `bar=${getComputedStyle(bar).display}` };
+  });
+  await page.waitForTimeout(500);
+  await check(page, S, 'keeps the pagination dock under a clipped video visible', () => {
+    const hidden = [...document.querySelectorAll('[data-wblock-pc-hidden]')].map(el => el.id);
+    return { pass: !document.querySelector('#pagination-dock [data-wblock-pc-hidden], #pagination-dock[data-wblock-pc-hidden]'), detail: `hidden=${hidden.join(',')}` };
   });
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
