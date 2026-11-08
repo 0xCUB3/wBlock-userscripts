@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.48
+// @version      0.1.49
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -756,6 +756,18 @@
             !types.some(function (t) { return t.indexOf('video/') === 0; });
     }
 
+    // A looping clip without controls that plays no sound is a GIF stand-in
+    // (chat and feed GIFs, a splash animation), not a player. Until metadata
+    // says whether it has sound, wait. With no track info, a short muted
+    // loop counts. Unmuting it (a site sound button) makes it a player.
+    function isDecorative(video) {
+        if (video._wblockChosen || video.controls || !video.loop) { return false; }
+        if (video.readyState < 1) { return true; }
+        var audible = video.audioTracks ? video.audioTracks.length > 0 : video.mozHasAudio;
+        if (typeof audible === 'boolean') { return !audible; }
+        return video.muted && video.duration <= 30;
+    }
+
     // ------------------------------------------------------------------
     // iOS: native playback of the site's own stream
     //
@@ -1326,7 +1338,7 @@
             requestPass(video);
             return;
         }
-        if (isPrimer(video) || isDeclaredAudio(video) || isLiveStream(video)) { return; }
+        if (isPrimer(video) || isDeclaredAudio(video) || isLiveStream(video) || isDecorative(video)) { return; }
         var container = containerOf(video);
         var known = !!closest(parentOf(video), PLAYER_SELECTOR);
         var handshake = !!closest(video, HANDSHAKE_SELECTOR);
@@ -1346,10 +1358,11 @@
         if (handshake && (!(stateOf(video).started || !video.paused && video.readyState >= 2) || adShowing(video))) { return; }
         if (!known) {
             // Bare videos: wait for parsing so autoplay/muted/layout signals
-            // are complete, and skip ambient, preview, and already-native ones.
+            // are complete, and skip ambient, preview, and already-native ones
+            // unless the user picked the video.
             if (document.readyState === 'loading' || video.controls) { return; }
-            if (video.autoplay && video.muted) { return; }
-            if (video.offsetWidth > 0 && video.offsetHeight > 0 && video.offsetWidth < 160 && video.offsetHeight < 120) { return; }
+            if (!video._wblockChosen && (video.autoplay && video.muted ||
+                video.offsetWidth > 0 && video.offsetHeight > 0 && video.offsetWidth < 160 && video.offsetHeight < 120)) { return; }
         }
         log('enhancing', container.className || container.tagName);
         enhance(container, video);
@@ -1463,6 +1476,7 @@
     // ------------------------------------------------------------------
 
     var observedRoots = [];
+    var MEDIA_EVENTS = ['loadstart', 'loadedmetadata', 'durationchange', 'playing', 'volumechange'];
 
     function scan(root) {
         hidePbsHostOverlays();
@@ -1473,6 +1487,10 @@
     function onMediaEvent(event) {
         var video = event.target;
         if (!video || video.tagName !== 'VIDEO') { return; }
+        if (event.type === 'volumechange') {
+            if (video.muted || video._wblockEnhanced) { return; }
+            video._wblockChosen = true;
+        }
         // Let a play gesture finish before taking over in the next task:
         // handshake players attach their media from inside it.
         if (event.type === 'playing' || closest(video, HANDSHAKE_SELECTOR)) {
@@ -1491,7 +1509,7 @@
         var observer = new MutationObserver(handleMutations);
         observer.observe(root, { childList: true, subtree: true, attributes: true,
             attributeFilter: ['class', 'src', 'data-src', 'data-video-src', 'data-file', 'data-video', 'data-source', 'data-url'] });
-        ['loadstart', 'loadedmetadata', 'durationchange', 'playing'].forEach(function (type) { root.addEventListener(type, onMediaEvent, true); });
+        MEDIA_EVENTS.forEach(function (type) { root.addEventListener(type, onMediaEvent, true); });
         root._wblockObserver = observer;
         attempt(function () {
             [].forEach.call(root.querySelectorAll('*'), function (el) { if (el.shadowRoot) { observeRoot(el.shadowRoot); } });
@@ -1504,7 +1522,7 @@
         if (index === -1 || root === document) { return; }
         observedRoots.splice(index, 1);
         root._wblockObserver.disconnect();
-        ['loadstart', 'loadedmetadata', 'durationchange', 'playing'].forEach(function (type) { root.removeEventListener(type, onMediaEvent, true); });
+        MEDIA_EVENTS.forEach(function (type) { root.removeEventListener(type, onMediaEvent, true); });
     }
 
     function collectVideos(node, out) {
