@@ -4,7 +4,7 @@ import {fileURLToPath} from 'node:url';
 import {cleanerDistribution} from './distribution.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const packages = ['tube-cleaner', 'player-cleaner', 'dearrow', 'amp-redirect'];
+const packages = ['tube-cleaner', 'player-cleaner', 'dearrow'];
 const deArrowSource = await readFile(join(root, 'packages/dearrow/src/dearrow.user.js'), 'utf8');
 const metadata = source => {
   const match = source.match(/\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==/);

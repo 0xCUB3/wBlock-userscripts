@@ -8,7 +8,6 @@ Standalone userscripts maintained for wBlock. The raw `main` branch is the updat
 - `packages/player-cleaner`: native controls for custom web players.
 - `packages/dearrow` replaces YouTube titles and thumbnails with community suggestions.
 - `packages/dark-reader`: Dark Reader's MIT-licensed API engine for wBlock, without the full site-fix database.
-- `packages/amp-redirect`: opens a publisher's regular page instead of its AMP version.
 
 Each package has editable `src/`, tracked generated `dist/`, and stable install metadata. Install from:
 
@@ -16,7 +15,6 @@ Each package has editable `src/`, tracked generated `dist/`, and stable install 
 - `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/player-cleaner/dist/player-cleaner.user.js`
 - `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/dark-reader/dist/dark-reader.user.js`
 - `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/dearrow/dist/dearrow.user.js`
-- `https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main/packages/amp-redirect/dist/amp-redirect.user.js`
 
 DeArrow runs independently of Tube Cleaner and uses community data from https://dearrow.ajay.app/ under CC BY-NC-SA 4.0.
 

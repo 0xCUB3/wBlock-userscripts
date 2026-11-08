@@ -7,7 +7,7 @@ import {cleanerDistribution} from './distribution.mjs';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const raw = 'https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main';
 const specs = [
-  ['tube-cleaner', '0.1.70'], ['player-cleaner', '0.1.47'], ['dearrow', '0.1.5'], ['amp-redirect', '0.1.0'], ['dark-reader', '4.9.128-wblock.12']
+  ['tube-cleaner', '0.1.70'], ['player-cleaner', '0.1.47'], ['dearrow', '0.1.5'], ['dark-reader', '4.9.128-wblock.12']
 ];
 const fail = message => { throw new Error(message); };
 const metadata = text => {
@@ -52,7 +52,7 @@ if (dm !== `${b.block}\n`) fail('dark-reader: generated metadata drift');
 execFileSync(process.execPath, ['--check', join(root, 'packages/dark-reader/dist/dark-reader.user.js')]);
 all.push(`${b.fields.get('namespace')}\u0000${b.fields.get('name')}`);
 if (new Set(all).size !== all.length) fail('duplicate identities');
-for (const file of ['packages/tube-cleaner/dist/tube-cleaner.user.js','packages/player-cleaner/dist/player-cleaner.user.js','packages/dark-reader/dist/dark-reader.user.js','packages/dearrow/dist/dearrow.user.js','packages/amp-redirect/dist/amp-redirect.user.js']) {
+for (const file of ['packages/tube-cleaner/dist/tube-cleaner.user.js','packages/player-cleaner/dist/player-cleaner.user.js','packages/dark-reader/dist/dark-reader.user.js','packages/dearrow/dist/dearrow.user.js']) {
   const built = await readFile(join(root, file), 'utf8');
   if (/fetch\(['"]https?:|import\(['"]https?:/.test(built)) fail(`${file}: executable network match`);
 }
