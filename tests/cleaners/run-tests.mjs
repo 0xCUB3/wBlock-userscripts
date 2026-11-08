@@ -4712,7 +4712,9 @@ for (const config of [
 
 // ---- Scenario: Tube Cleaner YouTube embed iframe injection -----------------
 // Embed frames are a poster + YouTube play button. Nativeizing them hides
-// that chrome and leaves a blank box, so Tube Cleaner must stay out.
+// that chrome and leaves a blank box, so Tube Cleaner must stay out. The
+// header keeps it out: wBlock serves each frame only the scripts whose
+// @match and @exclude patterns allow that frame's URL, as the mock does here.
 {
   console.log('\n=== Scenario: Tube Cleaner YouTube embed iframe ===');
   const S = 'tube-cleaner-embed-iframe';
@@ -4720,7 +4722,8 @@ for (const config of [
   const page = await browser.newPage();
   const pageErrors = [];
   page.on('pageerror', e => pageErrors.push(e.message));
-  const descriptors = [{
+  const header = name => [...userscript.matchAll(new RegExp(`^// @${name}\\s+(\\S+)`, 'gm'))].map(match => match[1]);
+  const descriptor = {
     id: '00000000-0000-0000-0000-000000000012',
     name: 'Tube Cleaner',
     namespace: 'com.skula.wblock.tests',
@@ -4729,25 +4732,25 @@ for (const config of [
     runAt: 'document-start',
     noframes: false,
     injectInto: 'page',
-    matches: [
-      'https://www.youtube.com/*',
-      'https://youtube.com/*',
-      'https://m.youtube.com/*',
-      'https://music.youtube.com/*',
-      'https://www.youtube-nocookie.com/*',
-      'https://youtube-nocookie.com/*',
-    ],
+    matches: header('match'),
     content: userscript,
     resourceNames: [],
     storageSnapshot: {},
-  }];
+  };
+  const excludes = header('exclude');
   const mockBridge = `
     globalThis.browser = {
       runtime: {
         onMessage: { addListener: function () {} },
         sendMessage: function (message) {
           if (message && message.action === 'getUserScripts') {
-            return Promise.resolve({ userScripts: ${JSON.stringify(descriptors)} });
+            var glob = function (pattern) {
+              return new RegExp('^' + pattern.replace(/[.+?^\${}()|[\\]\\\\]/g, '\\\\$&').replace(/\\*/g, '.*') + '$');
+            };
+            var url = message.url;
+            var allowed = ${JSON.stringify(descriptor.matches)}.some(function (p) { return glob(p).test(url); }) &&
+              !${JSON.stringify(excludes)}.some(function (p) { return glob(p).test(url); });
+            return Promise.resolve({ userScripts: allowed ? [${JSON.stringify(descriptor)}] : [] });
           }
           return Promise.resolve({});
         }
@@ -4755,42 +4758,50 @@ for (const config of [
     };
   `;
   await page.addInitScript(mockBridge + '\n' + injectorSource);
-  await page.route('https://www.youtube-nocookie.com/embed/**', async route => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: readFileSync(join(__dirname, 'fixture.html'), 'utf8'),
-    });
-  });
+  const embeds = ['https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ', 'https://www.youtube.com/embed/aqz-KE-bpKQ'];
+  for (const embed of embeds) {
+    await page.route(embed, route => route.fulfill({
+      status: 200, contentType: 'text/html', body: readFileSync(join(__dirname, 'fixture.html'), 'utf8'),
+    }));
+  }
+  // A watch page served the same way must still get the script.
+  await page.route('https://www.youtube.com/watch?v=aqz-KE-bpKQ', route => route.fulfill({
+    status: 200, contentType: 'text/html', body: readFileSync(join(__dirname, 'fixture.html'), 'utf8'),
+  }));
   await page.route('https://example.com/host-with-embed', async route => {
     await route.fulfill({
       status: 200,
       contentType: 'text/html',
-      body: '<!doctype html><html><body><iframe src="https://www.youtube-nocookie.com/embed/aqz-KE-bpKQ"></iframe></body></html>',
+      body: '<!doctype html><html><body>' + embeds.map(src => `<iframe src="${src}"></iframe>`).join('') +
+        '<iframe src="https://www.youtube.com/watch?v=aqz-KE-bpKQ"></iframe></body></html>',
     });
   });
   await page.goto('https://example.com/host-with-embed', { waitUntil: 'load' });
-  const embedFrame = page.frames().find(frame => /youtube-nocookie\.com/.test(frame.url()));
-  if (!embedFrame) {
-    record(S, 'found the YouTube embed frame', false, 'no youtube-nocookie frame');
-  } else {
+  const frameState = frame => frame.evaluate(() => {
+    const player = document.getElementById('movie_player');
+    const play = player && player.querySelector('.ytp-large-play-button, .ytp-chrome-bottom');
+    const playStyle = play ? getComputedStyle(play) : null;
+    return {
+      player: !!player,
+      native: !!(player && player.classList.contains('wblock-tc-native')),
+      toolbar: !!document.querySelector('.wblock-tc-toolbar'),
+      style: !!document.getElementById('wblock-tc-style'),
+      chromeVisible: !!(play && playStyle && playStyle.display !== 'none'),
+    };
+  });
+  for (const embed of embeds) {
+    const embedFrame = page.frames().find(frame => frame.url() === embed);
+    if (!embedFrame) { record(S, `found the ${embed} frame`, false, 'no frame'); continue; }
     await embedFrame.waitForTimeout(400);
-    const leftAlone = await embedFrame.evaluate(() => {
-      const player = document.getElementById('movie_player');
-      const play = player && player.querySelector('.ytp-large-play-button, .ytp-chrome-bottom');
-      const playStyle = play ? getComputedStyle(play) : null;
-      return {
-        player: !!player,
-        native: !!(player && player.classList.contains('wblock-tc-native')),
-        toolbar: !!document.querySelector('.wblock-tc-toolbar'),
-        style: !!document.getElementById('wblock-tc-style'),
-        chromeVisible: !!(play && playStyle && playStyle.display !== 'none'),
-      };
-    });
-    record(S, 'leaves a youtube-nocookie embed iframe to YouTube',
+    const leftAlone = await frameState(embedFrame);
+    record(S, `leaves ${new URL(embed).hostname} embed iframes to YouTube`,
       !!(leftAlone.player && !leftAlone.native && !leftAlone.toolbar && !leftAlone.style && leftAlone.chromeVisible),
       `player=${leftAlone.player} native=${leftAlone.native} toolbar=${leftAlone.toolbar} style=${leftAlone.style} chrome=${leftAlone.chromeVisible}`);
   }
+  const watchFrame = page.frames().find(frame => /\/watch\?v=/.test(frame.url()));
+  const watched = watchFrame && await frameState(watchFrame);
+  record(S, 'still nativeizes a watch page under the same header', !!(watched && watched.native && watched.style),
+    JSON.stringify(watched));
   const unexpected = pageErrors.filter(message => !/getOption is not a function/.test(message));
   record(S, 'no unexpected page errors', unexpected.length === 0, unexpected.join(' | '));
   await browser.close();

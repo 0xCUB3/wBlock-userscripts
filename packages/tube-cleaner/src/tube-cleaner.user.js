@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.70
+// @version      0.1.71
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -18,8 +18,18 @@
 // @match        https://youtube.com/*
 // @match        https://m.youtube.com/*
 // @match        https://music.youtube.com/*
-// @match        https://www.youtube-nocookie.com/*
-// @match        https://youtube-nocookie.com/*
+// @exclude      https://www.youtube.com/embed*
+// @exclude      https://www.youtube.com/live_embed*
+// @exclude      https://www.youtube.com/shorts/*/embed*
+// @exclude      https://youtube.com/embed*
+// @exclude      https://youtube.com/live_embed*
+// @exclude      https://youtube.com/shorts/*/embed*
+// @exclude      https://m.youtube.com/embed*
+// @exclude      https://m.youtube.com/live_embed*
+// @exclude      https://m.youtube.com/shorts/*/embed*
+// @exclude      https://music.youtube.com/embed*
+// @exclude      https://music.youtube.com/live_embed*
+// @exclude      https://music.youtube.com/shorts/*/embed*
 // @run-at       document-start
 // @inject-into  page
 // @grant        GM_getValue
@@ -33,15 +43,8 @@
 
     // Embed iframes are a poster and YouTube's own play button in a box the
     // host page sizes. Nativeizing them hides that chrome and leaves a blank
-    // frame, so leave youtube.com/embed and youtube-nocookie alone.
-    try {
-        var embedHost = location.hostname || '';
-        var embedPath = location.pathname || '';
-        var isNocookie = /(^|\.)youtube-nocookie\.com$/i.test(embedHost);
-        var isEmbedPath = /^\/(?:embed|live_embed)(?:\/|$)/.test(embedPath) ||
-            /^\/shorts\/[^/]+\/embed(?:\/|$)/.test(embedPath);
-        if (isNocookie || isEmbedPath) { return; }
-    } catch (e) { /* continue on a regular watch page */ }
+    // frame, so the metadata keeps the script out of embeds and
+    // youtube-nocookie entirely; embeds never download or parse it.
 
     // ------------------------------------------------------------------
     // Tube Cleaner v4.5.0
@@ -2447,8 +2450,11 @@
     var sponsorBlockChannelCache = { videoId: null, channelId: null };
 
     function sponsorBlockChannelId() {
+        // The URL id answers most calls from the cache without a player scan.
+        var urlId = youtubeUrlVideoId();
+        if (urlId && sponsorBlockChannelCache.videoId === urlId) return sponsorBlockChannelCache.channelId;
         var player = findPlayer();
-        var videoId = youtubeUrlVideoId() || youtubePlayerVideoId(player);
+        var videoId = urlId || youtubePlayerVideoId(player);
         if (videoId && sponsorBlockChannelCache.videoId === videoId) return sponsorBlockChannelCache.channelId;
         var channelId = null;
         try {
@@ -3005,6 +3011,7 @@
 
     // Initial globals keep the first watch page across SPA navigation. Prefer
     // the live watch response and reject payloads owned by a different video.
+    // Returns { data, chapters } so callers reuse the walk done here.
     function chapterDataSource() {
         var sources = [];
         try {
@@ -3031,11 +3038,12 @@
             var source = sources[i].data;
             var owner = chapterSourceVideoId(source);
             if (owner && owner !== videoId) continue;
-            if (extractChapters(source)) {
-                if (owner === videoId) return source;
-                if (!unverified) unverified = source;
+            var chapters = extractChapters(source);
+            if (chapters) {
+                if (owner === videoId) return { data: source, chapters: chapters };
+                if (!unverified) unverified = { data: source, chapters: chapters };
             } else if (sources[i].live && owner === videoId) {
-                emptyLive = source;
+                emptyLive = { data: source, chapters: null };
             }
         }
         // An identified, chapterless watch page must not inherit an unowned
@@ -3046,8 +3054,10 @@
     // Extract YouTube's chapters for the current video as a sorted list of
     // { start, title }. Returns null when the page exposes no chapters.
     function extractChapters(data) {
-        data = data || chapterDataSource();
-        if (!data) return null;
+        if (!data) {
+            var found = chapterDataSource();
+            return found && found.chapters;
+        }
         var renderers = [];
         try { collectChapterRenderers(data, renderers); } catch (e) { return null; }
         if (!renderers.length) return null;
@@ -3228,8 +3238,9 @@
     function applyChapters(video) {
         if (!video) return false;
         var videoId = currentChapterVideoId();
-        var source = chapterDataSource();
-        var chapters = extractChapters(source);
+        var found = chapterDataSource();
+        var source = found && found.data;
+        var chapters = found && found.chapters;
         var fingerprint = chapters ? JSON.stringify(chapters) : '[]';
         var sourceIsCurrentVideo = chapterSourceVideoId(source) === videoId;
         var sourceIsFromPreviousVideo = !sourceIsCurrentVideo && !!(chapters && chapters.length &&
@@ -5698,18 +5709,77 @@
     // ------------------------------------------------------------------
 
     var documentPlayerObserver = null;
+    var PLAYER_SELECTOR = 'video, #movie_player, .html5-video-player, ytd-player, #player-container';
 
-    function nodeMayContainPlayer(node) {
+    // Connected elements matching PLAYER_SELECTOR, kept current from an
+    // observer's records: a node only becomes one by being inserted (it or
+    // an ancestor shows up in addedNodes) or by a class or id change on
+    // itself, and both are observed. ancestors() then answers "does this
+    // element hold a player" with a set lookup. YouTube fires thousands of
+    // records a second during playback and scrolling, and a subtree query
+    // per record cost more than everything else Tube Cleaner does there.
+    function createPlayerTracker() {
+        var nodes = null;
+        function update(records) {
+            var next = new Set();
+            var first = !nodes;
+            var scanned = new Set();
+            function add(node) {
+                if (!node.isConnected || !node.matches) return;
+                if (node.matches(PLAYER_SELECTOR)) next.add(node);
+                if (!node.firstElementChild || scanned.has(node)) return;
+                scanned.add(node);
+                var inside = node.querySelectorAll(PLAYER_SELECTOR);
+                for (var k = 0; k < inside.length; k++) next.add(inside[k]);
+            }
+            try {
+                if (first) {
+                    var all = document.querySelectorAll(PLAYER_SELECTOR);
+                    for (var a = 0; a < all.length; a++) next.add(all[a]);
+                } else {
+                    nodes.forEach(function (node) {
+                        if (node.isConnected && node.matches(PLAYER_SELECTOR)) next.add(node);
+                    });
+                    for (var i = 0; i < records.length; i++) {
+                        var record = records[i];
+                        // A class or id change can only make the target itself match.
+                        if (record.type === 'attributes') {
+                            if (record.target.isConnected && record.target.matches(PLAYER_SELECTOR)) next.add(record.target);
+                        } else for (var j = 0; j < record.addedNodes.length; j++) add(record.addedNodes[j]);
+                    }
+                }
+                nodes = next;
+            } catch (e) {
+                // Rescan next time; until then nodeMayContainPlayer queries.
+                nodes = null;
+            }
+        }
+        function ancestors() {
+            if (!nodes) return null;
+            var set = new Set();
+            nodes.forEach(function (start) {
+                for (var node = start; node && !set.has(node); node = node.parentNode) set.add(node);
+            });
+            return set;
+        }
+        return { update: update, ancestors: ancestors };
+    }
+
+    // Without `ancestors` (or for a node outside the document) this is the
+    // subtree query; with it, the same answer from the set.
+    function nodeMayContainPlayer(node, ancestors) {
         if (!node || node.nodeType !== 1) { return false; }
         try {
+            if (ancestors && node.isConnected && !ancestors.has(node)) { return false; }
             // YouTube may move the active player into a preview; release it then.
             if (isHoverPreviewPlayer(node)) { return !!(activeVideo && node.contains(activeVideo)); }
+            if (ancestors && node.isConnected) { return true; }
             if (node.tagName === 'VIDEO' || node.id === 'movie_player' ||
                 node.id === 'player-container' ||
                 node.matches('.html5-video-player, ytd-player')) {
                 return true;
             }
-            return !!node.querySelector('video, #movie_player, .html5-video-player, ytd-player, #player-container');
+            return !!node.querySelector(PLAYER_SELECTOR);
         } catch (e) { return false; }
     }
 
@@ -5723,27 +5793,37 @@
         return withoutTubeClasses(record.oldValue) === withoutTubeClasses(record.target.className);
     }
 
+    // Whether a batch of document mutations can change what transformPlayer
+    // finds: a player node added, or a class or id change on, or anything
+    // added under, an element that is or holds one. Changes that only touch
+    // our own classes do not count.
+    function playerMutationsRelevant(records, ancestors) {
+        for (var i = 0; i < records.length; i++) {
+            var record = records[i];
+            var target = record.target;
+            // Cheapest test first: the toolbar flips our classes on the player
+            // all the time, and the preview check walks ancestors.
+            var outside = ancestors && target.isConnected && !ancestors.has(target);
+            if (!outside && !classMutationOnlyChangesOurClasses(record) &&
+                nodeMayContainPlayer(target, ancestors)) return true;
+            for (var j = 0; j < record.addedNodes.length; j++) {
+                if (nodeMayContainPlayer(record.addedNodes[j], ancestors)) return true;
+            }
+        }
+        return false;
+    }
+
     function observeDocumentForPlayer() {
         if (documentPlayerObserver || typeof MutationObserver === 'undefined') { return; }
+        var playerTracker = createPlayerTracker();
         documentPlayerObserver = new MutationObserver(function (records) {
             // The first parser mutation creates <html>; install anti-flash CSS
             // then even when the userscript itself ran before documentElement.
             injectStyles();
-            var relevant = false;
-            for (var i = 0; i < records.length && !relevant; i++) {
-                var record = records[i];
-                if (classMutationOnlyChangesOurClasses(record)) continue;
-                if (nodeMayContainPlayer(record.target)) { relevant = true; break; }
-                for (var j = 0; j < record.addedNodes.length; j++) {
-                    if (nodeMayContainPlayer(record.addedNodes[j])) {
-                        relevant = true;
-                        break;
-                    }
-                }
-            }
             // MutationObserver runs before rendering. Transform now—no polling
             // interval or debounce—so YouTube chrome never reaches next paint.
-            if (relevant) { transformPlayer(); }
+            playerTracker.update(records);
+            if (playerMutationsRelevant(records, playerTracker.ancestors())) { transformPlayer(); }
         });
         try {
             documentPlayerObserver.observe(document, {
@@ -5804,6 +5884,9 @@
             },
             QUALITY_LABELS: QUALITY_LABELS,
             getPlayer: findPlayer,
+            nodeMayContainPlayer: nodeMayContainPlayer,
+            createPlayerTracker: createPlayerTracker,
+            playerMutationsRelevant: playerMutationsRelevant,
             getChapters: extractChapters,
             applyChapters: function () { applyChapters(activeVideo); },
             inspectPlayer: function () {

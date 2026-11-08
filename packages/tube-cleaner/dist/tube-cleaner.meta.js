@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.70
+// @version      0.1.71
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -18,8 +18,18 @@
 // @match        https://youtube.com/*
 // @match        https://m.youtube.com/*
 // @match        https://music.youtube.com/*
-// @match        https://www.youtube-nocookie.com/*
-// @match        https://youtube-nocookie.com/*
+// @exclude      https://www.youtube.com/embed*
+// @exclude      https://www.youtube.com/live_embed*
+// @exclude      https://www.youtube.com/shorts/*/embed*
+// @exclude      https://youtube.com/embed*
+// @exclude      https://youtube.com/live_embed*
+// @exclude      https://youtube.com/shorts/*/embed*
+// @exclude      https://m.youtube.com/embed*
+// @exclude      https://m.youtube.com/live_embed*
+// @exclude      https://m.youtube.com/shorts/*/embed*
+// @exclude      https://music.youtube.com/embed*
+// @exclude      https://music.youtube.com/live_embed*
+// @exclude      https://music.youtube.com/shorts/*/embed*
 // @run-at       document-start
 // @inject-into  page
 // @grant        GM_getValue
