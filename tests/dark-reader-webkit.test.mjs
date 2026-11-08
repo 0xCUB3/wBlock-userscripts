@@ -54,11 +54,13 @@ const scenarios = [
     follows: true, pureBlack: true, colorScheme: 'light', page: 'light',
     expectEnabled: false, expectAntiflash: false
   },
-  {
-    name: 'OLED preserves native-dark detection',
-    follows: false, pureBlack: true, colorScheme: 'dark', page: 'dark-root',
-    expectEnabled: false, expectAntiflash: true
-  },
+  // OLED is for black backgrounds, so it doesn't step aside for a site's
+  // own gray dark theme (wBlock#1094).
+  ...[false, true].map(follows => ({
+    name: `${follows ? 'system' : 'forced'} OLED blacks out a natively dark page`,
+    follows, pureBlack: true, colorScheme: 'dark', page: 'dark-root',
+    expectEnabled: true, expectAntiflash: true, expectedBackground: 'rgb(0, 0, 0)'
+  })),
   {
     name: 'forced dark keeps theming a light page',
     follows: false, colorScheme: 'light', page: 'light',

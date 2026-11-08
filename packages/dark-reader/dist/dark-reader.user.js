@@ -6,7 +6,7 @@ const __wblockDarkReaderChrome={runtime:{}};/**
 // ==UserScript==
 // @name         Dark Reader
 // @namespace    com.skula.wblock
-// @version      4.9.128-wblock.10
+// @version      4.9.128-wblock.11
 // @description  Dark Reader's MIT-licensed API engine for wBlock (beta; without the full site-fix database).
 // @author       Dark Reader Ltd. and wBlock
 // @match        http://*/*
@@ -306,6 +306,9 @@ const __wblockDarkReaderChrome={runtime:{}};/**
         injectAntiflash();
     }
     detectBuiltInDarkTheme(function () {
+        // OLED is for black backgrounds, so it keeps darkening a site's own
+        // gray dark theme; detection still clears the anti-flash guard.
+        if (pureBlack) return;
         if (followsSystemAppearance && typeof api.auto === 'function') api.auto(false);
         if (typeof api.disable === 'function') api.disable();
     });
