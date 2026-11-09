@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.71
+// @version      0.1.72
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -762,7 +762,16 @@
     // (#12). With Background Playback on, a pause around the page becoming
     // really hidden is resumed a bounded number of times within a short
     // window. A pause the user asked for (Now Playing, a media key, an
-    // in-page pause before switching away) is never undone. iOS keeps playback alive through PiP instead.
+    // in-page pause before switching away) is never undone. iOS keeps
+    // playback alive through PiP instead.
+    //
+    // Safari can also send its pause as a Media Session Pause command while
+    // the page still looks visible, ~140 ms before it hides (macOS 27,
+    // reported by Albatrosicks). So a Pause command only counts as the
+    // user's once the page is hidden; while visible it is treated like an
+    // in-page pause, kept unless the page hides within the lead. Pressing
+    // Pause and switching away within that lead can resume playback; that is
+    // the price of catching Safari's own pause. Stop always counts.
     //
     // backgroundRecoveryStep is the whole decision: a pure reducer, proven
     // and held to tests/rules/background-recovery.rule.mjs. Keep it
@@ -772,6 +781,7 @@
     // @gdp-begin backgroundRecoveryStep
     function backgroundRecoveryStep(config, state, event) {
         var op = event.op, t = event.t;
+        var asked = op === 'stop' || (op === 'pauseCommand' && state.hidden);
         var inWindow = t <= state.hiddenAt + config.window;
         // Safari can deliver its pause just before the visibility change.
         var pausedJustBefore = state.pauseSeen && t <= state.pausedAt + config.lead;
@@ -781,17 +791,17 @@
         var retries = op === 'hide' ? 0 : resumeNow ? state.retries + 1 : state.retries;
         var pending = state.pending;
         if (op === 'hide') pending = arming && !state.playing;
-        else if (op === 'show' || op === 'play' || op === 'intent' || op === 'reset') pending = false;
+        else if (op === 'show' || op === 'play' || asked || op === 'reset') pending = false;
         else if (op === 'pause') pending = state.armed && lostWhileHidden;
         else if (op === 'tick') pending = resumeNow && retries < config.budget && inWindow;
         return {
             hidden: op === 'hide' ? true : op === 'show' ? false : state.hidden,
             playing: op === 'play' ? true : op === 'pause' || op === 'reset' ? false : state.playing,
-            armed: op === 'hide' ? arming : op === 'show' || op === 'intent' || op === 'reset' ? false : state.armed,
+            armed: op === 'hide' ? arming : op === 'show' || asked || op === 'reset' ? false : state.armed,
             pending: pending,
-            intent: op === 'hide' ? false : op === 'intent' ? true : state.intent,
+            intent: op === 'hide' || op === 'play' ? false : asked ? true : state.intent,
             // Only a pause the user didn't ask for can be Safari's.
-            pauseSeen: op === 'pause' ? !state.intent : op === 'intent' || op === 'reset' ? false : state.pauseSeen,
+            pauseSeen: op === 'pause' ? !state.intent : asked || op === 'reset' ? false : state.pauseSeen,
             retries: retries,
             hiddenAt: op === 'hide' ? t : state.hiddenAt,
             pausedAt: op === 'pause' && !state.intent ? t : state.pausedAt,
@@ -804,9 +814,9 @@
     var pauseIntentListeners = [];
 
     // Every Media Session pause or stop the page registers (Tube Cleaner's
-    // own, YouTube's, YouTube Music's) first tells recovery that the user
-    // asked for this pause, so Now Playing and media keys keep working even
-    // right after a Tab Group switch.
+    // own, YouTube's, YouTube Music's) first tells recovery about the
+    // command, so Now Playing and media keys keep working even right after a
+    // Tab Group switch.
     (function patchMediaSessionIntent() {
         try {
             var proto = typeof MediaSession !== 'undefined' && MediaSession.prototype;
@@ -816,7 +826,7 @@
                 if ((action === 'pause' || action === 'stop') && typeof handler === 'function') {
                     var inner = handler;
                     handler = function () {
-                        pauseIntentListeners.slice().forEach(function (listener) { try { listener(); } catch (e) { /* ignore */ } });
+                        pauseIntentListeners.slice().forEach(function (listener) { try { listener(action); } catch (e) { /* ignore */ } });
                         return inner.apply(this, arguments);
                     };
                 }
@@ -856,7 +866,7 @@
         // intentional.
         function onPause() { send('pause'); }
         function onReset() { send('reset'); }
-        function onIntent() { send('intent'); }
+        function onIntent(action) { send(action === 'stop' ? 'stop' : 'pauseCommand'); }
         var stopVisibility = observeRealVisibility(function () { send(_realHidden ? 'hide' : 'show'); });
         video.addEventListener('playing', onPlay);
         video.addEventListener('pause', onPause);
