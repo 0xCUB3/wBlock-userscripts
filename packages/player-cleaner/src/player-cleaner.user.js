@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.49
+// @version      0.1.50
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -207,8 +207,10 @@
     updateVisibility();
     document.addEventListener('visibilitychange', updateVisibility);
 
+    function backgroundPlaybackOn() { return features.backgroundPlayback && loadPreferences().backgroundPlayback !== false; }
+
     function enableBackgroundPlayback() {
-        if (!features.backgroundPlayback || loadPreferences().backgroundPlayback === false) { return; }
+        if (!backgroundPlaybackOn()) { return; }
         attempt(function () { Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return false; } }); });
         attempt(function () { Object.defineProperty(document, 'visibilityState', { configurable: true, get: function () { return 'visible'; } }); });
     }
@@ -275,7 +277,7 @@
         var state = { ours: false, enter: false, exit: false };
         function send(op) {
             state = autoPiPStep({ blurEnters: false }, state, {
-                op: op, autoAllowed: autoPiPEnabled, hideAllowed: autoPiPEnabled,
+                op: op, autoAllowed: autoPiPEnabled, hideAllowed: autoPiPEnabled && !resumesInBackground(),
                 playing: !video.paused && !video.ended, focused: document.hasFocus(), hidden: reallyHidden, inPiP: inPiP(video)
             });
             if (state.enter && !requestPiP(video, function () { send('left'); })) { send('left'); }
@@ -298,6 +300,105 @@
         }, { threshold: 0.1 });
         observer.observe(video);
         onCleanup(video, function () { observer.disconnect(); });
+    }
+
+    // ------------------------------------------------------------------
+    // Background resume (iOS)
+    //
+    // When Safari goes to the background, WebKit pauses a playing video with
+    // sound once, just before the page reports hidden. With Background
+    // Playback on, an enhanced video is played again at the hide (or on a
+    // pause that lands just after it) and keeps playing in the background.
+    // A pause the site made, one right after a tap or key, a Media Session
+    // pause or stop, the end of the video and a pause long after hiding (the
+    // lock screen's) are never undone, and nothing resumes while visible.
+    // Hide-time auto PiP only takes over once WebKit refuses that play().
+    //
+    // backgroundResumeStep is the reducer Tube Cleaner ships too, proven and
+    // held to tests/rules/background-resume.rule.mjs.
+    // ------------------------------------------------------------------
+
+    // @gdp-begin backgroundResumeStep
+    function backgroundResumeStep(config, state, event) {
+        var op = event.op, t = event.t;
+        var system = op === 'pause' && config.enabled && !event.ended && !(t < state.pageAt + config.callGrace) &&
+            !(t < state.inputAt + config.inputGrace) && !state.intent;
+        var holding = system && !state.hidden;
+        var clears = op === 'hide' || op === 'show' || op === 'play' || op === 'command' || op === 'input' || op === 'pageCall';
+        return {
+            hidden: op === 'hide' ? true : op === 'show' ? false : state.hidden,
+            hiddenAt: op === 'hide' ? t : state.hiddenAt,
+            pageAt: op === 'pageCall' ? t : state.pageAt,
+            inputAt: op === 'input' ? t : state.inputAt,
+            intent: op === 'command' ? true : op === 'play' ? false : state.intent,
+            held: op === 'pause' ? holding : clears ? false : state.held,
+            heldAt: holding ? t : state.heldAt,
+            resume: system && state.hidden && t <= state.hiddenAt + config.window ||
+                op === 'hide' && config.enabled && state.held && !state.intent && t <= state.heldAt + config.lead
+        };
+    }
+    // @gdp-end
+
+    var BACKGROUND_RESUME = { enabled: true, callGrace: 100, inputGrace: 1000, lead: 1200, window: 1000 };
+    var pagePauseListeners = [];
+    var pauseIntentListeners = [];
+    var backgroundResumeRefused = false;
+
+    function resumesInBackground() { return IS_IOS && backgroundPlaybackOn() && !backgroundResumeRefused; }
+
+    function notify(listeners, value) {
+        listeners.slice().forEach(function (listener) { attempt(function () { listener(value); }); });
+    }
+
+    // The site's pause() calls and every Media Session pause or stop handler
+    // (the site's and Player Cleaner's own) are reported before they run.
+    if (IS_IOS) {
+        attempt(function () {
+            var nativePause = HTMLMediaElement.prototype.pause;
+            if (nativePause._wblockPlayerCleaner) { return; }
+            var pause = function () { notify(pagePauseListeners, this); return nativePause.apply(this, arguments); };
+            pause._wblockPlayerCleaner = true;
+            HTMLMediaElement.prototype.pause = pause;
+        });
+        attempt(function () {
+            var setActionHandler = MediaSession.prototype.setActionHandler;
+            if (setActionHandler._wblockPlayerCleaner) { return; }
+            var patched = function (action, handler) {
+                var inner = handler;
+                if ((action === 'pause' || action === 'stop') && typeof inner === 'function') {
+                    handler = function () { notify(pauseIntentListeners, action); return inner.apply(this, arguments); };
+                }
+                return setActionHandler.call(this, action, handler);
+            };
+            patched._wblockPlayerCleaner = true;
+            MediaSession.prototype.setActionHandler = patched;
+        });
+    }
+
+    function setupBackgroundResume(video) {
+        if (!IS_IOS || !backgroundPlaybackOn() || !once(video, 'backgroundResume')) { return; }
+        var state = { hidden: reallyHidden, hiddenAt: 0, pageAt: 0, inputAt: 0, intent: false, held: false, heldAt: 0, resume: false };
+        function send(op) {
+            state = backgroundResumeStep(BACKGROUND_RESUME, state, { op: op, t: Math.round(performance.now()), ended: video.ended });
+            if (!state.resume) { return; }
+            log('resuming playback WebKit paused for the background');
+            var request = attempt(function () { return video.play(); });
+            if (request && request.catch) { request.catch(function () { log('background resume refused'); backgroundResumeRefused = true; }); }
+        }
+        function subscribe(list, fn) {
+            list.push(fn);
+            onCleanup(video, function () { var index = list.indexOf(fn); if (index !== -1) { list.splice(index, 1); } });
+        }
+        // Not pointerdown or touchstart: the home swipe can begin on the page
+        // and ends in touchcancel, while a tap on the controls ends in these.
+        ['pointerup', 'touchend', 'click', 'keydown'].forEach(function (name) {
+            listen(video, window, name, function () { send('input'); }, true);
+        });
+        listen(video, document, 'visibilitychange', function () { send(reallyHidden ? 'hide' : 'show'); });
+        listen(video, video, 'pause', function () { send('pause'); });
+        listen(video, video, 'playing', function () { send('play'); });
+        subscribe(pagePauseListeners, function (element) { if (element === video) { send('pageCall'); } });
+        subscribe(pauseIntentListeners, function () { send('command'); });
     }
 
     // ------------------------------------------------------------------
@@ -1298,6 +1399,7 @@
         enableNativeControls(video);
         setupTracks(container, video);
         setupAutoPiP(video);
+        setupBackgroundResume(video);
         setupPreferences(video);
         setupMediaSession(container, video);
         setupShortcuts(container, video);

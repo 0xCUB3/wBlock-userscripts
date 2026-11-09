@@ -1,4 +1,4 @@
-// Tube Cleaner's iOS background playback as a gdp-wired rule.
+// The cleaners' iOS background playback as a gdp-wired rule.
 //
 // When Safari on iOS goes to the background, WebKit pauses a playing video
 // with sound once, 0.4 to 0.9 s before the page reports hidden. Calling
@@ -7,8 +7,8 @@
 // the user touched the page, a Media Session pause or stop, the end of the
 // video and a pause long after hiding (the lock screen's) are never undone,
 // and nothing resumes while the page is visible: WebKit also pauses when
-// headphones disconnect. The shipped reducer, backgroundResumeStep in
-// packages/tube-cleaner/src/tube-cleaner.user.js, is held to this rule.
+// headphones disconnect. The shipped reducers, backgroundResumeStep in
+// Tube Cleaner and Player Cleaner, are held to this rule.
 import { bool, nat, no, oneOf, rule, when, yes } from 'gdp-wired';
 
 // pageCall: the page called pause(); input: a tap, click or key in the page;
