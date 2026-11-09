@@ -2106,9 +2106,10 @@ HTMLElement.prototype.setOption = function (module, option, value) {
     video.dispatchEvent(new Event('play'));
     window.dispatchEvent(new Event('blur'));
   });
-  await check(page, 'iPhone', 'enters PiP before iPhone can suspend a backgrounded video', () => {
+  // Background resume keeps it playing instead (tests/cleaners/background-resume.test.mjs).
+  await check(page, 'iPhone', 'leaves a backgrounded video out of PiP while background resume works', () => {
     const video = document.querySelector('#movie_player video');
-    return { pass: video.webkitPresentationMode === 'picture-in-picture', detail: `pip=${video.webkitPresentationMode}` };
+    return { pass: video.webkitPresentationMode === 'inline', detail: `pip=${video.webkitPresentationMode}` };
   });
   await check(page, 'iPhone', 'ignores YouTube exiting fullscreen on a video in PiP', () => {
     const video = document.querySelector('#movie_player video');
@@ -4373,10 +4374,10 @@ for (const config of [
     window.__wblockNativeHidden = false; window.__wblockNativeVisibility = 'visible';
     document.dispatchEvent(new Event('visibilitychange'));
   });
-  await check(page, S, 'uses WebKit PiP to keep video-mode playback alive in the background', () => {
+  await check(page, S, 'keeps video mode out of PiP in the background while background resume works', () => {
     const modes = window.__ytm.calls.filter(c => c[0] === 'presentation').map(c => c[1]);
-    return { pass: window.__ytmPiPOnBlur === 'picture-in-picture' &&
-      JSON.stringify(modes) === JSON.stringify(['picture-in-picture', 'inline']) && document.visibilityState === 'visible' && !document.querySelector('.wblock-tc-native, .wblock-tc-toolbar'),
+    return { pass: window.__ytmPiPOnBlur === 'inline' &&
+      modes.length === 0 && document.visibilityState === 'visible' && !document.querySelector('.wblock-tc-native, .wblock-tc-toolbar'),
       detail: `modes=${modes.join(',')} visibility=${document.visibilityState}` };
   });
 

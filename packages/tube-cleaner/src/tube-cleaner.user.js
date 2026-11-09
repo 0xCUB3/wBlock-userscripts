@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.72
+// @version      0.1.73
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -133,11 +133,15 @@
             (video && video.webkitPresentationMode === 'picture-in-picture');
     }
 
-    // iOS suspends a playing video track when the page hides unless the video
-    // is in PiP, so on iOS hide-time PiP is what background playback is and
-    // follows that switch. Elsewhere it is plain automatic PiP.
+    // iOS pauses a playing video when the page hides unless the video is in
+    // PiP. Background resume (setupBackgroundResume) plays it again instead;
+    // only once WebKit refuses that play() does hide-time PiP take over as
+    // background playback. Elsewhere it is plain automatic PiP.
+    var backgroundResumeRefused = false;
     function autoPiPAllowed() { return autoPiPEnabled && featureEnabled('pictureInPicture'); }
-    function hidePiPAllowed() { return IS_IOS ? featureEnabled('backgroundPlayback') : autoPiPAllowed(); }
+    function hidePiPAllowed() {
+        return IS_IOS ? featureEnabled('backgroundPlayback') && backgroundResumeRefused : autoPiPAllowed();
+    }
 
     // When to enter or leave PiP: a pure reducer shared with Player Cleaner,
     // proven and held to tests/rules/auto-pip.rule.mjs. It only ever closes
@@ -193,7 +197,9 @@
     // Returns the cleanup. YouTube Music passes watchScroll false: its player
     // bar keeps playing while the page scrolls.
     function setupAutoPiP(video, watchScroll) {
-        if (!autoPiPAllowed() && !hidePiPAllowed()) return function () {};
+        // On iOS hide-time PiP can be needed later, once a background resume
+        // is refused.
+        if (!autoPiPAllowed() && !(IS_IOS && featureEnabled('backgroundPlayback'))) return function () {};
         video._wblockAutoPiPHooked = true;
         // iPhone can suspend a video before its hidden event is delivered, so
         // there focus loss enters while the page still owns the gesture.
@@ -886,6 +892,103 @@
         };
     }
 
+    // ------------------------------------------------------------------
+    // Background resume (iOS)
+    //
+    // When Safari goes to the background, WebKit pauses a playing video with
+    // sound once, 0.4 to 0.9 s before the page reports hidden (PiP and
+    // AirPlay are the only exemptions). play() at the hide, or on a pause
+    // that lands just after it, resumes it without a gesture and it keeps
+    // playing in the background. A pause the page made (YouTube's button,
+    // its Media Session handlers), one right after a tap or key in the page,
+    // a Media Session pause or stop, the end of the video and a pause long
+    // after hiding (the lock screen's) are never undone. Nothing resumes
+    // while the page is visible: WebKit also pauses when headphones
+    // disconnect, and that pause is not followed by a hide.
+    //
+    // backgroundResumeStep is the whole decision: a pure reducer, proven
+    // and held to tests/rules/background-resume.rule.mjs. Keep it
+    // self-contained; the test evaluates its source on its own.
+    // ------------------------------------------------------------------
+
+    // @gdp-begin backgroundResumeStep
+    function backgroundResumeStep(config, state, event) {
+        var op = event.op, t = event.t;
+        var system = op === 'pause' && config.enabled && !event.ended && !(t < state.pageAt + config.callGrace) &&
+            !(t < state.inputAt + config.inputGrace) && !state.intent;
+        var holding = system && !state.hidden;
+        var clears = op === 'hide' || op === 'show' || op === 'play' || op === 'command' || op === 'input' || op === 'pageCall';
+        return {
+            hidden: op === 'hide' ? true : op === 'show' ? false : state.hidden,
+            hiddenAt: op === 'hide' ? t : state.hiddenAt,
+            pageAt: op === 'pageCall' ? t : state.pageAt,
+            inputAt: op === 'input' ? t : state.inputAt,
+            intent: op === 'command' ? true : op === 'play' ? false : state.intent,
+            held: op === 'pause' ? holding : clears ? false : state.held,
+            heldAt: holding ? t : state.heldAt,
+            resume: system && state.hidden && t <= state.hiddenAt + config.window ||
+                op === 'hide' && config.enabled && state.held && !state.intent && t <= state.heldAt + config.lead
+        };
+    }
+    // @gdp-end
+
+    var BACKGROUND_RESUME = { enabled: true, callGrace: 100, inputGrace: 1000, lead: 1200, window: 1000 };
+    var pagePauseListeners = [];
+
+    // A pause() call from the page (YouTube's own button and Media Session
+    // handlers end here) is never undone.
+    if (IS_IOS) {
+        (function patchPagePause() {
+            try {
+                var nativePause = HTMLMediaElement.prototype.pause;
+                if (!nativePause || nativePause._wblockTubeCleaner) return;
+                var patched = function () {
+                    pagePauseListeners.slice().forEach(function (listener) { try { listener(this); } catch (e) { /* ignore */ } }, this);
+                    return nativePause.apply(this, arguments);
+                };
+                patched._wblockTubeCleaner = true;
+                HTMLMediaElement.prototype.pause = patched;
+            } catch (e) { /* every pause then looks like WebKit's; the input grace still guards taps */ }
+        })();
+    }
+
+    function setupBackgroundResume(video) {
+        if (!IS_IOS || !featureEnabled('backgroundPlayback')) return function () {};
+        var state = { hidden: _realHidden, hiddenAt: 0, pageAt: 0, inputAt: 0, intent: false, held: false, heldAt: 0, resume: false };
+        function now() { return Math.round(performance.now()); }
+        function send(op, ended) {
+            state = backgroundResumeStep(BACKGROUND_RESUME, state, { op: op, t: now(), ended: !!ended });
+            if (!state.resume) return;
+            log('resuming playback WebKit paused for the background');
+            var request = video.play();
+            if (request && request.catch) request.catch(function (e) { log('background resume refused', e); backgroundResumeRefused = true; });
+        }
+        // Not pointerdown or touchstart: the home swipe can begin on the page
+        // and ends in touchcancel, while a tap on the controls ends in these.
+        var inputs = ['pointerup', 'touchend', 'click', 'keydown'];
+        function onInput() { send('input'); }
+        function onPagePause(element) { if (element === video) send('pageCall'); }
+        function onPause() { send('pause', video.ended); }
+        function onPlay() { send('play'); }
+        function onIntent() { send('command'); }
+        var stopVisibility = observeRealVisibility(function () { send(_realHidden ? 'hide' : 'show'); });
+        inputs.forEach(function (name) { window.addEventListener(name, onInput, true); });
+        video.addEventListener('pause', onPause);
+        video.addEventListener('playing', onPlay);
+        pagePauseListeners.push(onPagePause);
+        pauseIntentListeners.push(onIntent);
+        return function () {
+            stopVisibility();
+            inputs.forEach(function (name) { window.removeEventListener(name, onInput, true); });
+            video.removeEventListener('pause', onPause);
+            video.removeEventListener('playing', onPlay);
+            [pagePauseListeners, pauseIntentListeners].forEach(function (list) {
+                var index = list.indexOf(list === pagePauseListeners ? onPagePause : onIntent);
+                if (index !== -1) list.splice(index, 1);
+            });
+        };
+    }
+
     function enableBackgroundPlayback() {
         try {
             Object.defineProperty(document, 'hidden', {
@@ -1169,6 +1272,7 @@
         // Audio-only song mode has no PiP support and continues through the
         // shadowed visibility state; music videos need PiP under lock.
         var removeAutoPiP = setupAutoPiP(video, false);
+        var removeResume = setupBackgroundResume(video);
         var removeRecovery = setupBackgroundRecovery(video, function () {
             if (musicAdShowing(player)) return;
             if (typeof player.playVideo === 'function') player.playVideo();
@@ -1202,6 +1306,7 @@
             document.removeEventListener('touchcancel', onSeekCancel, true);
             removeAutoPiP();
             removeRecovery();
+            removeResume();
             if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
             else video.removeAttribute('title');
             if (seekResumeTimer !== null) clearTimeout(seekResumeTimer);
@@ -1881,6 +1986,7 @@
         // Safari's native controls; playback remains owned by the video element.
         if (featureEnabled('toolbar')) buildToolbar(player, video);
         registerCleanup(setupAutoPiP(video, true));
+        registerCleanup(setupBackgroundResume(video));
         registerCleanup(setupBackgroundRecovery(video, function () {
             var request = video.play();
             if (request && request.catch) request.catch(function () {});

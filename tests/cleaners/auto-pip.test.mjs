@@ -6,13 +6,14 @@ const source = readFileSync(new URL('../../packages/tube-cleaner/dist/tube-clean
 const browser = await webkit.launch();
 try {
   for (const device of [null, devices['iPhone 13']]) {
-    // On iPhone, hide-time PiP is background playback, so only that switch gates it.
+    // On iPhone, background resume keeps playback going instead of hide-time
+    // PiP (tests/cleaners/background-resume.test.mjs covers its fallback).
     for (const config of [
-      { name: 'app disabled', app: false, expected: !!device },
-      { name: 'site disabled', app: true, site: '0', expected: !!device },
-      { name: 'app overrides site', app: false, site: '1', expected: !!device },
-      { name: 'enabled', app: true, expected: true },
-      { name: 'default', expected: true },
+      { name: 'app disabled', app: false, expected: false },
+      { name: 'site disabled', app: true, site: '0', expected: false },
+      { name: 'app overrides site', app: false, site: '1', expected: false },
+      { name: 'enabled', app: true, expected: !device },
+      { name: 'default', expected: !device },
       { name: 'background playback disabled', background: false, expected: !device },
     ]) {
       const context = await browser.newContext(device || {});
@@ -43,7 +44,6 @@ try {
         video.webkitPresentationMode = 'inline';
         let requests = 0;
         video.webkitSetPresentationMode = mode => { video.webkitPresentationMode = mode; requests++; };
-        // The iPhone path requests PiP before the hidden event arrives.
         window.dispatchEvent(new Event('blur'));
         const blurRequests = requests;
         video.webkitPresentationMode = 'inline';
