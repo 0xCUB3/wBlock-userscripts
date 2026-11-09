@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.53
+// @version      0.1.54
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -354,16 +354,36 @@
         listeners.slice().forEach(function (listener) { attempt(function () { listener(value); }); });
     }
 
-    // The site's pause() calls and every Media Session pause or stop handler
-    // (the site's and Player Cleaner's own) are reported before they run.
+    // Player Cleaner's own play() calls lift the native pause hold below.
+    function playOwn(video) {
+        video._wblockPauseHeld = false;
+        return video.play();
+    }
+
+    // The site's play() and pause() calls and every Media Session pause or
+    // stop handler (the site's and Player Cleaner's own) are reported before
+    // they run. A site play() refused by a native pause hold rejects the way
+    // play() does when a pause interrupts it.
+    attempt(function () {
+        var nativePause = HTMLMediaElement.prototype.pause;
+        if (nativePause._wblockPlayerCleaner) { return; }
+        var pause = function () {
+            this._wblockPagePauseAt = performance.now();
+            notify(pagePauseListeners, this);
+            return nativePause.apply(this, arguments);
+        };
+        pause._wblockPlayerCleaner = true;
+        HTMLMediaElement.prototype.pause = pause;
+        var nativePlay = HTMLMediaElement.prototype.play;
+        HTMLMediaElement.prototype.play = function () {
+            if (this._wblockPauseHeld) {
+                log('keeping a native pause the site tried to undo');
+                return Promise.reject(new DOMException('play() was interrupted by a native pause', 'AbortError'));
+            }
+            return nativePlay.apply(this, arguments);
+        };
+    });
     if (IS_IOS) {
-        attempt(function () {
-            var nativePause = HTMLMediaElement.prototype.pause;
-            if (nativePause._wblockPlayerCleaner) { return; }
-            var pause = function () { notify(pagePauseListeners, this); return nativePause.apply(this, arguments); };
-            pause._wblockPlayerCleaner = true;
-            HTMLMediaElement.prototype.pause = pause;
-        });
         attempt(function () {
             var setActionHandler = MediaSession.prototype.setActionHandler;
             if (setActionHandler._wblockPlayerCleaner) { return; }
@@ -379,6 +399,27 @@
         });
     }
 
+    // Controlled players keep their own play state and answer a pause they
+    // did not make with play(): NYT's Betamax restarts within milliseconds, so
+    // the native pause button did nothing. A pause the site did not call holds
+    // the video until it plays, gets a new source, or the user acts anywhere
+    // else on the page (the site's own play button, a playlist). Captured, so
+    // the hold is set before the site's own pause listeners on the element.
+    function setupPauseHold(video) {
+        if (!once(video, 'pauseHold')) { return; }
+        var unhold = function () { video._wblockPauseHeld = false; };
+        listen(video, video, 'pause', function () {
+            video._wblockPauseHeld = !video.ended && !(performance.now() < (video._wblockPagePauseAt || -Infinity) + BACKGROUND_RESUME.callGrace);
+        }, true);
+        ['play', 'emptied', 'loadstart'].forEach(function (type) { listen(video, video, type, unhold); });
+        ['pointerup', 'touchend', 'click', 'keydown'].forEach(function (type) {
+            listen(video, window, type, function (event) {
+                if ((event.composedPath ? event.composedPath() : [event.target]).indexOf(video) === -1) { unhold(); }
+            }, true);
+        });
+        onCleanup(video, unhold);
+    }
+
     function setupBackgroundResume(video) {
         if (!IS_IOS || !backgroundPlaybackOn() || !once(video, 'backgroundResume')) { return; }
         var state = { hidden: reallyHidden, hiddenAt: 0, pageAt: 0, inputAt: 0, intent: false, held: false, heldAt: 0, resume: false };
@@ -386,7 +427,7 @@
             state = backgroundResumeStep(BACKGROUND_RESUME, state, { op: op, t: Math.round(performance.now()), ended: video.ended });
             if (!state.resume) { return; }
             log('resuming playback WebKit paused for the background');
-            var request = attempt(function () { return video.play(); });
+            var request = attempt(function () { return playOwn(video); });
             if (request && request.catch) { request.catch(function () { log('background resume refused'); backgroundResumeRefused = true; }); }
         }
         function subscribe(list, fn) {
@@ -699,7 +740,7 @@
             else if ((key === ',' || key === '.') && video.paused) { seek(video, video.currentTime + (key === '.' ? 1 : -1) / 30); }
             else if (key === 'j' || key === 'J' || key === 'ArrowLeft') { seek(video, video.currentTime - 5); showToast(video, '-5s'); }
             else if (key === 'l' || key === 'L' || key === 'ArrowRight') { seek(video, video.currentTime + 5); showToast(video, '+5s'); }
-            else if (key === 'k' || key === 'K') { if (video.paused) { video.play().catch(function () {}); } else { video.pause(); } }
+            else if (key === 'k' || key === 'K') { if (video.paused) { playOwn(video).catch(function () {}); } else { video.pause(); } }
             else if (key === 'm' || key === 'M') { video.muted = !video.muted; showToast(video, video.muted ? 'Muted' : 'Unmuted'); }
             else if (key === 'p' || key === 'P') { if (inPiP(video)) { leavePiP(video); } else { requestPiP(video, function () {}); } }
             else if (key === 'f' || key === 'F') { toggleFullscreen(video); }
@@ -766,7 +807,7 @@
                 navigator.mediaSession.metadata = state.mediaMetadata;
             });
             var actions = {
-                play: function () { video.play().catch(function () {}); },
+                play: function () { playOwn(video).catch(function () {}); },
                 pause: function () { video.pause(); },
                 seekbackward: function (d) { seek(video, video.currentTime - (d.seekOffset || 10)); },
                 seekforward: function (d) { seek(video, video.currentTime + (d.seekOffset || 10)); },
@@ -1411,6 +1452,7 @@
         if (container.setAttribute) { container.setAttribute(ATTR_DONE, '1'); }
         enableBackgroundPlayback();
         enableNativeControls(video);
+        setupPauseHold(video);
         setupTracks(container, video);
         setupAutoPiP(video);
         setupBackgroundResume(video);
