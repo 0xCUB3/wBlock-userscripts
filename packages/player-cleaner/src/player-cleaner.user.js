@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.51
+// @version      0.1.52
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1026,10 +1026,16 @@
         var observer = new MutationObserver(function () { restoreNativeControls(video); });
         observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
         onCleanup(video, function () { observer.disconnect(); });
-        // Native control hits must not reach the shell too, or its own
-        // tap-to-toggle runs after the native button. Bubble phase, so the
-        // native controls in the UA shadow tree still act first.
-        ['click', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
+        // Native control hits must not reach the site's tap-to-toggle, or it
+        // undoes the native button. Clicks are stopped while capturing at the
+        // video, ahead of the element's own listeners: Reddit's feed player
+        // toggles from a click listener on the video itself and replays a
+        // pause with its volume reset. The native controls act on pointer
+        // and touch events, so those are only stopped as they bubble out.
+        ['click', 'dblclick'].forEach(function (type) {
+            listen(video, video, type, function (event) { event.stopImmediatePropagation(); }, true);
+        });
+        ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
             listen(video, video, type, function (event) { event.stopPropagation(); });
         });
     }

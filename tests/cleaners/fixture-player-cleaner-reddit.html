@@ -37,6 +37,15 @@
         host.addEventListener('click', togglePlayback);
         host.addEventListener('pointerup', togglePlayback);
         host.addEventListener('touchend', togglePlayback);
+        // The feed player also listens on the video itself: a click plays a
+        // paused video and pauses a playing one, and play() resets the volume
+        // to the feed's muted autoplay default.
+        var shadowVideo = root.querySelector('video');
+        shadowVideo.addEventListener('click', function () {
+          window.__redditVideoClickCount = (window.__redditVideoClickCount || 0) + 1;
+          if (shadowVideo.paused) { shadowVideo.muted = true; shadowVideo.play().catch(function () {}); }
+          else { shadowVideo.pause(); }
+        });
       }
     });
     // ?mse models the live feed player: the host carries the HLS URL,

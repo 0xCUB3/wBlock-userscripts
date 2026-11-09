@@ -2963,6 +2963,17 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
       detail: `toggles=${window.__redditToggleCount} paused=${video.paused}`
     };
   });
+  await check(page, S, 'video click skips the player\'s own listener on the video', () => {
+    const video = document.querySelector('shreddit-player').shadowRoot.querySelector('video');
+    window.__redditVideoClickCount = 0;
+    video.muted = false;
+    const paused = video.paused;
+    video.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+    return {
+      pass: window.__redditVideoClickCount === 0 && video.paused === paused && !video.muted,
+      detail: `videoClicks=${window.__redditVideoClickCount} paused=${video.paused} muted=${video.muted}`
+    };
+  });
   await check(page, S, 'video pointerup does not toggle Reddit playback', () => {
     const host = document.querySelector('shreddit-player');
     const video = host && host.shadowRoot && host.shadowRoot.querySelector('video');
