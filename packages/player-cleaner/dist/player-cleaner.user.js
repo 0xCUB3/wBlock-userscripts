@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.50
+// @version      0.1.51
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -313,6 +313,10 @@
     // pause or stop, the end of the video and a pause long after hiding (the
     // lock screen's) are never undone, and nothing resumes while visible.
     // Hide-time auto PiP only takes over once WebKit refuses that play().
+    //
+    // Videos left to the site (ManagedMediaSource players, skipped site
+    // players) get the same resume once they play, with no other changes and
+    // no PiP. Decorative loops are left alone.
     //
     // backgroundResumeStep is the reducer Tube Cleaner ships too, proven and
     // held to tests/rules/background-resume.rule.mjs.
@@ -1589,6 +1593,10 @@
     function onMediaEvent(event) {
         var video = event.target;
         if (!video || video.tagName !== 'VIDEO') { return; }
+        if (IS_IOS && !video.paused && !isPrimer(video) && !isDecorative(video)) {
+            enableBackgroundPlayback();
+            setupBackgroundResume(video);
+        }
         if (event.type === 'volumechange') {
             if (video.muted || video._wblockEnhanced) { return; }
             video._wblockChosen = true;

@@ -4,7 +4,9 @@
 // the end of the video and real visibility reach it on iPhone, in the order
 // Safari delivers them, and that hide-time PiP takes over once play() is
 // refused. Tube Cleaner runs on its YouTube fixture; Player Cleaner on a
-// generic player next to a decorative looping clip it must leave alone.
+// generic player next to a decorative looping clip it must leave alone, and
+// on a ManagedMediaSource player it leaves to the site, which gets the resume
+// with no controls, chrome changes or PiP.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { devices, webkit } from 'playwright';
@@ -20,6 +22,17 @@ const playerFixture = `<!doctype html><html><head><meta name="viewport" content=
 <div class="player"><video id="main" src="/sound.mp4" playsinline></video><div class="bar"><button>Play</button></div></div>
 <div class="player"><video id="gif" src="/silent.mp4" autoplay loop muted playsinline></video></div>
 </body></html>`;
+const mseFixture = `<!doctype html><html><head><meta name="viewport" content="width=device-width">
+<style>.player { position: relative; width: 320px; height: 180px; } .player video { width: 320px; height: 180px; }
+.bar { position: absolute; left: 0; right: 0; bottom: 0; height: 32px; background: rgba(0,0,0,.6); }</style></head><body>
+<div class="player video-js"><video id="mse" playsinline></video><div class="bar"><button>Play</button></div></div>
+<div class="player"><video id="idle" playsinline></video></div>
+<div class="player"><video id="gif" autoplay loop muted playsinline></video></div>
+<script>
+const MS = window.ManagedMediaSource || window.MediaSource;
+for (const id of ['mse', 'idle', 'gif']) document.getElementById(id).src = URL.createObjectURL(new MS());
+navigator.mediaSession.setActionHandler('pause', () => document.getElementById('mse').pause());
+</script></body></html>`;
 
 const prelude = `
 window.__nativeHidden = false;
@@ -61,7 +74,7 @@ function instrument(selector) {
   window.__setHidden = hidden => { window.__nativeHidden = hidden; document.dispatchEvent(new Event('visibilitychange')); };
 }
 
-async function suite({ name, slug, url, route, ready, selector, before }) {
+async function suite({ name, slug, url, route, ready, selector, before, after, pip = true }) {
   const context = await browser.newContext({ ...devices['iPhone 13'] });
   if (route) await context.route('**/*', route);
   const page = await context.newPage();
@@ -109,12 +122,15 @@ async function suite({ name, slug, url, route, ready, selector, before }) {
     ['window.__sessionHandlers.pause()', 'video.play()', 'v.plays = 0', 200, 'v.systemPause()', 300, hide], 1);
 
   // Hide-time PiP stays out of the way while resume works, and takes over
-  // once WebKit refuses the play().
+  // once WebKit refuses the play(), but never on a player left to the site.
   assert.equal(await v('v.pip'), 0, `${name}: no PiP while resume works`);
-  await scenario('a refused resume falls back to PiP', ['(v.refuse = true, v.systemPause())', 300, hide, 100], 1);
+  await scenario('a refused resume is tried once', ['(v.refuse = true, v.systemPause())', 300, hide, 100], 1);
   await v('(v.refuse = false, window.__setHidden(false), video.play(), window.__setHidden(true))');
-  assert.equal(await v('v.pip'), 1, `${name}: PiP on the next hide after a refusal`);
-  console.log(`PASS: ${name}: PiP takes over on the next hide after a refused resume`);
+  assert.equal(await v('v.pip'), pip ? 1 : 0, `${name}: PiP on the next hide after a refusal`);
+  console.log(`PASS: ${name}: ${pip ? 'PiP takes over' : 'no PiP'} on the next hide after a refused resume`);
+  assert.equal(await page.evaluate(() => document.hidden), false, `${name}: the page still reads as visible`);
+  await v('window.__setHidden(false)');
+  if (after) await after(page);
 
   assert.deepEqual(errors, []);
   await context.close();
@@ -151,6 +167,42 @@ try {
   });
   assert.deepEqual(gifPlays, { plays: 0, enhanced: false }, 'Player Cleaner: a decorative loop video is untouched');
   console.log('PASS: Player Cleaner: a decorative loop video is untouched');
+
+  // A ManagedMediaSource player stays the site's: it gets the resume once
+  // played, while a never-played video and a decorative loop next to it
+  // are left alone.
+  const left = {};
+  const leftAlone = async page => {
+    await page.evaluate(instrument, '#idle');
+    await page.evaluate(instrument, '#gif');
+    await page.evaluate(() => {
+      const gif = window.__v['#gif'];
+      document.getElementById('gif').play();
+      gif.plays = 0;
+      window.__v['#idle'].systemPause();
+      gif.systemPause();
+      window.__setHidden(true);
+    });
+    await page.waitForTimeout(100);
+    Object.assign(left, await page.evaluate(() => ({ idle: window.__v['#idle'].plays, gif: window.__v['#gif'].plays })));
+    await page.evaluate(() => window.__setHidden(false));
+  };
+  const untouched = async page => {
+    left.mse = await page.evaluate(() => {
+      const video = document.getElementById('mse');
+      return { enhanced: !!video._wblockEnhanced, marked: !!document.querySelector('[data-wblock-player-cleaner]'),
+        controls: video.controls, hidden: !!document.querySelector('[data-wblock-pc-hidden]') ||
+          getComputedStyle(document.querySelector('.bar')).display === 'none' };
+    });
+  };
+  await suite({
+    name: 'Player Cleaner (site MSE player)', slug: 'player-cleaner', url: 'https://player.test/', pip: false,
+    route: route => route.fulfill({ contentType: 'text/html', body: mseFixture }),
+    ready: '#mse[src^="blob:"]', selector: '#mse', before: leftAlone, after: untouched,
+  });
+  assert.deepEqual(left, { idle: 0, gif: 0, mse: { enhanced: false, marked: false, controls: false, hidden: false } },
+    'Player Cleaner: the site MSE player is not enhanced, and idle and decorative videos are untouched');
+  console.log('PASS: Player Cleaner: the site MSE player is not enhanced, and idle and decorative videos are untouched');
 } finally {
   await browser.close();
 }
