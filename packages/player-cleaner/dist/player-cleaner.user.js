@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.52
+// @version      0.1.53
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1115,15 +1115,16 @@
         var vr = rectOf(video);
         var shell = parentOf(video);
         if (!vr || vr.width < 2 || vr.height < 2) { return shell; }
-        var maxHeight = vr.height * 1.7 + 160, maxWidth = vr.width * 1.35 + 48;
         for (var el = shell; el && el.nodeType !== 9 && el !== document.body && el !== document.documentElement; el = parentOf(el)) {
-            if (el.nodeType === 1) {
-                var r = rectOf(el);
-                if (!r || r.height > maxHeight || r.width > maxWidth) { break; }
-            }
+            if (el.nodeType === 1 && !playerSized(el, vr)) { break; }
             shell = el;
         }
         return shell;
+    }
+
+    function playerSized(el, vr) {
+        var r = vr && rectOf(el);
+        return !!r && r.height <= vr.height * 1.7 + 160 && r.width <= vr.width * 1.35 + 48;
     }
 
     function overlaps(r, vr) {
@@ -1288,7 +1289,10 @@
         var container = containerOf(video);
         var vr = rectOf(video);
         if (vr && (vr.width < 2 || vr.height < 2)) { vr = null; }
-        var everything = !!(container.matches && container.matches(PLAYER_SELECTOR)) || positioned(container);
+        // A positioned ancestor is the player's box only at the player's size.
+        // An unrendered video can resolve to a sticky <main> (washingtonpost.com).
+        var everything = !!(container.matches && container.matches(PLAYER_SELECTOR)) ||
+            positioned(container) && playerSized(container, vr);
         if (container.nodeType === 1 || container.nodeType === 11) { sweep(container, video, vr, everything); }
         if (container.shadowRoot) { sweep(container.shadowRoot, video, vr, everything); }
         if (!vr) { return; }
