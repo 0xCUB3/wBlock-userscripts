@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.55
+// @version      0.1.56
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1576,6 +1576,15 @@
         var known = !!closest(parentOf(video), PLAYER_SELECTOR);
         var handshake = !!closest(video, HANDSHAKE_SELECTOR);
 
+        // A <source> the player just added is chosen by resource selection
+        // a task later; until then currentSrc is empty and on iOS the video
+        // looks sourceless. Taking over now would replace the site's choice:
+        // WELT's Bitmovin <source> carries the livestream's session, which a
+        // promoted bare URL drops. loadstart brings the video back.
+        if (!video.srcObject && !video.currentSrc && !video.getAttribute('src') && video.querySelector('source[src]')) {
+            if (IS_IOS) { leaveToSite(video); }
+            return;
+        }
         if (IS_IOS && (isOpaque(video) || !playsDirect(video)) && !promoteNativeSource(video, container)) {
             // An MSE pipeline (even with an http <source> fallback in the
             // markup, plyr.io) or no direct file yet, and nothing native to
