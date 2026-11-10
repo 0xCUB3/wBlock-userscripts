@@ -33,21 +33,30 @@ try {
         tracks[0].cues?.length === 1 && tracks[0].cues[0].text === '0:00  ' + title;
     }, title, { timeout: 3500 });
   }
-  async function navigate(id, title, { app = false, signal = true } = {}) {
-    await page.evaluate(({ id, title, app, signal }) => {
-      let watch = document.querySelector('ytd-watch-flexy');
-      if (!watch) { watch = document.createElement('ytd-watch-flexy'); document.body.appendChild(watch); }
-      let shell = document.querySelector('ytd-app');
-      if (!shell) { shell = document.createElement('ytd-app'); document.body.appendChild(shell); }
+  async function navigate(id, title, { app = false, signal = true, mobile = false } = {}) {
+    await page.evaluate(({ id, title, app, signal, mobile }) => {
+      const [watchTag, appTag] = mobile ? ['ytm-watch', 'ytm-app'] : ['ytd-watch-flexy', 'ytd-app'];
+      let watch = document.querySelector(watchTag);
+      if (!watch) { watch = document.createElement(watchTag); document.body.appendChild(watch); }
+      let shell = document.querySelector(appTag);
+      if (!shell) { shell = document.createElement(appTag); document.body.appendChild(shell); }
       watch.data = app ? null : window.chapterPayload(id, title);
       shell.data = app ? { response: window.chapterPayload(id, title) } : null;
       const player = document.getElementById('movie_player');
       player.getPlayerResponse = () => ({ videoDetails: { videoId: id } });
       history.replaceState(null, '', location.pathname + '?v=' + id);
       if (signal) document.dispatchEvent(new Event('yt-navigate-finish'));
-    }, { id, title, app, signal });
+    }, { id, title, app, signal, mobile });
   }
   await expectChapter('First video');
+  // m.youtube.com keeps the next video's watch response on ytm-watch / ytm-app.
+  await navigate('MOBILEVID01', 'Mobile second', { mobile: true });
+  await expectChapter('Mobile second');
+  await navigate('MOBILEVID02', 'Mobile third', { mobile: true, app: true });
+  await expectChapter('Mobile third');
+  await page.evaluate(() => document.querySelectorAll('ytm-watch, ytm-app').forEach(node => node.remove()));
+  console.log('PASS: m.youtube.com SPA navigation reads ytm-watch and ytm-app data');
+
   await navigate('SECONDVID02', 'Second video');
   await expectChapter('Second video');
   assert.equal(await page.evaluate(() => window.ytInitialData.currentVideoEndpoint.watchEndpoint.videoId), 'FIRSTVID001');
