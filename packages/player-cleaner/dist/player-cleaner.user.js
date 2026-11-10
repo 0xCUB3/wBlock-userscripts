@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.54
+// @version      0.1.55
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -152,10 +152,10 @@
     // Shadow-aware DOM helpers
     // ------------------------------------------------------------------
 
+    // The parent in the flat tree: a slotted node renders inside its slot, so
+    // the shadow elements around that slot are its ancestors too.
     function parentOf(node) {
-        if (!node) { return null; }
-        if (node.parentNode) { return node.parentNode; }
-        return node.host || null;
+        return node && (node.assignedSlot || node.parentNode || node.host) || null;
     }
 
     function contains(ancestor, node) {
@@ -354,20 +354,31 @@
         listeners.slice().forEach(function (listener) { attempt(function () { listener(value); }); });
     }
 
-    // Player Cleaner's own play() calls lift the native pause hold below.
+    // Player Cleaner's own play() and pause() calls are the user's: they lift
+    // the native holds below, and a play counts like a tap on the controls.
+    var ownPlay = false;
     function playOwn(video) {
         video._wblockPauseHeld = false;
-        return video.play();
+        video._wblockTappedAt = performance.now();
+        ownPlay = true;
+        try { return video.play(); } finally { ownPlay = false; }
+    }
+
+    function pauseOwn(video) {
+        video._wblockPlayHeldUntil = -Infinity;
+        video.pause();
     }
 
     // The site's play() and pause() calls and every Media Session pause or
     // stop handler (the site's and Player Cleaner's own) are reported before
     // they run. A site play() refused by a native pause hold rejects the way
-    // play() does when a pause interrupts it.
+    // play() does when a pause interrupts it; a site pause() refused by a
+    // native play hold does nothing.
     attempt(function () {
         var nativePause = HTMLMediaElement.prototype.pause;
         if (nativePause._wblockPlayerCleaner) { return; }
         var pause = function () {
+            if (performance.now() < this._wblockPlayHeldUntil) { log('keeping a native play the site tried to undo'); return; }
             this._wblockPagePauseAt = performance.now();
             notify(pagePauseListeners, this);
             return nativePause.apply(this, arguments);
@@ -380,6 +391,7 @@
                 log('keeping a native pause the site tried to undo');
                 return Promise.reject(new DOMException('play() was interrupted by a native pause', 'AbortError'));
             }
+            if (!ownPlay) { this._wblockPagePlayAt = performance.now(); }
             return nativePlay.apply(this, arguments);
         };
     });
@@ -405,19 +417,51 @@
     // the video until it plays, gets a new source, or the user acts anywhere
     // else on the page (the site's own play button, a playlist). Captured, so
     // the hold is set before the site's own pause listeners on the element.
+    //
+    // The same players pause a play they did not start: with Betamax's own
+    // play button hidden, the native one did nothing on NYT articles. A play
+    // right after a tap on the video that the site did not call holds until a
+    // moment after playback starts, against the site's pause() only. When the
+    // site swaps the source during the hold (Betamax falls back from an AV1
+    // stream the device cannot decode), the play is repeated on the new
+    // source, a few times per tap at most.
     function setupPauseHold(video) {
         if (!once(video, 'pauseHold')) { return; }
+        var recent = function (at, grace) { return performance.now() < (at || -Infinity) + grace; };
         var unhold = function () { video._wblockPauseHeld = false; };
+        var unholdBoth = function () { unhold(); video._wblockPlayHeldUntil = -Infinity; };
         listen(video, video, 'pause', function () {
-            video._wblockPauseHeld = !video.ended && !(performance.now() < (video._wblockPagePauseAt || -Infinity) + BACKGROUND_RESUME.callGrace);
+            video._wblockPlayHeldUntil = -Infinity;
+            video._wblockPauseHeld = !video.ended && !recent(video._wblockPagePauseAt, BACKGROUND_RESUME.callGrace);
         }, true);
-        ['play', 'emptied', 'loadstart'].forEach(function (type) { listen(video, video, type, unhold); });
+        listen(video, video, 'play', function () {
+            unhold();
+            video._wblockPlayHeldUntil = recent(video._wblockTappedAt, BACKGROUND_RESUME.inputGrace) &&
+                !recent(video._wblockPagePlayAt, BACKGROUND_RESUME.callGrace) ? Infinity : -Infinity;
+        }, true);
+        listen(video, video, 'playing', function () {
+            if (video._wblockPlayHeldUntil === Infinity) { video._wblockPlayHeldUntil = performance.now() + BACKGROUND_RESUME.inputGrace; }
+        }, true);
+        var replays = 0, pending = false;
+        listen(video, video, 'emptied', function () {
+            pending = performance.now() < video._wblockPlayHeldUntil && replays < 3;
+            unholdBoth();
+        });
+        listen(video, video, 'loadstart', function () {
+            unholdBoth();
+            if (!pending) { return; }
+            pending = false;
+            replays++;
+            log('repeating a native play on the swapped source');
+            playOwn(video).catch(function () {});
+        });
         ['pointerup', 'touchend', 'click', 'keydown'].forEach(function (type) {
             listen(video, window, type, function (event) {
-                if ((event.composedPath ? event.composedPath() : [event.target]).indexOf(video) === -1) { unhold(); }
+                if ((event.composedPath ? event.composedPath() : [event.target]).indexOf(video) === -1) { unholdBoth(); }
+                else { video._wblockTappedAt = performance.now(); replays = 0; }
             }, true);
         });
-        onCleanup(video, unhold);
+        onCleanup(video, unholdBoth);
     }
 
     function setupBackgroundResume(video) {
@@ -740,7 +784,7 @@
             else if ((key === ',' || key === '.') && video.paused) { seek(video, video.currentTime + (key === '.' ? 1 : -1) / 30); }
             else if (key === 'j' || key === 'J' || key === 'ArrowLeft') { seek(video, video.currentTime - 5); showToast(video, '-5s'); }
             else if (key === 'l' || key === 'L' || key === 'ArrowRight') { seek(video, video.currentTime + 5); showToast(video, '+5s'); }
-            else if (key === 'k' || key === 'K') { if (video.paused) { playOwn(video).catch(function () {}); } else { video.pause(); } }
+            else if (key === 'k' || key === 'K') { if (video.paused) { playOwn(video).catch(function () {}); } else { pauseOwn(video); } }
             else if (key === 'm' || key === 'M') { video.muted = !video.muted; showToast(video, video.muted ? 'Muted' : 'Unmuted'); }
             else if (key === 'p' || key === 'P') { if (inPiP(video)) { leavePiP(video); } else { requestPiP(video, function () {}); } }
             else if (key === 'f' || key === 'F') { toggleFullscreen(video); }
@@ -808,7 +852,7 @@
             });
             var actions = {
                 play: function () { playOwn(video).catch(function () {}); },
-                pause: function () { video.pause(); },
+                pause: function () { pauseOwn(video); },
                 seekbackward: function (d) { seek(video, video.currentTime - (d.seekOffset || 10)); },
                 seekforward: function (d) { seek(video, video.currentTime + (d.seekOffset || 10)); },
                 seekto: function (d) { if (isFinite(d.seekTime)) { video.currentTime = d.seekTime; } }
@@ -1324,6 +1368,23 @@
         state.hidden = state.hidden || [];
         hidingFor = state;
         try { hideChromeNow(video); } finally { hidingFor = null; }
+        adoptPoster(video, state.hidden);
+    }
+
+    // Custom players paint their poster as an image in a cover over the
+    // video. With the cover hidden an unloaded video is a blank box, so the
+    // largest picture in the hidden chrome becomes the native poster.
+    function adoptPoster(video, hidden) {
+        if (video.poster || video.readyState || !video.paused) { return; }
+        var best = null;
+        var check = function (el) {
+            if (el.shadowRoot) { each(el.shadowRoot); }
+            if (el.tagName === 'IMG' && el.currentSrc && el.naturalWidth >= 160 && el.naturalHeight >= 90 &&
+                (!best || el.naturalWidth > best.naturalWidth)) { best = el; }
+        };
+        var each = function (root) { [].forEach.call(root.querySelectorAll('*'), check); };
+        hidden.forEach(function (el) { attempt(function () { check(el); each(el); }); });
+        if (best) { video.poster = best.currentSrc; }
     }
 
     function hideChromeNow(video) {
@@ -1406,6 +1467,8 @@
             timers = [50, 200, 500].map(function (ms) { return setTimeout(pass, ms); });
         };
         var exitFullscreen = function () {
+            // Presentation changes fire on the way into fullscreen as well.
+            if (video.webkitDisplayingFullscreen || video.webkitPresentationMode === 'fullscreen') { video._wblockInNativeFullscreen = true; return; }
             video._wblockInNativeFullscreen = false;
             if (!video.isConnected) { return; }
             restoreNativeControls(video);
@@ -1484,6 +1547,18 @@
         leaveToSite(video);
     }
 
+    // An item of a snapping feed or carousel (NYT's vertical video feed): the
+    // video fills a scroll-snap container whose close and next buttons are the
+    // site's navigation, not player chrome. Left to the site.
+    function inSnapFeed(video) {
+        var vr = rectOf(video);
+        if (!vr || vr.width < 2 || vr.height < 2) { return false; }
+        for (var el = parentOf(video); el && el.nodeType !== 9 && (el.nodeType !== 1 || playerSized(el, vr)); el = parentOf(el)) {
+            if (el.nodeType === 1 && (attempt(function () { return getComputedStyle(el).scrollSnapType; }) || 'none') !== 'none') { return true; }
+        }
+        return false;
+    }
+
     function consider(video) {
         if (!video || video.tagName !== 'VIDEO' || !video.isConnected) { return; }
         if (video._wblockEnhanced) {
@@ -1522,6 +1597,7 @@
             if (!video._wblockChosen && (video.autoplay && video.muted ||
                 video.offsetWidth > 0 && video.offsetHeight > 0 && video.offsetWidth < 160 && video.offsetHeight < 120)) { return; }
         }
+        if (inSnapFeed(video)) { return; }
         log('enhancing', container.className || container.tagName);
         enhance(container, video);
     }
@@ -1673,10 +1749,15 @@
             attributeFilter: ['class', 'src', 'data-src', 'data-video-src', 'data-file', 'data-video', 'data-source', 'data-url'] });
         MEDIA_EVENTS.forEach(function (type) { root.addEventListener(type, onMediaEvent, true); });
         root._wblockObserver = observer;
+        adoptShadowRoots(root);
+        scan(root);
+    }
+
+    // Declarative shadow roots never pass through attachShadow.
+    function adoptShadowRoots(root) {
         attempt(function () {
             [].forEach.call(root.querySelectorAll('*'), function (el) { if (el.shadowRoot) { observeRoot(el.shadowRoot); } });
         });
-        scan(root);
     }
 
     function forgetRoot(root) {
@@ -1698,6 +1779,7 @@
         var add = function (node) { if (node && roots.indexOf(node) === -1) { roots.push(node); } };
         records.forEach(function (record) {
             var target = record.target;
+            if (target.shadowRoot) { observeRoot(target.shadowRoot); }
             if (record.type === 'attributes') {
                 // Class churn matters only inside players: a wrapper gaining a
                 // library class, or a handshake player ending its preroll.
@@ -1709,7 +1791,7 @@
                 if (node.nodeType !== 1) { return; }
                 add(node);
                 if (node.shadowRoot) { observeRoot(node.shadowRoot); }
-                attempt(function () { [].forEach.call(node.querySelectorAll('*'), function (el) { if (el.shadowRoot) { observeRoot(el.shadowRoot); } }); });
+                adoptShadowRoots(node);
                 var parent = node.parentNode;
                 if (parent === document.body || parent === document.documentElement || parent && parent.parentNode === document.body) { portal = true; }
             });
@@ -1764,7 +1846,7 @@
     }, true);
 
     observeRoot(document);
-    function rescan() { observedRoots.slice().forEach(scan); }
+    function rescan() { observedRoots.slice().forEach(function (root) { adoptShadowRoots(root); scan(root); }); }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', rescan, { once: true });
     }

@@ -17,7 +17,7 @@ const fixture = `<!doctype html><html><head><meta name="viewport" content="width
   .overlay { position: absolute; inset: 0; }
 </style></head><body>
 <div class="player"><video id="v" src="/sound.mp4" preload="auto" playsinline></video><div class="overlay"><button id="overlay-play">Play</button></div></div>
-<button id="next">Next video</button>
+<button id="next">Next video</button><button id="stop">Pause</button>
 <script>
   // Betamax-style controlled player: its state says what the element should do.
   var video = document.getElementById('v');
@@ -27,7 +27,13 @@ const fixture = `<!doctype html><html><head><meta name="viewport" content="width
   video.addEventListener('pause', function () {
     if (wantPlaying && !video.ended) { video.play().catch(function () {}); }
   });
+  video.addEventListener('play', function () {
+    if (!wantPlaying) { video.pause(); }
+    // Betamax drops a stream the device cannot decode for the next one.
+    if (window.swapOnPlay) { window.swapOnPlay = false; setTimeout(function () { video.src = '/sound.mp4?fallback'; video.load(); }, 50); }
+  });
   document.getElementById('next').addEventListener('click', function () { window.sitePlay(); });
+  document.getElementById('stop').addEventListener('click', function () { window.sitePause(); });
 </script>
 </body></html>`;
 
@@ -56,6 +62,24 @@ try {
       for (const type of ['pointerdown', 'pointerup', 'click']) video.dispatchEvent(new PointerEvent(type, { bubbles: true, composed: true }));
     });
 
+    // The mirror image: with the site's play button hidden, the native one
+    // starts a play the site did not ask for, and Betamax pauses it at once.
+    await tapVideo();
+    await page.evaluate(() => { const video = document.getElementById('v'); video.muted = true; window.swapOnPlay = true; return window.__nativePlay.call(video).catch(() => {}); });
+    await page.waitForTimeout(600);
+    assert.equal(await paused(), false, `${label}: a native play holds against the site's pause and its source swap`);
+    assert.match(await page.evaluate(() => document.getElementById('v').currentSrc), /fallback$/, `${label}: the swapped source is the one playing`);
+    assert.ok(await page.evaluate(() => document.getElementById('v').currentTime) > 0.2, `${label}: the held native play advances`);
+    await page.waitForTimeout(900);
+    await page.evaluate(() => window.sitePause());
+    await page.waitForTimeout(300);
+    assert.equal(await paused(), true, `${label}: the site's pause works again once playback is under way`);
+    // An unprompted play (autoplay, a script) is still the site's to pause.
+    await page.evaluate(() => { document.getElementById('next').dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); return window.__nativePlay.call(document.getElementById('v')); });
+    await page.waitForTimeout(300);
+    assert.equal(await paused(), true, `${label}: a play with no tap on the video is still paused by the site`);
+    await page.evaluate(() => { document.getElementById('v').currentTime = 0; });
+
     await page.evaluate(() => window.sitePlay());
     await page.waitForTimeout(300);
     assert.equal(await paused(), false, `${label}: the site starts playback`);
@@ -70,9 +94,9 @@ try {
     await page.waitForTimeout(300);
     assert.equal(await paused(), false, `${label}: native play resumes`);
 
-    await page.evaluate(() => window.sitePause());
+    await page.click('#stop');
     await page.waitForTimeout(300);
-    assert.equal(await paused(), true, `${label}: the site's own pause works`);
+    assert.equal(await paused(), true, `${label}: the site's own pause button works right after a native play`);
     await page.evaluate(() => window.sitePlay());
     await page.waitForTimeout(300);
     assert.equal(await paused(), false, `${label}: the site's own play works after its pause`);
