@@ -66,11 +66,14 @@ try {
     // starts a play the site did not ask for, and Betamax pauses it at once.
     await tapVideo();
     await page.evaluate(() => { const video = document.getElementById('v'); video.muted = true; window.swapOnPlay = true; return window.__nativePlay.call(video).catch(() => {}); });
-    await page.waitForTimeout(600);
+    // The fallback loads at network and decode speed, so wait for playback
+    // itself; a play the site undid never gets there.
+    const playedTo = seconds => page.waitForFunction(s => document.getElementById('v').currentTime > s, seconds, { timeout: 10000 }).then(() => true, () => false);
+    assert.ok(await playedTo(0.2), `${label}: the held native play advances`);
     assert.equal(await paused(), false, `${label}: a native play holds against the site's pause and its source swap`);
     assert.match(await page.evaluate(() => document.getElementById('v').currentSrc), /fallback$/, `${label}: the swapped source is the one playing`);
-    assert.ok(await page.evaluate(() => document.getElementById('v').currentTime) > 0.2, `${label}: the held native play advances`);
-    await page.waitForTimeout(900);
+    // The hold lasts a second of playback.
+    assert.ok(await playedTo(1.2), `${label}: the held native play keeps going`);
     await page.evaluate(() => window.sitePause());
     await page.waitForTimeout(300);
     assert.equal(await paused(), true, `${label}: the site's pause works again once playback is under way`);
