@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.56
+// @version      0.1.57
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1037,29 +1037,20 @@
         attempt(function () { video.load(); });
     }
 
+    // Every return of the site's blob comes back through consider (on
+    // loadstart): a cached reload finishing its setup after the swap, or a
+    // feed (Reddit) reattaching a post it unloaded. Re-promote a few times,
+    // then let a site that keeps attaching its own pipeline have the element.
     function promoteNativeSource(video, container) {
         if (!IS_IOS || closest(video, HANDSHAKE_SELECTOR) || !isOpaque(video) && (playsDirect(video) || !hasSource(video))) { return false; }
         var url = hostSource(video, container) || reactSource(video) || reactSource(container);
         if (!url) { return false; }
-        setNativeSource(video, url);
-        // A cached reload can finish its player setup after the swap and
-        // re-attach the blob. Re-assert a few times, then let a persistent
-        // site player have the element back.
-        if (once(video, 'nativeGuard')) {
-            var retries = 0;
-            var reassert = function () {
-                setTimeout(function () {
-                    if (!video.isConnected || retries >= 4) { return; }
-                    var current = video.src || '';
-                    if (!video.srcObject && (current === url || current && !/^blob:/.test(current))) { return; }
-                    video._wblockIOSNativeRetries = ++retries;
-                    log('reasserting native source', url);
-                    setNativeSource(video, url);
-                }, 0);
-            };
-            listen(video, video, 'emptied', reassert);
-            listen(video, video, 'loadstart', reassert);
+        if (video._wblockIOSNativeSrc) {
+            if ((video._wblockIOSNativeRetries || 0) >= 4) { return false; }
+            video._wblockIOSNativeRetries = (video._wblockIOSNativeRetries || 0) + 1;
+            log('reasserting native source', url);
         }
+        setNativeSource(video, url);
         return true;
     }
 
@@ -1563,9 +1554,7 @@
         if (!video || video.tagName !== 'VIDEO' || !video.isConnected) { return; }
         if (video._wblockEnhanced) {
             if (IS_IOS && isOpaque(video)) {
-                // A promoted URL has its own bounded re-assertion; hand back
-                // only once that gives up.
-                if (!video._wblockIOSNativeSrc || (video._wblockIOSNativeRetries || 0) >= 4) { handBack(video); }
+                if (!promoteNativeSource(video, containerOf(video))) { handBack(video); }
                 return;
             }
             requestPass(video);
