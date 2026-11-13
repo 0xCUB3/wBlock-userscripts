@@ -1720,86 +1720,47 @@ async function qualityUISelectionCheck(page, scenario) {
   await browser.close();
 }
 
-// Tube Cleaner native caption off regression
+// Tube Cleaner leaves the native caption choice to Safari (#11)
 {
-  const defaultSubtitlePrelude = `
-window.__defaultYoutubeSubtitlesOn = true;
-HTMLElement.prototype.isSubtitlesOn = function () {
-  return this.id === 'movie_player' ? !!window.__defaultYoutubeSubtitlesOn || !!window.__youtubeSubtitlesOn : false;
-};
-HTMLElement.prototype.setOption = function (module, option, value) {
-  if (this.id === 'movie_player' && module === 'captions' && option === 'track') {
-    window.__youtubeCaptionTrack = value && value.languageCode || null;
-    window.__youtubeSubtitlesOn = !!value;
-    window.__defaultYoutubeSubtitlesOn = !!value;
-  }
+  // YouTube's own captions are on, an old build saved "off", and Safari's
+  // caption setting is On, so it turns on the English track as it arrives.
+  const safariOnPrelude = `
+localStorage.setItem('wblock.tubeCleaner.subtitles', '{"enabled":false}');
+HTMLElement.prototype.isSubtitlesOn = function () { return this.id === 'movie_player'; };
+const addTrack = HTMLMediaElement.prototype.appendChild;
+HTMLMediaElement.prototype.appendChild = function (node) {
+  const result = addTrack.call(this, node);
+  if (node.tagName === 'TRACK' && node.srclang === 'en') node.track.mode = 'showing';
+  return result;
 };
 `;
-  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (native captions stay off)', {
+  const { browser, page, pageErrors } = await runScenario('Tube Cleaner (Safari owns native captions)', {
     fixture: FIXTURE_URL,
     viewport: { width: 1280, height: 800 },
-    scriptSource: defaultSubtitlePrelude + '\n' + captionDataPrelude + '\n' + userscript,
+    scriptSource: safariOnPrelude + '\n' + captionDataPrelude + '\n' + userscript,
   });
-  const S = 'tube-cleaner-native-captions-off';
+  const S = 'tube-cleaner-native-captions-safari';
   await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length >= 1);
-  await check(page, S, 'preserves YouTube default subtitles in Safari native tracks', () => {
-    const video = document.querySelector('#movie_player video');
-    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
-    const showing = tracks.filter(t => t.mode === 'showing');
-    const saved = localStorage.getItem('wblock.tubeCleaner.subtitles');
-    return { pass: showing.length === 1 && saved === null, detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${saved}` };
-  });
+  await page.waitForTimeout(700);
+  await check(page, S, 'keeps the track Safari turned on showing', () => {
+    const now = Array.from(document.querySelector('#movie_player video')?.textTracks || []).filter(t => t.kind === 'subtitles').map(t => `${t.language}:${t.mode}`).join(',');
+    return { pass: /en:showing/.test(now) && !/:showing.*:showing/.test(now), detail: `modes=${now}` };
+  }, { timeout: 1 });
 
   await page.evaluate(() => {
-    const video = document.querySelector('#movie_player video');
-    Array.from(video.textTracks).filter(t => t.kind === 'subtitles').forEach(t => { t.mode = 'disabled'; });
+    Array.from(document.querySelector('#movie_player video').textTracks).forEach(t => { t.mode = 'disabled'; });
   });
-  await check(page, S, 'saves explicit native subtitle off without clicking YouTube CC', () => {
-    const video = document.querySelector('#movie_player video');
-    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
-    const saved = JSON.parse(localStorage.getItem('wblock.tubeCleaner.subtitles') || 'null');
-    return {
-      pass: tracks.every(t => t.mode === 'disabled') && saved?.enabled === false && window.__subtitleClicks === 0,
-      detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${JSON.stringify(saved)} clicks=${window.__subtitleClicks}`,
-    };
-  });
-
+  await page.waitForTimeout(50);
   await page.evaluate(() => {
-    window.__youtubeSubtitlesOn = true;
-    const video = document.querySelector('#movie_player video');
-    video.dispatchEvent(new Event('loadedmetadata'));
+    document.querySelector('#movie_player video').dispatchEvent(new Event('loadedmetadata'));
     document.dispatchEvent(new Event('yt-player-state-change'));
   });
-  await check(page, S, 'rejects YouTube caption restoration after the user turns native captions off', () => {
-    const video = document.querySelector('#movie_player video');
-    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
-    const saved = JSON.parse(localStorage.getItem('wblock.tubeCleaner.subtitles') || 'null');
-    return { pass: tracks.every(t => t.mode === 'disabled') && saved?.enabled === false,
-      detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${JSON.stringify(saved)}` };
-  });
-
-  await page.evaluate(() => {
-    const player = document.getElementById('movie_player');
-    const wrap = player.querySelector('.html5-video-container');
-    wrap.innerHTML = '<video playsinline></video>';
-    document.dispatchEvent(new Event('yt-navigate-finish'));
-  });
-  await page.waitForFunction(() => document.querySelectorAll('#movie_player video track[data-wblock-native-subtitle]').length >= 1);
-  await check(page, S, 'keeps native captions off across YouTube video remount', () => {
-    const video = document.querySelector('#movie_player video');
-    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
-    return { pass: tracks.length >= 1 && tracks.every(t => t.mode === 'disabled'), detail: `modes=${tracks.map(t => t.mode).join(',')}` };
-  });
-
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length >= 1);
-  await check(page, S, 'keeps native captions off after refresh despite YouTube default subtitles', () => {
-    const video = document.querySelector('#movie_player video');
-    const tracks = Array.from(video?.textTracks || []).filter(t => t.kind === 'subtitles');
-    const saved = JSON.parse(localStorage.getItem('wblock.tubeCleaner.subtitles') || 'null');
-    return { pass: tracks.length >= 1 && tracks.every(t => t.mode === 'disabled') && saved?.enabled === false,
-      detail: `modes=${tracks.map(t => t.mode).join(',')} saved=${JSON.stringify(saved)}` };
-  });
+  await page.waitForTimeout(600);
+  await check(page, S, 'keeps captions off after Off, even with YouTube captions on', () => {
+    const now = Array.from(document.querySelector('#movie_player video')?.textTracks || []).filter(t => t.kind === 'subtitles').map(t => `${t.language}:${t.mode}`).join(',');
+    return { pass: now.length > 0 && !/showing/.test(now) && !window.__subtitleClicks,
+      detail: `modes=${now} clicks=${window.__subtitleClicks}` };
+  }, { timeout: 1 });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();
