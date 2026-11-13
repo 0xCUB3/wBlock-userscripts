@@ -779,6 +779,11 @@
     // Pause and switching away within that lead can resume playback; that is
     // the price of catching Safari's own pause. Stop always counts.
     //
+    // Not handled on purpose: a Tab Group switch while the tab is already
+    // hidden. Safari's pause then arrives as a hidden Pause command on an
+    // element it has already paused, the same shape as a Now Playing pause.
+    // Resuming it would undo the user's pause, so it counts as theirs.
+    //
     // backgroundRecoveryStep is the whole decision: a pure reducer, proven
     // and held to tests/rules/background-recovery.rule.mjs. Keep it
     // self-contained; the test evaluates its source on its own.
