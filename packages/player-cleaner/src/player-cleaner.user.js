@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.57
+// @version      0.1.58
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -368,6 +368,27 @@
         video._wblockPlayHeldUntil = -Infinity;
         video.pause();
     }
+
+    // Native buttons live inside WebKit's shadow tree. A capture guard on
+    // the video blocks their clicks too. Register a bubbling guard before
+    // the site's first click listener, so native buttons answer first.
+    var nativeVideoAddListener = HTMLVideoElement.prototype.addEventListener;
+    var controlClickGuards = new WeakSet();
+    function guardNativeControlClicks(video) {
+        if (controlClickGuards.has(video)) { return; }
+        controlClickGuards.add(video);
+        ['click', 'dblclick'].forEach(function (type) {
+            nativeVideoAddListener.call(video, type, function (event) {
+                if (video._wblockEnhanced) { event.stopImmediatePropagation(); }
+            });
+        });
+    }
+    attempt(function () {
+        HTMLVideoElement.prototype.addEventListener = function (type) {
+            if (type === 'click' || type === 'dblclick') { guardNativeControlClicks(this); }
+            return nativeVideoAddListener.apply(this, arguments);
+        };
+    });
 
     // The site's play() and pause() calls and every Media Session pause or
     // stop handler (the site's and Player Cleaner's own) are reported before
@@ -1102,15 +1123,9 @@
         var observer = new MutationObserver(function () { restoreNativeControls(video); });
         observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
         onCleanup(video, function () { observer.disconnect(); });
-        // Native control hits must not reach the site's tap-to-toggle, or it
-        // undoes the native button. Clicks are stopped while capturing at the
-        // video, ahead of the element's own listeners: Reddit's feed player
-        // toggles from a click listener on the video itself and replays a
-        // pause with its volume reset. The native controls act on pointer
-        // and touch events, so those are only stopped as they bubble out.
-        ['click', 'dblclick'].forEach(function (type) {
-            listen(video, video, type, function (event) { event.stopImmediatePropagation(); }, true);
-        });
+        // Keep the click guard for the video's lifetime: it goes inactive
+        // on release and must still precede page listeners on reattachment.
+        guardNativeControlClicks(video);
         ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
             listen(video, video, type, function (event) { event.stopPropagation(); });
         });
