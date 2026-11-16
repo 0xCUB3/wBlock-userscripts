@@ -4107,6 +4107,104 @@ for (const config of [
   await browser.close();
 }
 
+// ---- Scenario 11b: PiP opened by scrolling the player out of view ---------
+// Scrolling the player out opens PiP. Focus and the return from a hidden tab
+// must not close it while the player is still out of view (a reply tap
+// delivers focus just before its click), and coming back into view does.
+// PiP that hiding opened still closes when the tab returns, and PiP the user
+// entered is never touched.
+for (const config of [
+  { name: 'Tube Cleaner', key: 'tube-cleaner-scroll-pip', fixture: FIXTURE_URL,
+    source: visibilityPrelude + '\n' + userscript, selector: '#movie_player video', ready: '.wblock-tc-toolbar' },
+  { name: 'Player Cleaner', key: 'player-cleaner-scroll-pip', fixture: FIXTURE_PLAYER_URL,
+    source: visibilityPrelude + '\n' + playerUserscript, selector: '.video-js video', ready: '[data-wblock-player-cleaner]' },
+  { name: 'Tube Cleaner (switched off)', key: 'tube-cleaner-scroll-pip-off', fixture: FIXTURE_URL, off: true,
+    source: `localStorage.setItem('wblock.tubeCleaner.autoPiP', '0');\n` + visibilityPrelude + '\n' + userscript,
+    selector: '#movie_player video', ready: '.wblock-tc-toolbar' },
+  { name: 'Player Cleaner (switched off)', key: 'player-cleaner-scroll-pip-off', fixture: FIXTURE_PLAYER_URL, off: true,
+    source: `localStorage.setItem('wblock.playerCleaner.autoPiP', '0');\n` + visibilityPrelude + '\n' + playerUserscript,
+    selector: '.video-js video', ready: '[data-wblock-player-cleaner]' },
+]) {
+  const { browser, page, pageErrors } = await runScenario(`${config.name} (scroll-out PiP)`, {
+    fixture: config.fixture,
+    scriptSource: config.source,
+    readySignal: config.ready,
+    viewport: { width: 1280, height: 800 },
+  });
+  await page.evaluate((selector) => {
+    const video = document.querySelector(selector);
+    window.__wblockVideo = video;
+    Object.defineProperty(video, 'paused', { configurable: true, get: () => false });
+    Object.defineProperty(video, 'ended', { configurable: true, get: () => false });
+    video.webkitSupportsPresentationMode = mode => mode === 'picture-in-picture';
+    // An own accessor: WebKit's native setter does not keep a PiP mode that
+    // headless WebKit can't enter, and the reducer reads the mode back.
+    let presentationMode = 'inline';
+    Object.defineProperty(video, 'webkitPresentationMode', {
+      configurable: true, get: () => presentationMode, set: mode => { presentationMode = mode; },
+    });
+    video.webkitSetPresentationMode = function (mode) {
+      this.webkitPresentationMode = mode;
+      window.__wblockPiPRequests = (window.__wblockPiPRequests || 0) + 1;
+    };
+    window.__wblockPiPRequests = 0;
+    Object.defineProperty(document, 'hasFocus', { configurable: true, value: () => true });
+    const spacer = document.createElement('div');
+    spacer.style.height = '3000px';
+    document.body.appendChild(spacer);
+  }, config.selector);
+
+  // Runs one real page action, lets IntersectionObserver and the handlers
+  // settle, then checks the video's PiP mode and how many PiP requests were made.
+  async function expectPiP(label, action, want) {
+    await page.evaluate(() => { window.__wblockPiPRequests = 0; });
+    await page.evaluate(action);
+    await page.waitForTimeout(300);
+    const got = await page.evaluate(() => ({ mode: window.__wblockVideo.webkitPresentationMode, requests: window.__wblockPiPRequests }));
+    record(config.key, label, got.mode === want.mode && got.requests === want.requests,
+      `want mode=${want.mode} requests=${want.requests}; got mode=${got.mode} requests=${got.requests}`);
+  }
+  const pip = 'picture-in-picture';
+  const scrollOut = () => window.scrollTo(0, document.documentElement.scrollHeight);
+  const scrollIn = () => window.scrollTo(0, 0);
+  const focus = () => window.dispatchEvent(new Event('focus'));
+  const showTab = () => { window.__wblockNativeHidden = false; window.__wblockNativeVisibility = 'visible'; document.dispatchEvent(new Event('visibilitychange')); };
+  const hideTab = () => { window.__wblockNativeHidden = true; window.__wblockNativeVisibility = 'hidden'; document.dispatchEvent(new Event('visibilitychange')); };
+
+  if (config.off) {
+    // With automatic PiP switched off, scrolling the player out opens nothing.
+    await expectPiP('scrolling the player out of view opens no PiP while automatic PiP is off', scrollOut, { mode: 'inline', requests: 0 });
+    await expectPiP('focus leaves the page alone while automatic PiP is off', focus, { mode: 'inline', requests: 0 });
+  } else {
+    // Scrolled out, then focus and the tab's return: PiP stays until the player is back in view.
+    await expectPiP('scrolling the player out of view opens PiP', scrollOut, { mode: pip, requests: 1 });
+    await expectPiP('focus while the player is still out of view keeps PiP', focus, { mode: pip, requests: 0 });
+    await expectPiP('the tab returning while the player is still out of view keeps PiP', showTab, { mode: pip, requests: 0 });
+    await expectPiP('scrolling the player back into view closes PiP', scrollIn, { mode: 'inline', requests: 1 });
+
+    // The user closes the PiP that scrolling opened; hiding then opens PiP it owns, and the tab's return closes it.
+    await expectPiP('scrolling out again reopens PiP', scrollOut, { mode: pip, requests: 1 });
+    await expectPiP('the user closing that PiP ends it without a request', () => {
+      window.__wblockVideo.webkitPresentationMode = 'inline';
+      window.__wblockVideo.dispatchEvent(new Event('webkitpresentationmodechanged'));
+    }, { mode: 'inline', requests: 0 });
+    await expectPiP('hiding the tab opens PiP while the player is out of view', hideTab, { mode: pip, requests: 1 });
+    await expectPiP('the tab returning closes PiP that hiding opened', showTab, { mode: 'inline', requests: 1 });
+
+    // PiP the user entered is never closed by scrolling or focus.
+    await expectPiP('scrolling back into view leaves the page idle', scrollIn, { mode: 'inline', requests: 0 });
+    await expectPiP('the user entering PiP sends no request', () => {
+      window.__wblockVideo.webkitPresentationMode = 'picture-in-picture';
+      window.__wblockVideo.dispatchEvent(new Event('webkitpresentationmodechanged'));
+    }, { mode: pip, requests: 0 });
+    await expectPiP('scrolling out leaves the user PiP alone', scrollOut, { mode: pip, requests: 0 });
+    await expectPiP('focus leaves the user PiP alone', focus, { mode: pip, requests: 0 });
+    await expectPiP('scrolling back into view leaves the user PiP alone', scrollIn, { mode: pip, requests: 0 });
+  }
+  record(config.key, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
 // ---- Scenario: YouTube Music keeps its own player -----------------------
 // YTM already supplies a complete responsive player and Media Session. Tube
 // Cleaner should retain only the document-start background-playback guard, or

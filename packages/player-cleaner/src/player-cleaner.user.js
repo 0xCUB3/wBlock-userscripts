@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.58
+// @version      0.1.59
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -260,12 +260,16 @@
             op === 'scrollOut' && event.autoAllowed;
         var wantsOut = op === 'show' && event.focused || op === 'focus' && !event.hidden && event.focused ||
             op === 'scrollIn' && event.autoAllowed;
+        // PiP that scrolling the player out opened stays while the player is
+        // still out of view: focus and the tab returning don't bring it back.
+        var held = (op === 'show' || op === 'focus') && state.scrolled && event.autoAllowed;
         var entering = wantsIn && event.playing && !event.inPiP;
-        var leaving = wantsOut && state.ours && event.inPiP;
+        var leaving = wantsOut && state.ours && event.inPiP && !held;
         // PiP that ended on its own (closed, or a refused request) is no
         // longer ours to close.
         var forget = op === 'left' || wantsOut && state.ours && !event.inPiP;
-        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving };
+        var scrolled = entering ? op === 'scrollOut' : !(leaving || forget || op === 'scrollIn') && state.scrolled;
+        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving, scrolled: scrolled };
     }
     // @gdp-end
 
@@ -274,7 +278,7 @@
         video._wblockAutoPiPHooked = true;
         // Window focus alone cannot tell whether another window covers
         // Safari, so blur never enters PiP; tab hiding and scrolling do.
-        var state = { ours: false, enter: false, exit: false };
+        var state = { ours: false, enter: false, exit: false, scrolled: false };
         function send(op) {
             state = autoPiPStep({ blurEnters: false }, state, {
                 op: op, autoAllowed: autoPiPEnabled, hideAllowed: autoPiPEnabled && !resumesInBackground(),

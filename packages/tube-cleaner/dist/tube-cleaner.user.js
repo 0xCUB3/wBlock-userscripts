@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.75
+// @version      0.1.76
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -154,12 +154,16 @@
             op === 'scrollOut' && event.autoAllowed;
         var wantsOut = op === 'show' && event.focused || op === 'focus' && !event.hidden && event.focused ||
             op === 'scrollIn' && event.autoAllowed;
+        // PiP that scrolling the player out opened stays while the player is
+        // still out of view: focus and the tab returning don't bring it back.
+        var held = (op === 'show' || op === 'focus') && state.scrolled && event.autoAllowed;
         var entering = wantsIn && event.playing && !event.inPiP;
-        var leaving = wantsOut && state.ours && event.inPiP;
+        var leaving = wantsOut && state.ours && event.inPiP && !held;
         // PiP that ended on its own (closed, or a refused request) is no
         // longer ours to close.
         var forget = op === 'left' || wantsOut && state.ours && !event.inPiP;
-        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving };
+        var scrolled = entering ? op === 'scrollOut' : !(leaving || forget || op === 'scrollIn') && state.scrolled;
+        return { ours: entering ? true : leaving || forget ? false : state.ours, enter: entering, exit: leaving, scrolled: scrolled };
     }
     // @gdp-end
 
@@ -205,7 +209,7 @@
         // Elsewhere losing focus doesn't mean the video is obscured: another
         // window may simply be active beside Safari.
         var config = { blurEnters: IS_IPHONE };
-        var state = { ours: false, enter: false, exit: false };
+        var state = { ours: false, enter: false, exit: false, scrolled: false };
         function send(op) {
             state = autoPiPStep(config, state, {
                 op: op, autoAllowed: autoPiPAllowed(), hideAllowed: hidePiPAllowed(),

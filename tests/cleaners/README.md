@@ -210,7 +210,9 @@ node tests/cleaners/probe-live.mjs https://videojs.org/  # specific URL(s)
   metadata, the background-playback override, and controls surviving a fighting
   player. Tube Cleaner additionally distinguishes
   automatically entered PiP from user-entered PiP so returning to the page does
-  not close a PiP session the user requested manually.
+  not close a PiP session the user requested manually. PiP that scrolling the
+  player out opened stays through focus and the tab returning while the player
+  is still out of view, and closes when it comes back into view.
 - Don't prove: in-video ad removal. Ads are stripped by wBlock's separate
   AdGuard scriptlets (`trusted-replace-*-response`, `set-constant` on
   `adPlacements`/`adSlots`/`playerAds`), not by Tube Cleaner. Verify those via
