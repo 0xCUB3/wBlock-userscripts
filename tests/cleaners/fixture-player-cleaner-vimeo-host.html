@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Vimeo embed under host controls (Player Cleaner test)</title>
+<style>
+  body { margin: 0; background: #fff; font: 16px/1.4 sans-serif; }
+  .player { position: relative; width: 640px; height: 360px; margin: 16px; overflow: hidden; background: #000; }
+  .frame { pointer-events: none; width: 100%; height: 100%; }
+  .frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+  .cover { position: absolute; inset: 0; z-index: 1; background: transparent; border: 0; }
+  .bar { position: absolute; left: 0; right: 0; bottom: 0; z-index: 1; display: flex; gap: 8px; padding: 8px; pointer-events: none; }
+  .bar button { pointer-events: auto; }
+</style>
+</head>
+<body>
+  <!-- openai.com: controls off, the page's own controls on top. -->
+  <div class="player">
+    <div class="frame">
+      <iframe id="covered" src="https://player.vimeo.com/video/1?h=x&controls=0&autoplay=0&background=0&muted=1" allow="autoplay; fullscreen; picture-in-picture"></iframe>
+    </div>
+    <button id="covered-toggle" class="cover" aria-label="Pause video"></button>
+    <div id="covered-bar" class="bar"><button aria-label="Unmute video">Unmute</button><button aria-label="Fullscreen">Full</button></div>
+  </div>
+
+  <!-- A background embed is decoration even under a button. -->
+  <div class="player">
+    <div class="frame">
+      <iframe id="background" src="https://player.vimeo.com/video/2?controls=0&background=1"></iframe>
+    </div>
+    <button id="background-toggle" class="cover" aria-label="Play"></button>
+  </div>
+
+  <!-- Nothing drawn on top: the page chose a bare embed. -->
+  <div class="player">
+    <div class="frame">
+      <iframe id="bare" src="https://player.vimeo.com/video/3?controls=0"></iframe>
+    </div>
+  </div>
+</body>
+</html>

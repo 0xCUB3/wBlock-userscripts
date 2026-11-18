@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.59
+// @version      0.1.60
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -1653,6 +1653,32 @@
         });
     }
 
+    // A page can turn a Vimeo embed's controls off and draw its own over the
+    // frame (openai.com). The embed gets its controls back, and the page's
+    // cover is chrome like any other player's. Background embeds and frames
+    // nothing covers stay as they are.
+    function restoreEmbedControls() {
+        [].forEach.call(document.querySelectorAll('iframe[src*="player.vimeo.com/video/"]'), function (iframe) {
+            var state = stateOf(iframe);
+            if (!state.embed) {
+                var url = attempt(function () { return new URL(iframe.getAttribute('src'), document.baseURI); });
+                var ir = rectOf(iframe);
+                if (!url || url.hostname !== 'player.vimeo.com' || url.searchParams.get('controls') !== '0' ||
+                    url.searchParams.get('background') === '1' || !ir || ir.width < 2 || ir.height < 2) { return; }
+                var covered = [].some.call(containerOf(iframe).querySelectorAll('button,[role="button"],[role="slider"]'), function (el) {
+                    var r = rectOf(el);
+                    return !contains(el, iframe) && r && r.width > 1 && overlaps(r, ir);
+                });
+                if (!covered) { return; }
+                state.embed = true;
+                url.searchParams.set('controls', '1');
+                iframe.src = url.href;
+            }
+            iframe.style.setProperty('pointer-events', 'auto', 'important');
+            hideChrome(iframe);
+        });
+    }
+
     // ABC News AMP embeds a Disney iframe player. The same-origin MRSS feed
     // has the HLS/MP4 URL; a native video replaces the iframe only once that
     // stream has loaded, and any failure restores the original embed.
@@ -1731,6 +1757,7 @@
 
     function scan(root) {
         hidePbsHostOverlays();
+        restoreEmbedControls();
         prepareAbcPlayers();
         videosUnder(root).forEach(function (video) { attempt(function () { consider(video); }); });
     }

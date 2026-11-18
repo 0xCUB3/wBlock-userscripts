@@ -54,6 +54,7 @@ const FIXTURE_PLAYER_FOX_URL = pathToFileURL(join(__dirname, 'fixture-player-cle
 const FIXTURE_PLAYER_VIDEOJS_IOS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-videojs-ios.html')).href;
 const FIXTURE_PLAYER_PORTAL_CONTROLS_URL = pathToFileURL(join(__dirname, 'fixture-player-cleaner-portal-controls.html')).href;
 const FIXTURE_PLAYER_YOUTUBE_EMBED = join(__dirname, 'fixture-player-cleaner-youtube-embed.html');
+const FIXTURE_PLAYER_VIMEO_HOST = join(__dirname, 'fixture-player-cleaner-vimeo-host.html');
 
 const userscript = readFileSync(SCRIPT_PATH, 'utf8');
 const playerUserscript = readFileSync(PLAYER_SCRIPT_PATH, 'utf8');
@@ -3708,6 +3709,48 @@ for (const shape of ['ytm-video-preview', 'yt-thumbnail-view-model']) {
       wrap.hasAttribute('data-wblock-pc-hidden') ||
       iframeStyle.display === 'none' || wrapStyle.display === 'none';
     return { pass: !hidden, detail: `iframe=${iframeStyle.display} wrap=${wrapStyle.display} marked=${iframe.getAttribute('data-wblock-pc-hidden')}/${wrap.getAttribute('data-wblock-pc-hidden')}` };
+  });
+
+  record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
+  await browser.close();
+}
+
+// ---- Scenario: Player Cleaner Vimeo embed under host controls -------------
+// openai.com turns a Vimeo embed's controls off and covers the frame with its
+// own. The embed gets controls=1 and clicks, and the cover is hidden.
+// Background embeds and uncovered frames stay as the page made them.
+{
+  const { browser, page, pageErrors } = await runScenario('Player Cleaner (Vimeo host controls)', {
+    fixture: pathToFileURL(FIXTURE_PLAYER_VIMEO_HOST).href,
+    gotoURL: 'https://openai.com/index/fixture/',
+    responseBody: readFileSync(FIXTURE_PLAYER_VIMEO_HOST, 'utf8'),
+    scriptSource: playerUserscript,
+    readySignal: '#covered-toggle[data-wblock-pc-hidden]',
+    viewport: { width: 1280, height: 1300 },
+  });
+  const S = 'player-cleaner-vimeo-host';
+
+  await check(page, S, 'gives the covered embed its controls and clicks back', () => {
+    const iframe = document.getElementById('covered');
+    const url = new URL(iframe.src);
+    const pass = url.searchParams.get('controls') === '1' && url.searchParams.get('h') === 'x' &&
+      getComputedStyle(iframe).pointerEvents === 'auto';
+    return { pass, detail: `src=${iframe.src} pe=${getComputedStyle(iframe).pointerEvents}` };
+  });
+
+  await check(page, S, "hides the page's cover and control bar", () => {
+    const hidden = ['covered-toggle', 'covered-bar'].map(id => getComputedStyle(document.getElementById(id)).display);
+    return { pass: hidden.every(d => d === 'none'), detail: hidden.join(',') };
+  });
+
+  await check(page, S, 'leaves background and uncovered embeds alone', () => {
+    const background = document.getElementById('background');
+    const bare = document.getElementById('bare');
+    const toggle = document.getElementById('background-toggle');
+    const pass = new URL(background.src).searchParams.get('controls') === '0' &&
+      new URL(bare.src).searchParams.get('controls') === '0' &&
+      getComputedStyle(toggle).display !== 'none' && getComputedStyle(bare).pointerEvents === 'none';
+    return { pass, detail: `background=${background.src} bare=${bare.src} toggle=${getComputedStyle(toggle).display}` };
   });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
