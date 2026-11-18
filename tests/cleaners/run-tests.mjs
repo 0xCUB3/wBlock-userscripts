@@ -1737,10 +1737,10 @@ HTMLMediaElement.prototype.appendChild = function (node) {
   const { browser, page, pageErrors } = await runScenario('Tube Cleaner (Safari owns native captions)', {
     fixture: FIXTURE_URL,
     viewport: { width: 1280, height: 800 },
-    scriptSource: safariOnPrelude + '\n' + captionDataPrelude + '\n' + userscript,
+    scriptSource: safariOnPrelude + '\n' + chapterDataPrelude + '\n' + captionDataPrelude + '\n' + userscript,
   });
   const S = 'tube-cleaner-native-captions-safari';
-  await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length >= 1);
+  await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length >= 1 && document.querySelector('track[data-wblock-native-chapters]'));
   await page.waitForTimeout(700);
   await check(page, S, 'keeps the track Safari turned on showing', () => {
     const now = Array.from(document.querySelector('#movie_player video')?.textTracks || []).filter(t => t.kind === 'subtitles').map(t => `${t.language}:${t.mode}`).join(',');
@@ -1761,6 +1761,34 @@ HTMLMediaElement.prototype.appendChild = function (node) {
     return { pass: now.length > 0 && !/showing/.test(now) && !window.__subtitleClicks,
       detail: `modes=${now} clicks=${window.__subtitleClicks}` };
   }, { timeout: 1 });
+
+  // YouTube's fullscreen swap wipes every TRACK and appends its own timed-word
+  // track. Ours must survive with their modes; YouTube's copy must not attach.
+  await check(page, S, 'keeps native tracks and modes through YouTube fullscreen churn', () => {
+    const video = document.querySelector('#movie_player video');
+    const tracks = Array.from(video.querySelectorAll('track'));
+    const modes = tracks.map(t => t.track.mode);
+    tracks.forEach(t => t.parentNode.removeChild(t));
+    const raw = document.createElement('track');
+    raw.kind = 'subtitles';
+    raw.id = 'yt';
+    video.appendChild(raw);
+    const pass = tracks.length === 2 && tracks.every((t, i) => t.parentNode === video && t.track.mode === modes[i]) &&
+      !video.querySelector('#yt');
+    return { pass, detail: `tracks=${tracks.length} connected=${tracks.filter(t => t.isConnected).length} raw=${!!video.querySelector('#yt')}` };
+  }, { timeout: 1 });
+  await page.evaluate(() => {
+    window.__releasedCaptionVideo = document.querySelector('#movie_player video');
+    document.getElementById('movie_player').classList.add('ytp-miniplayer');
+    document.dispatchEvent(new Event('yt-navigate-finish'));
+  });
+  await check(page, S, 'restores track methods and removes owned tracks on teardown', () => {
+    const video = window.__releasedCaptionVideo;
+    const proto = Object.getPrototypeOf(video);
+    const left = video.querySelectorAll('[data-wblock-native-subtitle], [data-wblock-native-chapters]').length;
+    return { pass: video.removeChild === proto.removeChild && video.appendChild === proto.appendChild && left === 0,
+      detail: `remaining=${left}` };
+  });
 
   record(S, 'no uncaught page errors', pageErrors.length === 0, pageErrors.join(' | '));
   await browser.close();

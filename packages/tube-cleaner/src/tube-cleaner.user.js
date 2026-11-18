@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.76
+// @version      0.1.77
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2330,12 +2330,32 @@
         var nativeRemoveAttribute = video.removeAttribute;
         var nativeSetAttribute = video.setAttribute;
         var nativeToggleAttribute = video.toggleAttribute;
+        var nativeRemoveChild = video.removeChild;
+        var nativeAppendChild = video.appendChild;
 
         function isControlsName(name) {
             return String(name).toLowerCase() === 'controls';
         }
 
+        // Tube Cleaner marks its tracks before appending them. On fullscreen
+        // changes YouTube removes every TRACK and appends raw timed-word
+        // captions; keep ours connected and drop YouTube's copy.
+        function ownedTrack(node) {
+            return node.nodeName === 'TRACK' &&
+                (node.hasAttribute('data-wblock-native-subtitle') || node.hasAttribute('data-wblock-native-chapters'));
+        }
+
         try {
+            video.removeChild = function (node) {
+                if (this === video && node && node.parentNode === video && ownedTrack(node)) return node;
+                return nativeRemoveChild.apply(this, arguments);
+            };
+            video.appendChild = function (node) {
+                if (this === video && node && node.nodeName === 'TRACK' && !ownedTrack(node) &&
+                    (node.kind === 'chapters' ? featureEnabled('chapters') :
+                     (node.kind === 'subtitles' || node.kind === 'captions') && featureEnabled('captions'))) return node;
+                return nativeAppendChild.apply(this, arguments);
+            };
             video.removeAttribute = function (name) {
                 if (isControlsName(name)) return;
                 return nativeRemoveAttribute.apply(this, arguments);
@@ -2383,6 +2403,8 @@
 
         registerCleanup(function () {
             video._wblockControlsPinned = false;
+            try { delete video.removeChild; } catch (e) { /* ignore */ }
+            try { delete video.appendChild; } catch (e) { /* ignore */ }
             try { delete video.removeAttribute; } catch (e) { /* ignore */ }
             try { delete video.setAttribute; } catch (e) { /* ignore */ }
             try { delete video.toggleAttribute; } catch (e) { /* ignore */ }
