@@ -1,6 +1,6 @@
-// Player Cleaner leaves GIF-like videos alone: a looping clip without
-// controls that plays no sound (Discord's splash animation, chat and feed
-// GIFs). Real players next to them, including muted looping feed videos that
+// Player Cleaner leaves GIF-like videos alone: a clip without controls that
+// plays no sound (Discord's splash animation, chat and feed GIFs, gm.com's
+// silent hero under its headline). Real players next to them, including muted looping feed videos that
 // carry audio, are still taken over, and unmuting a decorative clip through
 // the site's sound button makes it a player. Runs on real media in WebKit,
 // desktop and iPhone.
@@ -34,10 +34,11 @@ const fixture = `<!doctype html><html><head><meta name="viewport" content="width
   <div class="card" id="feed-card"><video id="feed" src="/sound.mp4" loop playsinline></video><button class="sound">Sound</button></div>
   <div class="card" id="silent-feed-card"><video id="silent-feed" src="/silent.mp4" loop muted playsinline></video><button class="sound" id="unmute">Sound</button></div>
   <div class="card video-js" id="news-card"><video id="news" src="/sound.mp4" autoplay muted playsinline></video><div class="bar"><button>Play</button></div></div>
+  <div class="card video-js" id="hero-card"><video id="hero" src="/silent.mp4" muted playsinline></video><h1 class="badge" id="headline">Technology that leads</h1></div>
   <div class="card" id="custom-card"><video id="custom" src="/silent.mp4" playsinline></video><div class="bar"><button>Play</button></div></div>
 </main>
 <script>
-  for (const id of ['gif-unmuted', 'feed', 'silent-feed']) {
+  for (const id of ['gif-unmuted', 'feed', 'silent-feed', 'hero']) {
     const v = document.getElementById(id);
     v.muted = id !== 'gif-unmuted';
     v.play().catch(() => {});
@@ -65,7 +66,7 @@ try {
     const state = () => page.evaluate(() => Object.fromEntries([...document.querySelectorAll('video')].map(v =>
       [v.id, { enhanced: v.hasAttribute('data-wblock-player-cleaner'), controls: v.controls }])));
     const before = await state();
-    for (const id of ['splash-video', 'gif', 'gif-unmuted', 'known-gif', 'silent-feed']) {
+    for (const id of ['splash-video', 'gif', 'gif-unmuted', 'known-gif', 'silent-feed', 'hero']) {
       assert.deepEqual(before[id], { enhanced: false, controls: false }, `${label}: ${id} is decorative`);
     }
     for (const id of ['feed', 'news', 'custom']) {
@@ -73,12 +74,34 @@ try {
     }
     // Hidden overlays stay on decorative videos.
     assert.equal(await page.evaluate(() => document.querySelector('#known-gif-card .bar').offsetHeight > 0), true, `${label}: decorative chrome kept`);
+    assert.equal(await page.evaluate(() => ['headline'].every(id => document.getElementById(id).offsetHeight > 0)), true, `${label}: hero text kept`);
 
     await page.evaluate(() => document.getElementById('unmute').click());
     await page.waitForSelector('#silent-feed[data-wblock-player-cleaner]', { timeout: 3000 });
     assert.equal(await page.evaluate(() => document.getElementById('silent-feed').controls), true, `${label}: unmuted clip has controls`);
     assert.deepEqual(errors, [], `${label}: page errors`);
     console.log(`PASS ${label} decorative videos`);
+    await context.close();
+  }
+  // A saved unmute leaves a muted autoplay playing (Safari pauses one that
+  // is unmuted without a tap) and still applies to a video waiting for play.
+  {
+    const context = await browser.newContext();
+    await context.addInitScript(() => localStorage.setItem('wblock.playerCleaner.preferences', JSON.stringify({ muted: false })));
+    await context.addInitScript({ content: script });
+    await context.route('**/*', route => {
+      const body = media[new URL(route.request().url()).pathname];
+      return body ? route.fulfill({ contentType: 'video/mp4', body }) : route.fulfill({ contentType: 'text/html', body: `<!doctype html><body>
+<div class="video-js" style="width:300px;height:200px"><video id="auto" src="/sound.mp4" autoplay muted playsinline style="width:300px;height:200px"></video></div>
+<div class="video-js" style="width:300px;height:200px"><video id="idle" src="/sound.mp4" muted playsinline style="width:300px;height:200px"></video></div></body>` });
+    });
+    const page = await context.newPage();
+    await page.goto('https://fixture.test/');
+    await page.waitForSelector('#auto[data-wblock-player-cleaner]');
+    await page.waitForSelector('#idle[data-wblock-player-cleaner]');
+    const media2 = await page.evaluate(() => ['auto', 'idle'].map(id => document.getElementById(id).muted));
+    assert.deepEqual(media2, [true, false], 'saved unmute skips the muted autoplay and applies to the idle player');
+    console.log('PASS saved unmute');
     await context.close();
   }
 } finally {

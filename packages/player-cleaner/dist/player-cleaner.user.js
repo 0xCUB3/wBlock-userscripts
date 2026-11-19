@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.60
+// @version      0.1.61
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -588,7 +588,9 @@
         var applying = true;
         if (preferences.playbackRate > 0) { video.playbackRate = Math.max(0.25, Math.min(4, preferences.playbackRate)); }
         if (typeof preferences.volume === 'number') { video.volume = Math.max(0, Math.min(1, preferences.volume)); }
-        if (typeof preferences.muted === 'boolean') { video.muted = preferences.muted; }
+        // Safari pauses a muted autoplay that is unmuted without a tap, so a
+        // saved unmute waits for the user's own play.
+        if (preferences.muted === true || preferences.muted === false && video.paused && !video.autoplay) { video.muted = preferences.muted; }
         setTimeout(function () { applying = false; }, 0);
 
         function applySubtitles() {
@@ -971,16 +973,19 @@
             !types.some(function (t) { return t.indexOf('video/') === 0; });
     }
 
-    // A looping clip without controls that plays no sound is a GIF stand-in
-    // (chat and feed GIFs, a splash animation), not a player. Until metadata
-    // says whether it has sound, wait. With no track info, a short muted
-    // loop counts. Unmuting it (a site sound button) makes it a player.
+    // A loop or muted clip without controls that has no audio track is a GIF
+    // stand-in or a hero backdrop (chat and feed GIFs, gm.com's banner under
+    // its headline), not a player. Until metadata says whether it has sound,
+    // wait. A muted clip that won't load metadata by itself is a player:
+    // preload="none" (nytimes.com) or an MSE stream iOS has to promote before
+    // it loads (Reddit). With no track info, a short muted loop counts.
+    // Unmuting it (a site sound button) makes it a player.
     function isDecorative(video) {
-        if (video._wblockChosen || video.controls || !video.loop) { return false; }
-        if (video.readyState < 1) { return true; }
+        if (video._wblockChosen || video.controls || !video.loop && !video.muted) { return false; }
+        if (video.readyState < 1) { return video.loop || video.preload !== 'none' && !isOpaque(video); }
         var audible = video.audioTracks ? video.audioTracks.length > 0 : video.mozHasAudio;
         if (typeof audible === 'boolean') { return !audible; }
-        return video.muted && video.duration <= 30;
+        return video.muted && video.loop && video.duration <= 30;
     }
 
     // ------------------------------------------------------------------
