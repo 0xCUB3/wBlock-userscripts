@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.77
+// @version      0.1.78
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -5416,12 +5416,24 @@
             document.addEventListener('wblock-tc-toolbar-pref', onToolbarPref);
 
             var presentationTimer = null;
+            var lastPresentationMode = video.webkitPresentationMode;
             function onPresentationModeChange() {
-                if (video.webkitPresentationMode === 'picture-in-picture') {
+                var mode = video.webkitPresentationMode;
+                if (mode === 'picture-in-picture') {
                     showToolbar();
                     clearTimeout(presentationTimer);
                     presentationTimer = setTimeout(hideToolbar, TOOLBAR_HIDE_DELAY);
+                } else if (mode === 'inline' && lastPresentationMode === 'picture-in-picture' && video.paused) {
+                    // A video paused in PiP came back with controls that
+                    // ignored the mouse until playback changed (#16). Build
+                    // Safari's controls again so they start fresh.
+                    var controls = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'controls');
+                    if (controls && controls.set) {
+                        controls.set.call(video, false);
+                        requestAnimationFrame(function () { controls.set.call(video, true); showToolbar(); });
+                    }
                 }
+                lastPresentationMode = mode;
             }
             video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
 

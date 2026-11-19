@@ -542,6 +542,28 @@ async function commonChecks(page, scenario, { expectToolbar = true } = {}) {
     return { pass: modes.join(',') === 'inline,fullscreen', detail: 'modes=' + modes.join(',') };
   });
 
+  // Safari left the controls of a video paused in PiP dead after it came
+  // back inline (#16): Tube Cleaner builds them again on the way back.
+  await check(page, scenario, 'rebuilds native controls when a video paused in PiP returns inline', async () => {
+    const video = document.querySelector('#movie_player video');
+    if (!video) return { pass: false, detail: 'no video' };
+    if (/iPhone|iPad/.test(navigator.userAgent) || navigator.maxTouchPoints > 0) return { pass: true, detail: 'skipped: desktop only' };
+    let mode = 'inline';
+    Object.defineProperty(video, 'webkitPresentationMode', { configurable: true, get: () => mode });
+    video.pause();
+    mode = 'picture-in-picture';
+    video.dispatchEvent(new Event('webkitpresentationmodechanged'));
+    const seen = [];
+    const observer = new MutationObserver(records => records.forEach(r => seen.push(r.oldValue === null ? 'added' : 'changed')));
+    observer.observe(video, { attributes: true, attributeOldValue: true, attributeFilter: ['controls'] });
+    mode = 'inline';
+    video.dispatchEvent(new Event('webkitpresentationmodechanged'));
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    observer.disconnect();
+    delete video.webkitPresentationMode;
+    return { pass: seen.includes('added') && video.controls === true, detail: 'seen=' + seen.join(',') + ' controls=' + video.controls };
+  });
+
   await check(page, scenario, 'C toggles the native subtitle track instead of YouTube captions', () => {
     const video = document.querySelector('#movie_player video');
     if (!video) return { pass: false, detail: 'no video' };
