@@ -1800,6 +1800,30 @@ HTMLMediaElement.prototype.appendChild = function (node) {
       !video.querySelector('#yt');
     return { pass, detail: `tracks=${tracks.length} connected=${tracks.filter(t => t.isConnected).length} raw=${!!video.querySelector('#yt')}` };
   }, { timeout: 1 });
+
+  // YouTube's raw captions can still arrive by other paths and turn
+  // themselves on; they must not show, or replace ours.
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    video.querySelector('track[data-wblock-native-subtitle][srclang="en"]').track.mode = 'showing';
+    const raw = document.createElement('track');
+    raw.kind = 'subtitles';
+    raw.id = 'yt-inserted';
+    raw.default = true;
+    video.insertBefore(raw, video.firstChild);
+    raw.track.mode = 'showing';
+    video.addTextTrack('captions', 'yt-js').mode = 'showing';
+  });
+  await page.waitForTimeout(100);
+  await check(page, S, 'switches off YouTube tracks that bypass the append guard', () => {
+    const video = document.querySelector('#movie_player video');
+    const owned = Array.from(video.querySelectorAll('track[data-wblock-native-subtitle]')).map(t => t.track);
+    const all = Array.from(video.textTracks).filter(t => t.kind === 'subtitles' || t.kind === 'captions');
+    const foreign = all.filter(t => owned.indexOf(t) === -1);
+    const modes = all.map(t => `${t.label || t.language}:${t.mode}`).join(',');
+    return { pass: foreign.length === 2 && foreign.every(t => t.mode === 'disabled') &&
+      owned.some(t => t.language === 'en' && t.mode === 'showing'), detail: `modes=${modes}` };
+  }, { timeout: 1 });
   await page.evaluate(() => {
     window.__releasedCaptionVideo = document.querySelector('#movie_player video');
     document.getElementById('movie_player').classList.add('ytp-miniplayer');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.78
+// @version      0.1.79
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -3677,6 +3677,7 @@
             if (elements.length) {
                 log('applied', elements.length, 'Safari caption tracks');
                 disableYouTubeSubtitles();
+                disableForeignSubtitles();
             }
         }
 
@@ -3787,7 +3788,24 @@
             }
             showingBefore = showing;
         }
+        // YouTube still gets its raw timed-word captions onto the video in
+        // native fullscreen and PiP by paths the appendChild guard never sees.
+        // Their cues pile up in a corner on top of ours whatever the caption
+        // setting says, and the rule above would keep theirs over ours. Once
+        // our tracks are in, switch every other subtitle track off.
+        function disableForeignSubtitles() {
+            var owned = Array.prototype.map.call(video.querySelectorAll('track[data-wblock-native-subtitle]'),
+                function (element) { return element.track; });
+            if (!owned.length) return;
+            var tracks = nativeSubtitleTracks(video);
+            for (var i = 0; i < tracks.length; i++) {
+                if (owned.indexOf(tracks[i]) === -1 && tracks[i].mode !== 'disabled') {
+                    try { tracks[i].mode = 'disabled'; } catch (e) { /* ignore */ }
+                }
+            }
+        }
         function onNativeSubtitleChange() {
+            disableForeignSubtitles();
             enforceSingleSubtitleTrack();
             if (showingBefore.length) video._wblockLastSubtitleTrack = showingBefore[0];
         }
@@ -3819,6 +3837,7 @@
         }
         function onTrackAdded(event) {
             if (event && event.track) event.track.addEventListener('cuechange', onPiPCaptionTick);
+            disableForeignSubtitles();
         }
         // Safari's caption menus learn the selection from mode changes WebKit
         // delivers while the page renders. The pump's flips happen while it
