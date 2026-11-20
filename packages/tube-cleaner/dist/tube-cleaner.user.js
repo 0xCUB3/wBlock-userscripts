@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.79
+// @version      0.1.80
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -3788,17 +3788,22 @@
             }
             showingBefore = showing;
         }
-        // YouTube still gets its raw timed-word captions onto the video in
-        // native fullscreen and PiP by paths the appendChild guard never sees.
-        // Their cues pile up in a corner on top of ours whatever the caption
-        // setting says, and the rule above would keep theirs over ours. Once
-        // our tracks are in, switch every other subtitle track off.
+        // Other caption tracks must not show on top of ours. YouTube can attach
+        // its timed-word track by paths the appendChild guard never sees, and
+        // the rule above would keep it over ours. WebKit's YouTube quirk
+        // (CaptionMirror) also adds a "forced" track and shows it in
+        // fullscreen and PiP. It copies YouTube's caption window into one
+        // cue that lasts the whole video. With that window hidden here,
+        // YouTube never trims old lines and the copy grows into a block over
+        // the video. Forced tracks show whatever Safari's caption setting
+        // says. Once our tracks are in, switch every other one off.
         function disableForeignSubtitles() {
             var owned = Array.prototype.map.call(video.querySelectorAll('track[data-wblock-native-subtitle]'),
                 function (element) { return element.track; });
-            if (!owned.length) return;
-            var tracks = nativeSubtitleTracks(video);
+            if (!owned.length || !video.textTracks) return;
+            var tracks = video.textTracks;
             for (var i = 0; i < tracks.length; i++) {
+                if (!/^(?:subtitles|captions|forced)$/.test(tracks[i].kind)) continue;
                 if (owned.indexOf(tracks[i]) === -1 && tracks[i].mode !== 'disabled') {
                     try { tracks[i].mode = 'disabled'; } catch (e) { /* ignore */ }
                 }

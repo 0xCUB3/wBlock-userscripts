@@ -1813,15 +1813,19 @@ HTMLMediaElement.prototype.appendChild = function (node) {
     video.insertBefore(raw, video.firstChild);
     raw.track.mode = 'showing';
     video.addTextTrack('captions', 'yt-js').mode = 'showing';
+    // WebKit's YouTube CaptionMirror quirk adds this and shows it in fullscreen and PiP.
+    const mirror = video.addTextTrack('forced', 'YouTube Captions');
+    mirror.mode = 'hidden';
+    mirror.mode = 'showing';
   });
   await page.waitForTimeout(100);
-  await check(page, S, 'switches off YouTube tracks that bypass the append guard', () => {
+  await check(page, S, 'switches off YouTube and CaptionMirror tracks that bypass the append guard', () => {
     const video = document.querySelector('#movie_player video');
     const owned = Array.from(video.querySelectorAll('track[data-wblock-native-subtitle]')).map(t => t.track);
-    const all = Array.from(video.textTracks).filter(t => t.kind === 'subtitles' || t.kind === 'captions');
+    const all = Array.from(video.textTracks).filter(t => /^(subtitles|captions|forced)$/.test(t.kind));
     const foreign = all.filter(t => owned.indexOf(t) === -1);
-    const modes = all.map(t => `${t.label || t.language}:${t.mode}`).join(',');
-    return { pass: foreign.length === 2 && foreign.every(t => t.mode === 'disabled') &&
+    const modes = all.map(t => `${t.kind}/${t.label || t.language}:${t.mode}`).join(',');
+    return { pass: foreign.length === 3 && foreign.every(t => t.mode === 'disabled') &&
       owned.some(t => t.language === 'en' && t.mode === 'showing'), detail: `modes=${modes}` };
   }, { timeout: 1 });
   await page.evaluate(() => {
