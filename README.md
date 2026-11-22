@@ -18,6 +18,10 @@ Each package has editable `src/`, tracked generated `dist/`, and stable install 
 
 DeArrow runs independently of Tube Cleaner and uses community data from https://dearrow.ajay.app/ under CC BY-NC-SA 4.0.
 
+## Manifests
+
+- `manifests/adguard-extra-hosts.json`: version-pinned host list (`hosts` and bundled `tinyShieldDomains`) extracted from the official AdGuard Extra release by `tools/extract_adguard_extra_hosts.mjs` and refreshed by a scheduled GitHub Action. wBlock uses it to skip injecting AdGuard Extra on non-matching sites while still downloading AdGuard Extra from AdGuard's official URL.
+
 ## Development and release
 
 ```sh

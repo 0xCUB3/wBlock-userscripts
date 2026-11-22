@@ -3,6 +3,7 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {cleanerDistribution, darkReaderDistribution} from './distribution.mjs';
+import {validateAdGuardExtraManifest} from './extract_adguard_extra_hosts.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const raw = 'https://raw.githubusercontent.com/0xCUB3/wBlock-userscripts/main';
@@ -57,6 +58,10 @@ for (const file of ['packages/tube-cleaner/dist/tube-cleaner.user.js','packages/
   const built = await readFile(join(root, file), 'utf8');
   if (/fetch\(['"]https?:|import\(['"]https?:/.test(built)) fail(`${file}: executable network match`);
 }
-const allowed = /^(packages|tools|tests|\.github|README\.md|AGENTS\.md|LICENSE|\.gitignore|package\.json|package-lock\.json)(\/|$)/;
+const adGuardExtraManifest = JSON.parse(
+  await readFile(join(root, 'manifests/adguard-extra-hosts.json'), 'utf8'),
+);
+validateAdGuardExtraManifest(adGuardExtraManifest);
+const allowed = /^(packages|manifests|tools|tests|\.github|README\.md|AGENTS\.md|LICENSE|\.gitignore|package\.json|package-lock\.json)(\/|$)/;
 for (const f of execFileSync('git', ['ls-files','--others','--exclude-standard'], {cwd:root, encoding:'utf8'}).split('\n').filter(Boolean)) if (/\.(?:js|mjs|cjs|py|sh|swift)$/.test(f) && !allowed.test(f)) fail(`untracked executable source outside expected paths: ${f}`);
 console.log('check: PASS');

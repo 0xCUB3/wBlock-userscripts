@@ -1,0 +1,40 @@
+name: Update AdGuard Extra host manifest
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-adguard-extra-hosts
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - name: Extract AdGuard Extra host manifest
+        run: node tools/extract_adguard_extra_hosts.mjs
+      - name: Validate manifest and repo checks
+        run: |
+          node tools/check.mjs
+          node tests/adguard-extra-hosts.test.mjs
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet manifests/adguard-extra-hosts.json; then
+            echo "No changes to manifests/adguard-extra-hosts.json"
+            exit 0
+          fi
+          VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('manifests/adguard-extra-hosts.json','utf8')).version)")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifests/adguard-extra-hosts.json
+          git commit -m "chore(manifests): update AdGuard Extra hosts for v${VERSION}"
+          git push origin HEAD:main
