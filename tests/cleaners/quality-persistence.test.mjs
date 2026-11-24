@@ -126,6 +126,78 @@ try {
   assert.equal(await page.evaluate(() => window.__sameQualityVideo === document.querySelector('#movie_player video')), true);
   assert.deepEqual(errors, []);
   console.log('PASS: YouTube SPA navigation restores quality when the same video element is reused');
+
+  // Auto in native fullscreen promotes from 360p to 1080p, returns to Auto on
+  // exit or weak-network stall, and never overrides an explicit quality choice.
+  await choose('Auto');
+  await page.evaluate(() => {
+    const player = document.getElementById('movie_player');
+    const video = player.querySelector('video');
+    window.__uiSelectedQuality = null;
+    player.setPlaybackQualityRange('medium', 'medium');
+    video.dispatchEvent(new Event('webkitbeginfullscreen'));
+  });
+  await page.clock.runFor(600);
+  assert.equal((await snapshot()).selected, 'hd1080', 'Auto promotes to 1080p in native fullscreen');
+  assert.equal((await snapshot()).preference, 'auto', 'fullscreen promotion must not overwrite Auto preference');
+  await page.evaluate(() => {
+    document.querySelector('#movie_player video').dispatchEvent(new Event('webkitendfullscreen'));
+  });
+  await page.clock.runFor(600);
+  assert.equal((await snapshot()).current, 'auto', 'leaving fullscreen returns Auto to YouTube ABR');
+  console.log('PASS: Auto promotes to HD in iOS native fullscreen and restores Auto on exit');
+
+  await page.evaluate(() => {
+    const player = document.getElementById('movie_player');
+    const video = player.querySelector('video');
+    player.setPlaybackQualityRange('medium', 'medium');
+    video.dispatchEvent(new Event('webkitbeginfullscreen'));
+  });
+  await page.clock.runFor(600);
+  assert.equal((await snapshot()).selected, 'hd1080');
+  await page.clock.runFor(9000);
+  assert.equal((await snapshot()).current, 'auto', 'stalled fullscreen promotion falls back to Auto');
+  console.log('PASS: stalled fullscreen Auto promotion falls back to Auto on weak networks');
+
+  // Quality saved via GM_setValue survives a fresh browser context (new Private tab / origin).
+  const sharedStore = {};
+  async function openWithGM(store) {
+    const gmContext = await browser.newContext(devices['iPhone 13']);
+    const gmPage = await gmContext.newPage();
+    await gmPage.exposeBinding('__persistGM', (_, k, v) => { store[k] = v; });
+    await gmPage.addInitScript(({ store }) => {
+      window.GM_getValue = (k, fallback) => (k in store ? store[k] : fallback);
+      window.GM_setValue = (k, v) => { store[k] = v; window.__persistGM(k, v); };
+    }, { store });
+    await gmPage.addInitScript(script);
+    await gmPage.clock.install();
+    await gmPage.goto(fixture);
+    await gmPage.waitForSelector('.wblock-tc-native');
+    return { gmContext, gmPage };
+  }
+  const firstGM = await openWithGM(sharedStore);
+  await firstGM.gmPage.evaluate(() => {
+    document.querySelector('.wblock-tc-quality-button').click();
+    Array.from(document.querySelectorAll('.wblock-tc-quality-menu > button'))
+      .find(button => button.textContent === '720p').click();
+  });
+  await firstGM.gmPage.clock.runFor(600);
+  assert.equal(sharedStore['wblock.tubeCleaner.quality'], 'hd720');
+  await firstGM.gmContext.close();
+
+  const secondGM = await openWithGM(sharedStore);
+  assert.equal(await secondGM.gmPage.evaluate(() => window.__wblockTubeDebug.getPreferredQuality()), 'hd720');
+  await secondGM.gmPage.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    for (const [k, v] of Object.entries({ currentTime: 0.5, paused: false, seeking: false, ended: false, readyState: 4 })) {
+      Object.defineProperty(video, k, { configurable: true, value: v });
+    }
+    video.dispatchEvent(new Event('timeupdate'));
+  });
+  await secondGM.gmPage.clock.runFor(600);
+  assert.equal(await secondGM.gmPage.evaluate(() => window.__uiSelectedQuality), 'hd720');
+  await secondGM.gmContext.close();
+  console.log('PASS: saved quality persists across fresh contexts via GM storage');
 } finally {
   await browser.close();
 }

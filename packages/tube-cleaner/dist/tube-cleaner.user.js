@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.80
+// @version      0.1.81
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -275,8 +275,34 @@
         storageSet(STORAGE_AUDIO, v ? '1' : '0');
     }
 
+    var QUALITY_PREF_VALUES = {
+        auto: true, hd2160: true, hd1440: true, hd1080: true, hd720: true,
+        large: true, medium: true, small: true, tiny: true
+    };
+    var preferredQualityMigrated = false;
+
+    function normalizeQualityPreference(value) {
+        return typeof value === 'string' && QUALITY_PREF_VALUES[value] ? value : null;
+    }
+
     function getPreferredQuality() {
-        try { return localStorage.getItem(STORAGE_QUALITY) || 'auto'; } catch (e) { return 'auto'; }
+        var shared = null;
+        try {
+            if (typeof GM_getValue === 'function') {
+                shared = normalizeQualityPreference(GM_getValue(STORAGE_QUALITY, null));
+            }
+        } catch (e) { /* use local storage outside wBlock */ }
+        if (shared) return shared;
+        var local = null;
+        try { local = normalizeQualityPreference(localStorage.getItem(STORAGE_QUALITY)); } catch (e) { /* ignore */ }
+        if (local) {
+            if (!preferredQualityMigrated && typeof GM_setValue === 'function') {
+                preferredQualityMigrated = true;
+                try { GM_setValue(STORAGE_QUALITY, local); } catch (e) { /* ignore */ }
+            }
+            return local;
+        }
+        return 'auto';
     }
 
     // Safari's per-origin storage quota is shared with everything YouTube and
@@ -318,7 +344,12 @@
     }
 
     function setPreferredQuality(q) {
-        storageSet(STORAGE_QUALITY, q);
+        var normalized = normalizeQualityPreference(q) || 'auto';
+        cancelMobileFullscreenQuality();
+        storageSet(STORAGE_QUALITY, normalized);
+        if (typeof GM_setValue === 'function') {
+            try { GM_setValue(STORAGE_QUALITY, normalized); } catch (e) { /* ignore */ }
+        }
     }
 
     // Device-level preference to keep the wBlock toolbar (quality / SB)
@@ -1987,6 +2018,7 @@
             // Let SABR start adaptively; restore our preference only after progress.
             storageRemove('yt-player-quality');
             applyPreferredQuality();
+            setupMobileFullscreenQuality(video);
         }
     }
 
@@ -4467,6 +4499,7 @@
 
     function restoreMobileQuality(preferred) {
         cancelMobileQualityRestore();
+        cancelMobileFullscreenQuality();
         var video = activeVideo;
         var player = findPlayer();
         if (!video || !player || QUALITY_ORDER.indexOf(preferred) === -1) return;
@@ -4511,6 +4544,127 @@
         mobileQualityCleanup = stop;
         send('baseline');
         video.addEventListener('timeupdate', onProgress);
+    }
+
+    var mobileFullscreenQualityCleanup = null;
+
+    function cancelMobileFullscreenQuality() {
+        if (mobileFullscreenQualityCleanup) mobileFullscreenQualityCleanup();
+    }
+
+    // Native iOS fullscreen (AVPlayerViewController) leaves #movie_player at
+    // its small inline portrait geometry in the DOM, so YouTube's mobile ABR
+    // stays at 360p/480p on Auto even in fullscreen. Promote Auto to HD while
+    // in fullscreen and hand back to Auto on exit or if playback stalls.
+    function fullscreenAutoTarget(video) {
+        var current = getCurrentQuality();
+        if (current === 'auto' || current === 'unknown' || !QUALITY_LABELS[current]) {
+            current = qualityFromVideoHeight(video) || 'auto';
+        }
+        var hd720Idx = QUALITY_ORDER.indexOf('hd720');
+        var curIdx = QUALITY_ORDER.indexOf(current);
+        if (curIdx !== -1 && curIdx <= hd720Idx) return null;
+
+        var reported = getAvailableQualities();
+        if (reported.indexOf('hd1080') !== -1) return 'hd1080';
+        if (reported.indexOf('hd720') !== -1) return 'hd720';
+        if (reported.length === 0 || (reported.length === 1 && reported[0] === 'medium')) {
+            return 'hd720';
+        }
+        return null;
+    }
+
+    function setupMobileFullscreenQuality(video) {
+        if (!IS_IOS || !video) return;
+        var inFullscreen = videoInNativeFullscreen(video);
+        var promoted = false;
+        var gaveUp = false;
+        var monitor = null;
+
+        function stopMonitor() {
+            if (monitor !== null) clearInterval(monitor);
+            monitor = null;
+        }
+
+        function stopAll() {
+            stopMonitor();
+            promoted = false;
+            if (mobileFullscreenQualityCleanup === stopAll) mobileFullscreenQualityCleanup = null;
+        }
+
+        function isCurrentAuto() {
+            return activeVideo === video && getPreferredQuality() === 'auto';
+        }
+
+        function startMonitor() {
+            stopMonitor();
+            var player = findPlayer();
+            if (!player) return;
+            var state = {
+                phase: 'restoring', lastPos: 0, prevPos: 0, prevCheck: 0, stalled: 0, observed: 0,
+                fallbacks: 0, start: false, fallback: false
+            };
+            function send(op) {
+                state = qualityWatchStep(QUALITY_WATCH, state, {
+                    op: op, t: Date.now(), pos: Math.max(0, Math.round((video.currentTime || 0) * 1000)),
+                    paused: !!video.paused, seeking: !!video.seeking, ended: !!video.ended, ready: video.readyState >= 2,
+                    ad: player.classList.contains('ad-showing'), hidden: _realHidden
+                });
+                if (state.fallback) {
+                    gaveUp = true;
+                    promoted = false;
+                    stopMonitor();
+                    setQuality('auto');
+                } else if (state.phase === 'done') {
+                    stopMonitor();
+                }
+            }
+            send('restored');
+            monitor = setInterval(function () {
+                send(isCurrentAuto() && inFullscreen ? 'tick' : 'cancel');
+            }, 500);
+        }
+
+        function onEnter() {
+            inFullscreen = true;
+            if (!isCurrentAuto() || promoted || gaveUp) return;
+            var target = fullscreenAutoTarget(video);
+            if (!target) return;
+            promoted = true;
+            setQuality(target, function (worked) {
+                if (!worked || !isCurrentAuto() || !inFullscreen) {
+                    promoted = false;
+                    return;
+                }
+                storageRemove('yt-player-quality');
+                mobileFullscreenQualityCleanup = stopAll;
+                startMonitor();
+            });
+        }
+
+        function onExit() {
+            inFullscreen = false;
+            stopMonitor();
+            if (!promoted) return;
+            promoted = false;
+            if (isCurrentAuto()) setQuality('auto');
+        }
+
+        function onPresentationChange() {
+            if (video.webkitPresentationMode === 'fullscreen') onEnter();
+            else onExit();
+        }
+
+        video.addEventListener('webkitbeginfullscreen', onEnter);
+        video.addEventListener('webkitendfullscreen', onExit);
+        video.addEventListener('webkitpresentationmodechanged', onPresentationChange);
+
+        registerCleanup(function () {
+            stopAll();
+            video.removeEventListener('webkitbeginfullscreen', onEnter);
+            video.removeEventListener('webkitendfullscreen', onExit);
+            video.removeEventListener('webkitpresentationmodechanged', onPresentationChange);
+        });
     }
 
     function applyPreferredQuality() {
