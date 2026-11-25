@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.84
+// @version      0.1.85
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -252,7 +252,7 @@
             log('presentation mode changed:', video.webkitPresentationMode);
         }
         function onLeavePictureInPicture() { send('left'); }
-        addOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
+        (nativeVideoAddEventListener || video.addEventListener).call(video, 'webkitpresentationmodechanged', onPresentationModeChange);
         video.addEventListener('leavepictureinpicture', onLeavePictureInPicture);
 
         // Release all of the above when this video is superseded, so listeners
@@ -263,7 +263,7 @@
             window.removeEventListener('focus', onFocus);
             window.removeEventListener('blur', onBlur);
             try { if (scrollObserver) scrollObserver.disconnect(); } catch (e) { /* ignore */ }
-            removeOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
+            (nativeVideoRemoveEventListener || video.removeEventListener).call(video, 'webkitpresentationmodechanged', onPresentationModeChange);
             video.removeEventListener('leavepictureinpicture', onLeavePictureInPicture);
         };
     }
@@ -732,22 +732,34 @@
     var _realHidden = false;
     var realVisibilityObservers = [];
 
-    function findDocumentGetter(name) {
+    function findPropDesc(obj, prop) {
         try {
-            var proto = document;
-            while (proto) {
-                var descriptor = Object.getOwnPropertyDescriptor(proto, name);
-                if (descriptor && typeof descriptor.get === 'function') {
-                    return descriptor.get;
-                }
-                proto = Object.getPrototypeOf(proto);
+            for (var cur = obj; cur; cur = Object.getPrototypeOf(cur)) {
+                var desc = Object.getOwnPropertyDescriptor(cur, prop);
+                if (desc) return desc;
             }
         } catch (e) { /* ignore */ }
         return null;
     }
 
-    var nativeHiddenGetter = findDocumentGetter('hidden');
-    var nativeVisibilityStateGetter = findDocumentGetter('visibilityState');
+    function patchProp(obj, prop, makeSet) {
+        try {
+            var desc = findPropDesc(obj, prop);
+            if (!desc || !desc.set || desc.set._wblockTubeCleaner) return null;
+            var setter = makeSet(desc);
+            setter._wblockTubeCleaner = true;
+            Object.defineProperty(obj, prop, {
+                configurable: true,
+                enumerable: desc.enumerable,
+                get: function () { return desc.get ? desc.get.call(this) : undefined; },
+                set: setter
+            });
+            return desc;
+        } catch (e) { return null; }
+    }
+
+    var nativeHiddenGetter = (findPropDesc(document, 'hidden') || {}).get || null;
+    var nativeVisibilityStateGetter = (findPropDesc(document, 'visibilityState') || {}).get || null;
     var backgroundPlaybackInstalled = false;
     var backgroundPlaybackPending = false;
     var everVisible = false;
@@ -759,9 +771,7 @@
         } catch (e) { /* ignore */ }
         if (!_realHidden) {
             everVisible = true;
-            if (backgroundPlaybackPending && !backgroundPlaybackInstalled) {
-                installBackgroundPlaybackShadow();
-            }
+            if (backgroundPlaybackPending && !backgroundPlaybackInstalled) installBackgroundPlaybackShadow();
         }
     }
 
@@ -775,18 +785,9 @@
 
     function onRealVisibilityChange(event) {
         updateRealVisibility();
-        var observers = realVisibilityObservers.slice();
-        for (var i = 0; i < observers.length; i++) {
-            try { observers[i](); } catch (e) { /* ignore */ }
+        if (!event || event.type === 'visibilitychange') {
+            realVisibilityObservers.slice().forEach(function (cb) { try { cb(); } catch (e) { /* ignore */ } });
         }
-        if (_realHidden && everVisible && featureEnabled('backgroundPlayback') &&
-            event && typeof event.stopImmediatePropagation === 'function') {
-            event.stopImmediatePropagation();
-        }
-    }
-
-    function onWebkitVisibilityChange(event) {
-        updateRealVisibility();
         if (_realHidden && everVisible && featureEnabled('backgroundPlayback') &&
             event && typeof event.stopImmediatePropagation === 'function') {
             event.stopImmediatePropagation();
@@ -797,7 +798,7 @@
     // document instance properties are shadowed for background playback.
     updateRealVisibility();
     document.addEventListener('visibilitychange', onRealVisibilityChange, true);
-    document.addEventListener('webkitvisibilitychange', onWebkitVisibilityChange, true);
+    document.addEventListener('webkitvisibilitychange', onRealVisibilityChange, true);
 
     // ------------------------------------------------------------------
     // Background recovery (macOS)
@@ -900,45 +901,33 @@
     var mediaSessionCaptionHandlersBound = false;
     var mediaSessionCaptionsGuarded = false;
 
-    function findPropertyDescriptor(obj, prop) {
-        for (var cur = obj; cur; cur = Object.getPrototypeOf(cur)) {
-            var desc = Object.getOwnPropertyDescriptor(cur, prop);
-            if (desc) return desc;
-        }
-        return null;
+    function withCaptionWrite(fn) {
+        ownMediaSessionCaptionWrite = true;
+        try { fn(); } catch (e) { /* ignore */ }
+        finally { ownMediaSessionCaptionWrite = false; }
     }
 
     function guardMediaSessionCaptions() {
-        if (mediaSessionCaptionsGuarded) return;
         var session = navigator.mediaSession;
-        if (!session || !('captionTracks' in session)) return;
+        if (mediaSessionCaptionsGuarded || !session || !('captionTracks' in session)) return;
         mediaSessionCaptionsGuarded = true;
         ['captionTracks', 'captionsEnabled'].forEach(function (prop) {
-            try {
-                var desc = findPropertyDescriptor(session, prop);
-                if (!desc || !desc.set) return;
-                Object.defineProperty(session, prop, {
-                    configurable: true,
-                    enumerable: desc.enumerable,
-                    get: function () { return desc.get ? desc.get.call(this) : undefined; },
-                    set: function (value) {
-                        if (!ownMediaSessionCaptionWrite && activeVideo && featureEnabled('captions')) return;
-                        desc.set.call(this, value);
-                    }
-                });
-            } catch (e) { /* ignore */ }
+            patchProp(session, prop, function (desc) {
+                return function (value) {
+                    if (!ownMediaSessionCaptionWrite && activeVideo && featureEnabled('captions')) return;
+                    desc.set.call(this, value);
+                };
+            });
         });
     }
 
     function syncMediaSessionCaptions(video) {
-        if (!video || video !== activeVideo || !featureEnabled('captions')) return;
         var session = navigator.mediaSession;
-        if (!session || !('captionTracks' in session)) return;
+        if (!video || video !== activeVideo || !featureEnabled('captions') || !session || !('captionTracks' in session)) return;
         guardMediaSessionCaptions();
         var setHandler = nativeSetActionHandler || (typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
         if (!mediaSessionCaptionHandlersBound && setHandler) {
-            ownMediaSessionCaptionWrite = true;
-            try {
+            withCaptionWrite(function () {
                 setHandler.call(session, 'togglecaptions', function () {
                     if (!activeVideo) return;
                     toggleNativeSubtitles(activeVideo);
@@ -946,29 +935,20 @@
                 });
                 setHandler.call(session, 'selectcaptiontrack', function (details) {
                     if (!activeVideo) return;
-                    var owned = ownedSubtitleTracks(activeVideo);
-                    var pool = owned.length ? owned : nativeSubtitleTracks(activeVideo);
+                    var pool = activeSubtitlePool(activeVideo);
                     var idx = details && typeof details.trackIndex === 'number' ? details.trackIndex : -1;
-                    for (var i = 0; i < pool.length; i++) {
-                        try { pool[i].mode = i === idx ? 'showing' : 'disabled'; } catch (e) { /* ignore */ }
-                    }
+                    pool.forEach(function (t, i) { try { t.mode = i === idx ? 'showing' : 'disabled'; } catch (e) {} });
                     if (idx >= 0 && idx < pool.length) activeVideo._wblockLastSubtitleTrack = pool[idx];
                     syncMediaSessionCaptions(activeVideo);
                 });
                 mediaSessionCaptionHandlersBound = true;
-            } catch (e) { /* ignore */ }
-            finally { ownMediaSessionCaptionWrite = false; }
-        }
-        var owned = ownedSubtitleTracks(video);
-        var tracks = owned.length ? owned : nativeSubtitleTracks(video);
-        ownMediaSessionCaptionWrite = true;
-        try {
-            session.captionTracks = tracks.map(function (track) {
-                return { label: track.label, language: track.language, enabled: track.mode === 'showing' };
             });
-            session.captionsEnabled = tracks.some(function (track) { return track.mode === 'showing'; });
-        } catch (e) { /* ignore */ }
-        finally { ownMediaSessionCaptionWrite = false; }
+        }
+        var tracks = activeSubtitlePool(video);
+        withCaptionWrite(function () {
+            session.captionTracks = tracks.map(function (t) { return { label: t.label, language: t.language, enabled: t.mode === 'showing' }; });
+            session.captionsEnabled = tracks.some(function (t) { return t.mode === 'showing'; });
+        });
     }
 
     function clearMediaSessionCaptions() {
@@ -976,13 +956,12 @@
         mediaSessionCaptionHandlersBound = false;
         var session = navigator.mediaSession;
         var setHandler = nativeSetActionHandler || (session && typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
-        if (!session || !setHandler) return;
-        ownMediaSessionCaptionWrite = true;
-        try {
-            setHandler.call(session, 'togglecaptions', null);
-            setHandler.call(session, 'selectcaptiontrack', null);
-        } catch (e) { /* ignore */ }
-        finally { ownMediaSessionCaptionWrite = false; }
+        if (session && setHandler) {
+            withCaptionWrite(function () {
+                setHandler.call(session, 'togglecaptions', null);
+                setHandler.call(session, 'selectcaptiontrack', null);
+            });
+        }
     }
 
     // Every Media Session pause or stop the page registers (Tube Cleaner's
@@ -1175,40 +1154,16 @@
         if (backgroundPlaybackInstalled) return;
         backgroundPlaybackInstalled = true;
         backgroundPlaybackPending = false;
-        try {
-            Object.defineProperty(document, 'hidden', {
-                get: function () { return false; },
-                configurable: true
-            });
-        } catch (e) { /* ignore */ }
-        try {
-            Object.defineProperty(document, 'visibilityState', {
-                get: function () { return 'visible'; },
-                configurable: true
-            });
-        } catch (e) { /* ignore */ }
-        try {
-            Object.defineProperty(document, 'webkitHidden', {
-                get: function () { return false; },
-                configurable: true
-            });
-        } catch (e) { /* ignore */ }
-        try {
-            Object.defineProperty(document, 'webkitVisibilityState', {
-                get: function () { return 'visible'; },
-                configurable: true
-            });
-        } catch (e) { /* ignore */ }
+        [['hidden', false], ['visibilityState', 'visible'], ['webkitHidden', false], ['webkitVisibilityState', 'visible']].forEach(function (entry) {
+            try { Object.defineProperty(document, entry[0], { get: function () { return entry[1]; }, configurable: true }); } catch (e) {}
+        });
     }
 
     function enableBackgroundPlayback() {
         // Defer spoofing visibility when a tab opens in the background (e.g.
         // Cmd-click) so YouTube does not start playing before the tab is viewed.
-        if (everVisible) {
-            installBackgroundPlaybackShadow();
-        } else {
-            backgroundPlaybackPending = true;
-        }
+        if (everVisible) installBackgroundPlaybackShadow();
+        else backgroundPlaybackPending = true;
     }
 
     // ------------------------------------------------------------------
@@ -1219,16 +1174,16 @@
     var nativeVideoRemoveEventListener = typeof HTMLVideoElement !== 'undefined' && HTMLVideoElement.prototype && HTMLVideoElement.prototype.removeEventListener;
     var gatedVideoListeners = typeof WeakMap === 'function' ? new WeakMap() : null;
 
-    function addOwnVideoListener(video, type, listener, options) {
-        if (!video || !listener) return;
-        if (nativeVideoAddEventListener) nativeVideoAddEventListener.call(video, type, listener, options);
-        else video.addEventListener(type, listener, options);
-    }
-
-    function removeOwnVideoListener(video, type, listener, options) {
-        if (!video || !listener) return;
-        if (nativeVideoRemoveEventListener) nativeVideoRemoveEventListener.call(video, type, listener, options);
-        else video.removeEventListener(type, listener, options);
+    function onActive(target, types, fn, opts) {
+        if (!target || !fn) return;
+        var isVid = typeof HTMLVideoElement !== 'undefined' && target instanceof HTMLVideoElement;
+        var add = isVid && nativeVideoAddEventListener ? nativeVideoAddEventListener : target.addEventListener;
+        var rem = isVid && nativeVideoRemoveEventListener ? nativeVideoRemoveEventListener : target.removeEventListener;
+        var list = Array.isArray(types) ? types : [types];
+        for (var i = 0; i < list.length; i++) add.call(target, list[i], fn, opts);
+        registerCleanup(function () {
+            for (var j = 0; j < list.length; j++) rem.call(target, list[j], fn, opts);
+        });
     }
 
     function installEarlyVideoGuards() {
@@ -1238,31 +1193,21 @@
         if (featureEnabled('captions')) {
             try {
                 Object.defineProperty(window, 'setupCaptionMirroring', {
-                    get: function () { return function () {}; },
-                    set: function () {},
-                    configurable: false
+                    get: function () { return function () {}; }, set: function () {}, configurable: false
                 });
-            } catch (e) { /* ignore */ }
-            try {
-                var modeDesc = typeof TextTrack !== 'undefined' && Object.getOwnPropertyDescriptor(TextTrack.prototype, 'mode');
-                if (modeDesc && modeDesc.get && modeDesc.set && !modeDesc.set._wblockTubeCleaner) {
-                    var guardedSet = function (value) {
+            } catch (e) {}
+            if (typeof TextTrack !== 'undefined') {
+                patchProp(TextTrack.prototype, 'mode', function (desc) {
+                    return function (value) {
                         if (this.kind === 'forced' && this.label === 'YouTube Captions' &&
                             activeVideo && activeVideo.textTracks &&
                             Array.prototype.indexOf.call(activeVideo.textTracks, this) !== -1) {
                             value = 'disabled';
                         }
-                        return modeDesc.set.call(this, value);
+                        return desc.set.call(this, value);
                     };
-                    guardedSet._wblockTubeCleaner = true;
-                    Object.defineProperty(TextTrack.prototype, 'mode', {
-                        configurable: true,
-                        enumerable: modeDesc.enumerable,
-                        get: function () { return modeDesc.get.call(this); },
-                        set: guardedSet
-                    });
-                }
-            } catch (e) { /* ignore */ }
+                });
+            }
             guardMediaSessionCaptions();
         }
         // Keep YouTube's fullscreen and PiP-entry listeners quiet while Tube
@@ -1271,21 +1216,13 @@
         try {
             if (nativeVideoAddEventListener && !nativeVideoAddEventListener._wblockTubeCleaner && gatedVideoListeners) {
                 var wrappedAdd = function (type, listener, options) {
-                    if ((type === 'webkitbeginfullscreen' || type === 'webkitendfullscreen' || type === 'webkitpresentationmodechanged') &&
+                    if (/^webkit(?:beginfullscreen|endfullscreen|presentationmodechanged)$/.test(type) &&
                         (typeof listener === 'function' || (listener && typeof listener.handleEvent === 'function'))) {
-                        var byType = gatedVideoListeners.get(listener);
-                        if (!byType) { byType = {}; gatedVideoListeners.set(listener, byType); }
-                        var gated = byType[type];
-                        if (!gated) {
-                            gated = function (event) {
-                                if (this === activeVideo) {
-                                    if (type !== 'webkitpresentationmodechanged' || this.webkitPresentationMode === 'picture-in-picture') return;
-                                }
-                                if (typeof listener === 'function') return listener.apply(this, arguments);
-                                return listener.handleEvent(event);
-                            };
-                            byType[type] = gated;
-                        }
+                        var byType = gatedVideoListeners.get(listener) || (gatedVideoListeners.set(listener, {}), gatedVideoListeners.get(listener));
+                        var gated = byType[type] || (byType[type] = function (event) {
+                            if (this === activeVideo && (type !== 'webkitpresentationmodechanged' || this.webkitPresentationMode === 'picture-in-picture')) return;
+                            return typeof listener === 'function' ? listener.apply(this, arguments) : listener.handleEvent(event);
+                        });
                         return nativeVideoAddEventListener.call(this, type, gated, options);
                     }
                     return nativeVideoAddEventListener.apply(this, arguments);
@@ -1295,13 +1232,12 @@
                 if (nativeVideoRemoveEventListener) {
                     HTMLVideoElement.prototype.removeEventListener = function (type, listener, options) {
                         var byType = listener && (typeof listener === 'function' || typeof listener === 'object') ? gatedVideoListeners.get(listener) : null;
-                        var gated = byType && byType[type];
-                        if (gated) return nativeVideoRemoveEventListener.call(this, type, gated, options);
-                        return nativeVideoRemoveEventListener.apply(this, arguments);
+                        return byType && byType[type] ? nativeVideoRemoveEventListener.call(this, type, byType[type], options) :
+                            nativeVideoRemoveEventListener.apply(this, arguments);
                     };
                 }
             }
-        } catch (e) { /* ignore */ }
+        } catch (e) {}
         installPlaybackPropertyLocks();
     }
 
@@ -1313,49 +1249,27 @@
     function installPlaybackPropertyLocks() {
         if (playbackPropertyLocksInstalled || IS_YOUTUBE_MUSIC || typeof HTMLMediaElement === 'undefined') return;
         playbackPropertyLocksInstalled = true;
-        var props = IS_IOS ? ['playbackRate', 'defaultPlaybackRate'] : ['volume', 'playbackRate', 'defaultPlaybackRate'];
-        props.forEach(function (prop) {
-            try {
-                var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, prop);
-                if (!desc || !desc.get || !desc.set) return;
-                nativeMediaPropDescs[prop] = desc;
-                Object.defineProperty(HTMLMediaElement.prototype, prop, {
-                    configurable: true,
-                    enumerable: desc.enumerable,
-                    get: function () { return desc.get.call(this); },
-                    set: function (value) {
-                        if (!ownMediaPropWrite && this === activeVideo && this._wblockPlaybackLocked) return;
-                        desc.set.call(this, value);
-                    }
-                });
-            } catch (e) { /* ignore */ }
+        (IS_IOS ? ['playbackRate', 'defaultPlaybackRate'] : ['volume', 'playbackRate', 'defaultPlaybackRate']).forEach(function (prop) {
+            var desc = patchProp(HTMLMediaElement.prototype, prop, function (d) {
+                return function (value) {
+                    if (!ownMediaPropWrite && this === activeVideo && this._wblockPlaybackLocked) return;
+                    d.set.call(this, value);
+                };
+            });
+            if (desc) nativeMediaPropDescs[prop] = desc;
         });
         if (!IS_IOS && lastProgrammaticMuted) {
-            try {
-                var mutedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
-                if (mutedDesc && mutedDesc.get && mutedDesc.set) {
-                    Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
-                        configurable: true,
-                        enumerable: mutedDesc.enumerable,
-                        get: function () { return mutedDesc.get.call(this); },
-                        set: function (value) {
-                            lastProgrammaticMuted.set(this, !!value);
-                            mutedDesc.set.call(this, value);
-                        }
-                    });
-                }
-            } catch (e) { /* ignore */ }
+            patchProp(HTMLMediaElement.prototype, 'muted', function (d) {
+                return function (value) { lastProgrammaticMuted.set(this, !!value); d.set.call(this, value); };
+            });
         }
     }
 
     function writeMediaProp(video, prop, value) {
-        var desc = nativeMediaPropDescs[prop];
         if (!video || typeof value !== 'number' || !isFinite(value)) return;
+        var desc = nativeMediaPropDescs[prop];
         ownMediaPropWrite = true;
-        try {
-            if (desc && desc.set) desc.set.call(video, value);
-            else video[prop] = value;
-        } catch (e) { /* ignore */ }
+        try { if (desc && desc.set) desc.set.call(video, value); else video[prop] = value; } catch (e) {}
         finally { ownMediaPropWrite = false; }
     }
 
@@ -1369,50 +1283,31 @@
     function setupPlaybackPreferences(player, video) {
         if (!video || IS_YOUTUBE_MUSIC) return;
         var saved = readPlaybackPreferences();
-        if (!IS_IOS && typeof saved.volume === 'number' && saved.volume >= 0 && saved.volume <= 1) {
-            writeMediaProp(video, 'volume', saved.volume);
-        }
+        if (!IS_IOS && typeof saved.volume === 'number' && saved.volume >= 0 && saved.volume <= 1) writeMediaProp(video, 'volume', saved.volume);
         if (typeof saved.playbackRate === 'number' && saved.playbackRate >= 0.25 && saved.playbackRate <= 4) {
             writeMediaProp(video, 'defaultPlaybackRate', saved.playbackRate);
             writeMediaProp(video, 'playbackRate', saved.playbackRate);
         }
         video._wblockPlaybackLocked = true;
-
         function persist() {
             if (ownMediaPropWrite) return;
-            var current = readPlaybackPreferences();
-            if (!IS_IOS && typeof video.volume === 'number' && isFinite(video.volume) && video.volume >= 0 && video.volume <= 1) {
-                current.volume = video.volume;
-            }
-            if (typeof video.playbackRate === 'number' && isFinite(video.playbackRate) && video.playbackRate >= 0.25 && video.playbackRate <= 4) {
-                current.playbackRate = video.playbackRate;
-            }
-            storageSet(STORAGE_PLAYBACK, JSON.stringify(current));
+            var cur = readPlaybackPreferences();
+            if (!IS_IOS && isFinite(video.volume) && video.volume >= 0 && video.volume <= 1) cur.volume = video.volume;
+            if (isFinite(video.playbackRate) && video.playbackRate >= 0.25 && video.playbackRate <= 4) cur.playbackRate = video.playbackRate;
+            storageSet(STORAGE_PLAYBACK, JSON.stringify(cur));
         }
-
-        function onVolumeChange() {
+        onActive(video, 'volumechange', function () {
             persist();
-            if (IS_IOS || !lastProgrammaticMuted) return;
-            if (lastProgrammaticMuted.get(video) === video.muted) return;
-            if (player && typeof player.isMuted === 'function') {
-                try {
-                    if (player.isMuted() !== video.muted) {
-                        var muteBtn = player.querySelector('.ytp-mute-button');
-                        if (muteBtn) muteBtn.click();
-                    }
-                } catch (e) { /* ignore */ }
-            }
-        }
-
-        function onRateChange() { persist(); }
-
-        video.addEventListener('volumechange', onVolumeChange);
-        video.addEventListener('ratechange', onRateChange);
-        registerCleanup(function () {
-            video._wblockPlaybackLocked = false;
-            video.removeEventListener('volumechange', onVolumeChange);
-            video.removeEventListener('ratechange', onRateChange);
+            if (IS_IOS || !lastProgrammaticMuted || lastProgrammaticMuted.get(video) === video.muted) return;
+            try {
+                if (player && typeof player.isMuted === 'function' && player.isMuted() !== video.muted) {
+                    var btn = player.querySelector('.ytp-mute-button');
+                    if (btn) btn.click();
+                }
+            } catch (e) {}
         });
+        onActive(video, 'ratechange', persist);
+        registerCleanup(function () { video._wblockPlaybackLocked = false; });
     }
 
     // Prefer the original audio track when YouTube auto-dubs a multi-track
@@ -1422,16 +1317,13 @@
         if (!track || typeof track !== 'object') return false;
         if (track.isOriginal === true) return true;
         try {
-            var id = typeof track.id === 'string' ? track.id : '';
-            var part = id.split(';')[1];
-            if (part && atob(part).toLowerCase().indexOf('original') !== -1) return true;
-        } catch (e) { /* ignore non-base64 track ids */ }
-        for (var key in track) {
+            var part = typeof track.id === 'string' && track.id.split(';')[1];
+            if (part && /original/i.test(atob(part))) return true;
+        } catch (e) {}
+        for (var k in track) {
             try {
-                var val = track[key];
-                if (val && typeof val === 'object' && typeof val.name === 'string' &&
-                    val.name.toLowerCase().indexOf('original') !== -1) return true;
-            } catch (e) { /* ignore */ }
+                if (track[k] && typeof track[k].name === 'string' && /original/i.test(track[k].name)) return true;
+            } catch (e) {}
         }
         return false;
     }
@@ -1440,35 +1332,23 @@
         if (!player || !video || IS_YOUTUBE_MUSIC) return;
         var applied = false;
         function trySelect() {
-            if (applied || video !== activeVideo) return;
-            if (typeof player.getAvailableAudioTracks !== 'function' || typeof player.setAudioTrack !== 'function') return;
+            if (applied || video !== activeVideo || typeof player.getAvailableAudioTracks !== 'function' || typeof player.setAudioTrack !== 'function') return;
             var tracks;
             try { tracks = player.getAvailableAudioTracks(); } catch (e) { return; }
             if (!Array.isArray(tracks) || tracks.length <= 1) return;
-            var original = null;
-            for (var i = 0; i < tracks.length; i++) {
-                if (isOriginalAudioTrack(tracks[i])) { original = tracks[i]; break; }
-            }
             applied = true;
+            var original = tracks.filter(isOriginalAudioTrack)[0];
             if (!original) return;
             try {
                 var current = typeof player.getAudioTrack === 'function' ? player.getAudioTrack() : null;
-                if (current && (current === original || (current.id && current.id === original.id) || isOriginalAudioTrack(current))) return;
-                player.setAudioTrack(original);
-                log('selected original audio track');
-            } catch (e) { /* ignore */ }
+                if (!current || (current !== original && (!current.id || current.id !== original.id) && !isOriginalAudioTrack(current))) {
+                    player.setAudioTrack(original);
+                    log('selected original audio track');
+                }
+            } catch (e) {}
         }
         trySelect();
-        if (!applied) {
-            video.addEventListener('loadedmetadata', trySelect);
-            video.addEventListener('loadeddata', trySelect);
-            video.addEventListener('playing', trySelect);
-            registerCleanup(function () {
-                video.removeEventListener('loadedmetadata', trySelect);
-                video.removeEventListener('loadeddata', trySelect);
-                video.removeEventListener('playing', trySelect);
-            });
-        }
+        if (!applied) onActive(video, ['loadedmetadata', 'loadeddata', 'playing'], trySelect);
     }
 
     // Mobile YouTube sets inert on .page-container and faux-fullscreen on body
@@ -1478,12 +1358,9 @@
         if (!IS_IOS || IS_YOUTUBE_MUSIC) return;
         function clearLocks() {
             try {
-                if (document.body && document.body.hasAttribute('faux-fullscreen')) {
-                    document.body.removeAttribute('faux-fullscreen');
-                }
-                var containers = document.querySelectorAll('.page-container[inert]');
-                for (var i = 0; i < containers.length; i++) containers[i].inert = false;
-            } catch (e) { /* ignore */ }
+                if (document.body && document.body.hasAttribute('faux-fullscreen')) document.body.removeAttribute('faux-fullscreen');
+                Array.prototype.forEach.call(document.querySelectorAll('.page-container[inert]'), function (el) { el.inert = false; });
+            } catch (e) {}
         }
         clearLocks();
         var observer = null;
@@ -1491,30 +1368,16 @@
             if (document.documentElement) {
                 observer = new MutationObserver(function (records) {
                     for (var i = 0; i < records.length; i++) {
-                        var target = records[i].target;
-                        if (target === document.body && target.hasAttribute('faux-fullscreen')) {
-                            target.removeAttribute('faux-fullscreen');
-                        } else if (target && target.inert && target.classList && target.classList.contains('page-container')) {
-                            target.inert = false;
-                        }
+                        var t = records[i].target;
+                        if (t === document.body && t.hasAttribute('faux-fullscreen')) t.removeAttribute('faux-fullscreen');
+                        else if (t && t.inert && t.classList && t.classList.contains('page-container')) t.inert = false;
                     }
                 });
-                observer.observe(document.documentElement, {
-                    attributes: true,
-                    attributeFilter: ['inert', 'faux-fullscreen'],
-                    subtree: true
-                });
+                observer.observe(document.documentElement, { attributes: true, attributeFilter: ['inert', 'faux-fullscreen'], subtree: true });
             }
-        } catch (e) { /* ignore */ }
-        var onReady = null;
-        if (document.readyState === 'loading') {
-            onReady = clearLocks;
-            document.addEventListener('DOMContentLoaded', onReady);
-        }
-        registerCleanup(function () {
-            if (observer) { try { observer.disconnect(); } catch (e) { /* ignore */ } }
-            if (onReady) document.removeEventListener('DOMContentLoaded', onReady);
-        });
+        } catch (e) {}
+        if (document.readyState === 'loading') onActive(document, 'DOMContentLoaded', clearLocks);
+        registerCleanup(function () { if (observer) try { observer.disconnect(); } catch (e) {} });
     }
 
     // ------------------------------------------------------------------
@@ -2222,7 +2085,6 @@
         // that element is immediately activated again.
         if (previousVideo) {
             previousVideo._wblockControlsGuarded = false;
-            previousVideo._wblockControlsPatched = false;
             previousVideo._wblockMediaSessionHooked = false;
         }
         activeVideo = null;
@@ -2404,10 +2266,6 @@
             updateFrame = requestAnimationFrame(updateLayout);
         }
 
-        video.addEventListener('loadedmetadata', scheduleUpdate);
-        video.addEventListener('resize', scheduleUpdate);
-        video.addEventListener('emptied', scheduleUpdate);
-        window.addEventListener('resize', scheduleUpdate);
         if (typeof ResizeObserver !== 'undefined') {
             try {
                 resizeObserver = new ResizeObserver(scheduleUpdate);
@@ -2415,27 +2273,13 @@
                 if (player.parentElement) resizeObserver.observe(player.parentElement);
             } catch (e) { resizeObserver = null; }
         }
-        document.addEventListener('fullscreenchange', scheduleUpdate);
-        document.addEventListener('webkitfullscreenchange', scheduleUpdate);
-        addOwnVideoListener(video, 'webkitbeginfullscreen', scheduleUpdate);
-        addOwnVideoListener(video, 'webkitendfullscreen', scheduleUpdate);
-        addOwnVideoListener(video, 'webkitpresentationmodechanged', scheduleUpdate);
-        video.addEventListener('enterpictureinpicture', scheduleUpdate);
-        video.addEventListener('leavepictureinpicture', scheduleUpdate);
+        onActive(video, ['loadedmetadata', 'resize', 'emptied', 'webkitbeginfullscreen', 'webkitendfullscreen',
+            'webkitpresentationmodechanged', 'enterpictureinpicture', 'leavepictureinpicture'], scheduleUpdate);
+        onActive(window, 'resize', scheduleUpdate);
+        onActive(document, ['fullscreenchange', 'webkitfullscreenchange'], scheduleUpdate);
         scheduleUpdate();
 
         registerCleanup(function () {
-            video.removeEventListener('loadedmetadata', scheduleUpdate);
-            video.removeEventListener('resize', scheduleUpdate);
-            video.removeEventListener('emptied', scheduleUpdate);
-            window.removeEventListener('resize', scheduleUpdate);
-            document.removeEventListener('fullscreenchange', scheduleUpdate);
-            document.removeEventListener('webkitfullscreenchange', scheduleUpdate);
-            removeOwnVideoListener(video, 'webkitbeginfullscreen', scheduleUpdate);
-            removeOwnVideoListener(video, 'webkitendfullscreen', scheduleUpdate);
-            removeOwnVideoListener(video, 'webkitpresentationmodechanged', scheduleUpdate);
-            video.removeEventListener('enterpictureinpicture', scheduleUpdate);
-            video.removeEventListener('leavepictureinpicture', scheduleUpdate);
             if (resizeObserver) { try { resizeObserver.disconnect(); } catch (e) { /* ignore */ } }
             resizeObserver = null;
             if (updateFrame !== null) cancelAnimationFrame(updateFrame);
@@ -2452,7 +2296,6 @@
         if (featureEnabled('resumePosition')) setupPlaybackPosition(player, video);
         registerCleanup(cancelQualityRequest);
         registerCleanup(cancelMobileQualityRestore);
-        forceNativeControls(video);
         guardNativeControls(video);
         pinNativeControls(video);
         setupNativeTouchControls(video);
@@ -2460,27 +2303,11 @@
         // Safari's controls live in WebKit's shadow tree, so let events reach
         // the video in the bubble phase but stop YouTube's outer player shell
         // from treating native scrubber and long-press gestures as player taps.
-        // Blocking the move and mouse-compat events keeps YouTube's bubble-phase
-        // handlers quiet, but its capture-phase document handlers run first and
-        // still see the stream; pinNativeControls() is what actually keeps a
-        // native scrubber drag alive.
-        var competingEvents = [
+        onActive(video, [
             'click', 'contextmenu', 'pointerdown', 'pointermove', 'pointerup',
-            'mousedown', 'mousemove', 'mouseup',
-            'touchstart', 'touchmove', 'touchend'
-        ];
-        function blockCompetingClicks(event) { event.stopPropagation(); }
-        for (var i = 0; i < competingEvents.length; i++) {
-            video.addEventListener(competingEvents[i], blockCompetingClicks);
-        }
-        function onSpuriousPlaying() { if (!IS_IOS) stepSpuriousPlay('playing', false); }
-        video.addEventListener('playing', onSpuriousPlaying);
-        registerCleanup(function () {
-            for (var i = 0; i < competingEvents.length; i++) {
-                video.removeEventListener(competingEvents[i], blockCompetingClicks);
-            }
-            video.removeEventListener('playing', onSpuriousPlaying);
-        });
+            'mousedown', 'mousemove', 'mouseup', 'touchstart', 'touchmove', 'touchend'
+        ], function (event) { event.stopPropagation(); });
+        onActive(video, 'playing', function () { if (!IS_IOS) stepSpuriousPlay('playing', false); });
 
         setupPlaybackPreferences(player, video);
         setupOriginalAudioTrack(player, video);
@@ -2657,52 +2484,25 @@
             }
         }
 
-        function onPlay() { claim(); }
-        function onPause() { updateState(); updatePosition(); }
-        function onEnded() { updateState(); updatePosition(); }
-        function onMetadataChange() { scheduleMetadata(); updatePosition(); }
-        function onRateChange() { scheduleMetadata(); updatePosition(); }
-        function onTimeUpdate() { updatePosition(); }
-        function onNavigate() { scheduleMetadata(); }
-
-        video.addEventListener('play', onPlay);
-        video.addEventListener('pause', onPause);
-        video.addEventListener('ended', onEnded);
-        video.addEventListener('loadedmetadata', onMetadataChange);
-        video.addEventListener('durationchange', onMetadataChange);
-        video.addEventListener('loadeddata', onMetadataChange);
-        video.addEventListener('ratechange', onRateChange);
-        video.addEventListener('timeupdate', onTimeUpdate);
-        document.addEventListener('yt-navigate-finish', onNavigate, true);
-        document.addEventListener('yt-page-data-updated', onNavigate, true);
+        onActive(video, 'play', claim);
+        onActive(video, ['pause', 'ended'], function () { updateState(); updatePosition(); });
+        onActive(video, ['loadedmetadata', 'durationchange', 'loadeddata', 'ratechange'], function () { scheduleMetadata(); updatePosition(); });
+        onActive(video, 'timeupdate', updatePosition);
+        onActive(document, ['yt-navigate-finish', 'yt-page-data-updated'], scheduleMetadata, true);
         if (!video.paused) claim();
 
         registerCleanup(function () {
-            video.removeEventListener('play', onPlay);
-            video.removeEventListener('pause', onPause);
-            video.removeEventListener('ended', onEnded);
-            video.removeEventListener('loadedmetadata', onMetadataChange);
-            video.removeEventListener('durationchange', onMetadataChange);
-            video.removeEventListener('loadeddata', onMetadataChange);
-            video.removeEventListener('ratechange', onRateChange);
-            video.removeEventListener('timeupdate', onTimeUpdate);
-            document.removeEventListener('yt-navigate-finish', onNavigate, true);
-            document.removeEventListener('yt-page-data-updated', onNavigate, true);
             if (positionTimer !== null) clearTimeout(positionTimer);
             if (metadataTimer !== null) clearTimeout(metadataTimer);
-            positionTimer = null;
-            metadataTimer = null;
+            positionTimer = metadataTimer = null;
             if (mediaSessionOwner !== video) return;
             mediaSessionOwner = null;
-            if (session.metadata === video._wblockMediaMetadata) {
-                try { session.metadata = null; } catch (e) { /* ignore */ }
-            }
+            if (session.metadata === video._wblockMediaMetadata) try { session.metadata = null; } catch (e) {}
             (video._wblockMediaActions || []).forEach(function (action) {
-                try { if (typeof session.setActionHandler === 'function') session.setActionHandler(action, null); } catch (e) { /* ignore */ }
+                try { if (typeof session.setActionHandler === 'function') session.setActionHandler(action, null); } catch (e) {}
             });
-            try { session.playbackState = 'none'; } catch (e) { /* ignore */ }
-            video._wblockMediaMetadata = null;
-            video._wblockMediaActions = null;
+            try { session.playbackState = 'none'; } catch (e) {}
+            video._wblockMediaMetadata = video._wblockMediaActions = null;
             if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
             else video.removeAttribute('title');
         });
@@ -2784,22 +2584,10 @@
                 detail: { doubleTap: doubleTap, clientX: point.clientX, clientY: point.clientY }
             }));
         }
-        video.addEventListener('touchstart', begin, { capture: true, passive: true });
-        video.addEventListener('touchmove', move, { capture: true, passive: true });
-        video.addEventListener('touchcancel', cancel, true);
-        video.addEventListener('touchend', end, { capture: true, passive: false });
-        registerCleanup(function () {
-            video.removeEventListener('touchstart', begin, true);
-            video.removeEventListener('touchmove', move, true);
-            video.removeEventListener('touchcancel', cancel, true);
-            video.removeEventListener('touchend', end, true);
-        });
-    }
-
-    function forceNativeControls(video) {
-        if (video._wblockControlsPatched) return;
-        video._wblockControlsPatched = true;
-        restoreNativeMediaCapabilities(video);
+        onActive(video, 'touchstart', begin, { capture: true, passive: true });
+        onActive(video, 'touchmove', move, { capture: true, passive: true });
+        onActive(video, 'touchcancel', cancel, true);
+        onActive(video, 'touchend', end, { capture: true, passive: false });
     }
 
     // WebKit renders Safari's native controls from the controls content
@@ -2863,42 +2651,31 @@
         if (!video || video._wblockControlsPinned) return;
         video._wblockControlsPinned = true;
 
+        var pinnedProps = [
+            'removeChild', 'appendChild', 'insertBefore', 'replaceChild', 'append', 'prepend', 'replaceChildren',
+            'removeAttribute', 'setAttribute', 'toggleAttribute',
+            'webkitSetPresentationMode', 'webkitExitFullscreen', 'webkitExitFullScreen',
+            'disablePictureInPicture', 'controls'
+        ];
         var nativeRemoveAttribute = video.removeAttribute;
         var nativeSetAttribute = video.setAttribute;
         var nativeToggleAttribute = video.toggleAttribute;
         var nativeRemoveChild = video.removeChild;
-        var nativeAppendChild = video.appendChild;
-        var nativeInsertBefore = video.insertBefore;
         var nativeReplaceChild = video.replaceChild;
-        var nativeAppend = video.append;
-        var nativePrepend = video.prepend;
         var nativeReplaceChildren = video.replaceChildren;
 
-        function isControlsName(name) {
-            return String(name).toLowerCase() === 'controls';
-        }
-
-        // Tube Cleaner marks its tracks before appending them. On fullscreen
-        // changes YouTube removes every TRACK and appends raw timed-word
-        // captions; keep ours connected and drop YouTube's copy across every
-        // DOM mutation entry point.
+        function isControlsName(name) { return String(name).toLowerCase() === 'controls'; }
         function ownedTrack(node) {
             return !!node && node.nodeName === 'TRACK' &&
                 (node.hasAttribute('data-wblock-native-subtitle') || node.hasAttribute('data-wblock-native-chapters'));
         }
-
         function blockedForeignTrack(node) {
             return !!node && node.nodeName === 'TRACK' && !ownedTrack(node) &&
                 (node.kind === 'chapters' ? featureEnabled('chapters') :
-                 (node.kind === 'subtitles' || node.kind === 'captions' || node.kind === 'forced') && featureEnabled('captions'));
+                 /^(?:subtitles|captions|forced)$/.test(node.kind) && featureEnabled('captions'));
         }
-
-        function filterForeignTrackArgs(args) {
-            var kept = [];
-            for (var i = 0; i < args.length; i++) {
-                if (!blockedForeignTrack(args[i])) kept.push(args[i]);
-            }
-            return kept;
+        function filterForeign(args) {
+            return Array.prototype.filter.call(args, function (n) { return !blockedForeignTrack(n); });
         }
 
         try {
@@ -2906,97 +2683,64 @@
                 if (this === video && node && node.parentNode === video && ownedTrack(node)) return node;
                 return nativeRemoveChild.apply(this, arguments);
             };
-            video.appendChild = function (node) {
-                if (this === video && blockedForeignTrack(node)) return node;
-                return nativeAppendChild.apply(this, arguments);
-            };
-            if (typeof nativeInsertBefore === 'function') {
-                video.insertBefore = function (node) {
-                    if (this === video && blockedForeignTrack(node)) return node;
-                    return nativeInsertBefore.apply(this, arguments);
+            ['appendChild', 'insertBefore'].forEach(function (name) {
+                var orig = video[name];
+                if (typeof orig === 'function') video[name] = function (node) {
+                    return this === video && blockedForeignTrack(node) ? node : orig.apply(this, arguments);
                 };
-            }
+            });
             if (typeof nativeReplaceChild === 'function') {
                 video.replaceChild = function (newNode, oldNode) {
-                    if (this === video && ((oldNode && oldNode.parentNode === video && ownedTrack(oldNode)) || blockedForeignTrack(newNode))) {
-                        return oldNode;
-                    }
+                    if (this === video && ((oldNode && oldNode.parentNode === video && ownedTrack(oldNode)) || blockedForeignTrack(newNode))) return oldNode;
                     return nativeReplaceChild.apply(this, arguments);
                 };
             }
-            if (typeof nativeAppend === 'function') {
-                video.append = function () {
-                    if (this !== video) return nativeAppend.apply(this, arguments);
-                    var kept = filterForeignTrackArgs(arguments);
-                    if (kept.length) return nativeAppend.apply(this, kept);
+            ['append', 'prepend'].forEach(function (name) {
+                var orig = video[name];
+                if (typeof orig === 'function') video[name] = function () {
+                    if (this !== video) return orig.apply(this, arguments);
+                    var kept = filterForeign(arguments);
+                    if (kept.length) return orig.apply(this, kept);
                 };
-            }
-            if (typeof nativePrepend === 'function') {
-                video.prepend = function () {
-                    if (this !== video) return nativePrepend.apply(this, arguments);
-                    var kept = filterForeignTrackArgs(arguments);
-                    if (kept.length) return nativePrepend.apply(this, kept);
-                };
-            }
+            });
             if (typeof nativeReplaceChildren === 'function') {
                 video.replaceChildren = function () {
                     if (this !== video) return nativeReplaceChildren.apply(this, arguments);
-                    var kept = filterForeignTrackArgs(arguments);
-                    var preserved = Array.prototype.filter.call(video.children || [], ownedTrack);
-                    for (var i = 0; i < preserved.length; i++) {
-                        if (kept.indexOf(preserved[i]) === -1) kept.push(preserved[i]);
-                    }
+                    var kept = filterForeign(arguments);
+                    Array.prototype.forEach.call(video.children || [], function (c) {
+                        if (ownedTrack(c) && kept.indexOf(c) === -1) kept.push(c);
+                    });
                     return nativeReplaceChildren.apply(this, kept);
                 };
             }
             video.removeAttribute = function (name) {
-                if (isControlsName(name)) return;
-                return nativeRemoveAttribute.apply(this, arguments);
+                if (!isControlsName(name)) return nativeRemoveAttribute.apply(this, arguments);
             };
             video.setAttribute = function (name) {
-                // A redundant re-set still runs WebKit's attribute-changed
-                // path; skip it so nothing rebuilds the shadow controls.
-                if (isControlsName(name) && this.hasAttribute('controls')) return;
-                return nativeSetAttribute.apply(this, arguments);
+                if (!(isControlsName(name) && this.hasAttribute('controls'))) return nativeSetAttribute.apply(this, arguments);
             };
             if (typeof nativeToggleAttribute === 'function') {
                 video.toggleAttribute = function (name) {
-                    if (isControlsName(name)) {
-                        if (!this.hasAttribute('controls')) {
-                            nativeSetAttribute.call(this, 'controls', '');
-                        }
-                        return true;
-                    }
-                    return nativeToggleAttribute.apply(this, arguments);
+                    if (!isControlsName(name)) return nativeToggleAttribute.apply(this, arguments);
+                    if (!this.hasAttribute('controls')) nativeSetAttribute.call(this, 'controls', '');
+                    return true;
                 };
             }
-            // YouTube answers every PiP presentation change by exiting
-            // fullscreen or forcing inline mode on the video (#919). Ignore
-            // site-driven exits while PiP is active; Tube Cleaner's own
-            // leavePiP sets ownPresentationWrite. Use configurable accessors so
-            // prototype methods and test mocks both route through the guard.
-            var customPresentationMode = null;
-            var hasCustomPresentationMode = Object.prototype.hasOwnProperty.call(video, 'webkitSetPresentationMode');
-            if (hasCustomPresentationMode) customPresentationMode = video.webkitSetPresentationMode;
+            // Ignore site-driven PiP exits while PiP is active (#919).
+            var customMode = Object.prototype.hasOwnProperty.call(video, 'webkitSetPresentationMode') ? video.webkitSetPresentationMode : undefined;
             Object.defineProperty(video, 'webkitSetPresentationMode', {
                 configurable: true,
                 get: function () {
-                    var target = hasCustomPresentationMode ? customPresentationMode :
-                        Object.getPrototypeOf(this).webkitSetPresentationMode;
-                    if (typeof target !== 'function') return target;
-                    return function (mode) {
+                    var target = customMode !== undefined ? customMode : Object.getPrototypeOf(this).webkitSetPresentationMode;
+                    return typeof target !== 'function' ? target : function (mode) {
                         if (!ownPresentationWrite && this.webkitPresentationMode === 'picture-in-picture' && mode === 'inline') return;
                         return target.apply(this, arguments);
                     };
                 },
-                set: function (fn) {
-                    hasCustomPresentationMode = true;
-                    customPresentationMode = fn;
-                }
+                set: function (fn) { customMode = fn; }
             });
             ['webkitExitFullscreen', 'webkitExitFullScreen'].forEach(function (exitName) {
-                var exitProto = Object.getPrototypeOf(video)[exitName];
-                if (typeof video[exitName] === 'function' || typeof exitProto === 'function') {
+                if (typeof video[exitName] === 'function' || typeof Object.getPrototypeOf(video)[exitName] === 'function') {
                     video[exitName] = function () {
                         if (!ownPresentationWrite && this.webkitPresentationMode === 'picture-in-picture') return;
                         var fn = Object.getPrototypeOf(this)[exitName];
@@ -3005,43 +2749,16 @@
                 }
             });
             if ('disablePictureInPicture' in video) {
-                Object.defineProperty(video, 'disablePictureInPicture', {
-                    configurable: true,
-                    get: function () { return false; },
-                    set: function () {}
-                });
+                Object.defineProperty(video, 'disablePictureInPicture', { configurable: true, get: function () { return false; }, set: function () {} });
             }
-            var descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'controls');
-            if (descriptor && descriptor.get && descriptor.set) {
-                Object.defineProperty(video, 'controls', {
-                    configurable: true,
-                    get: function () { return descriptor.get.call(this); },
-                    set: function (value) {
-                        // Property writes need the same no-op guard as setAttribute:
-                        // reasserting true during a tap still mutates WebKit's controls.
-                        if (value && !descriptor.get.call(this)) { descriptor.set.call(this, true); }
-                    }
-                });
-            }
+            patchProp(video, 'controls', function (desc) {
+                return function (value) { if (value && !desc.get.call(this)) desc.set.call(this, true); };
+            });
         } catch (e) { /* partial pin; the observer restore still applies */ }
 
         registerCleanup(function () {
             video._wblockControlsPinned = false;
-            try { delete video.removeChild; } catch (e) { /* ignore */ }
-            try { delete video.appendChild; } catch (e) { /* ignore */ }
-            try { delete video.insertBefore; } catch (e) { /* ignore */ }
-            try { delete video.replaceChild; } catch (e) { /* ignore */ }
-            try { delete video.append; } catch (e) { /* ignore */ }
-            try { delete video.prepend; } catch (e) { /* ignore */ }
-            try { delete video.replaceChildren; } catch (e) { /* ignore */ }
-            try { delete video.removeAttribute; } catch (e) { /* ignore */ }
-            try { delete video.setAttribute; } catch (e) { /* ignore */ }
-            try { delete video.toggleAttribute; } catch (e) { /* ignore */ }
-            try { delete video.webkitSetPresentationMode; } catch (e) { /* ignore */ }
-            try { delete video.webkitExitFullscreen; } catch (e) { /* ignore */ }
-            try { delete video.webkitExitFullScreen; } catch (e) { /* ignore */ }
-            try { delete video.disablePictureInPicture; } catch (e) { /* ignore */ }
-            try { delete video.controls; } catch (e) { /* ignore */ }
+            pinnedProps.forEach(function (prop) { try { delete video[prop]; } catch (e) {} });
         });
     }
 
@@ -3581,43 +3298,21 @@
             startPoll();
         }
 
-        video.addEventListener('timeupdate', onTimeUpdateEvent);
-        video.addEventListener('playing', onPlaybackResumed);
-        video.addEventListener('seeked', onPlaybackResumed);
-        video.addEventListener('ratechange', onPlaybackTimingChange);
-        video.addEventListener('seeking', suspendBoundaryTimer);
-        video.addEventListener('waiting', suspendBoundaryTimer);
-        video.addEventListener('stalled', suspendBoundaryTimer);
-        video.addEventListener('pause', clearBoundaryTimer);
-        video.addEventListener('ended', clearBoundaryTimer);
-        document.addEventListener('wblock-tc-sponsor-settings', onSettingsChange);
+        onActive(video, 'timeupdate', onTimeUpdateEvent);
+        onActive(video, ['playing', 'seeked'], onPlaybackResumed);
+        onActive(video, 'ratechange', onPlaybackTimingChange);
+        onActive(video, ['seeking', 'waiting', 'stalled'], suspendBoundaryTimer);
+        onActive(video, ['pause', 'ended'], clearBoundaryTimer);
+        onActive(document, 'wblock-tc-sponsor-settings', onSettingsChange);
         if (IS_IOS) {
-            addOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenChange);
-            addOwnVideoListener(video, 'webkitendfullscreen', onFullscreenChange);
-            document.addEventListener('fullscreenchange', onFullscreenChange);
-            document.addEventListener('webkitfullscreenchange', onFullscreenChange);
+            onActive(video, ['webkitbeginfullscreen', 'webkitendfullscreen'], onFullscreenChange);
+            onActive(document, ['fullscreenchange', 'webkitfullscreenchange'], onFullscreenChange);
             startPoll();
         }
         registerCleanup(function () {
             cancelled = true;
             clearBoundaryTimer();
             stopPoll();
-            video.removeEventListener('timeupdate', onTimeUpdateEvent);
-            video.removeEventListener('playing', onPlaybackResumed);
-            video.removeEventListener('seeked', onPlaybackResumed);
-            video.removeEventListener('ratechange', onPlaybackTimingChange);
-            video.removeEventListener('seeking', suspendBoundaryTimer);
-            video.removeEventListener('waiting', suspendBoundaryTimer);
-            video.removeEventListener('stalled', suspendBoundaryTimer);
-            video.removeEventListener('pause', clearBoundaryTimer);
-            video.removeEventListener('ended', clearBoundaryTimer);
-            document.removeEventListener('wblock-tc-sponsor-settings', onSettingsChange);
-            if (IS_IOS) {
-                removeOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenChange);
-                removeOwnVideoListener(video, 'webkitendfullscreen', onFullscreenChange);
-                document.removeEventListener('fullscreenchange', onFullscreenChange);
-                document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
-            }
             if (controller) controller.abort();
             if (removeNotice) removeNotice();
         });
@@ -4094,17 +3789,11 @@
             }
         }
 
-        video.addEventListener('loadedmetadata', refreshChapters);
-        video.addEventListener('durationchange', refreshChapters);
-        document.addEventListener('yt-page-data-updated', refreshChapters, true);
-        document.addEventListener('yt-navigate-finish', refreshChapters, true);
+        onActive(video, ['loadedmetadata', 'durationchange'], refreshChapters);
+        onActive(document, ['yt-page-data-updated', 'yt-navigate-finish'], refreshChapters, true);
         refreshChapters();
 
         registerCleanup(function () {
-            video.removeEventListener('loadedmetadata', refreshChapters);
-            video.removeEventListener('durationchange', refreshChapters);
-            document.removeEventListener('yt-page-data-updated', refreshChapters, true);
-            document.removeEventListener('yt-navigate-finish', refreshChapters, true);
             stopRetry();
             removeChapterTrack(video);
         });
@@ -4236,76 +3925,42 @@
             .replace(/<\d{1,2}:\d{2}:\d{2}\.\d{3}>|<\/?c(?:\.[\w.-]*)?>/g, '');
     }
 
-    function captionDisplayLanguage(language) {
-        if (!language) return '';
-        try {
-            if (typeof Intl !== 'undefined' && typeof Intl.DisplayNames === 'function') {
-                return new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' }).of(language) || language;
-            }
-        } catch (e) { /* fall back to language code */ }
-        return language;
-    }
-
     function youtubeTranslationCode(language) {
-        var normalized = String(language || '').trim().toLowerCase().replace(/_/g, '-');
-        if (!normalized) return '';
-        if (normalized.indexOf('zh-') === 0) {
-            if (normalized.indexOf('hant') !== -1 || normalized === 'zh-tw' || normalized === 'zh-hk' || normalized === 'zh-mo') {
-                return 'zh-Hant';
-            }
-            return 'zh-Hans';
-        }
-        return normalized.split('-')[0];
+        var norm = String(language || '').trim().toLowerCase().replace(/_/g, '-');
+        if (!norm) return '';
+        if (norm.indexOf('zh-') === 0) return /hant|-(?:tw|hk|mo)$/.test(norm) ? 'zh-Hant' : 'zh-Hans';
+        return norm.split('-')[0];
     }
 
     function withAutoTranslatedTrack(tracks) {
-        if (!Array.isArray(tracks) || !tracks.length) return [];
-        var rawLang = String((navigator.languages && navigator.languages[0]) || navigator.language || '').trim();
-        var tlang = youtubeTranslationCode(rawLang);
-        if (!tlang) return tracks;
+        var tlang = Array.isArray(tracks) && tracks.length && youtubeTranslationCode((navigator.languages && navigator.languages[0]) || navigator.language);
+        if (!tlang) return tracks || [];
         var userBase = tlang.toLowerCase().split('-')[0];
-        for (var i = 0; i < tracks.length; i++) {
-            var code = String(tracks[i] && tracks[i].languageCode || '').toLowerCase().split('-')[0];
-            if (code === userBase) return tracks;
-        }
-        var source = tracks[0];
-        for (var j = 0; j < tracks.length; j++) {
-            if (String(tracks[j] && tracks[j].languageCode || '').toLowerCase().split('-')[0] === 'en') {
-                source = tracks[j];
-                break;
-            }
-        }
+        if (tracks.some(function (t) { return String(t && t.languageCode || '').toLowerCase().split('-')[0] === userBase; })) return tracks;
+        var source = tracks.filter(function (t) { return String(t && t.languageCode || '').toLowerCase().split('-')[0] === 'en'; })[0] || tracks[0];
         if (!source || !source.baseUrl) return tracks;
         try {
             var url = new URL(source.baseUrl, location.href);
             url.searchParams.set('tlang', tlang);
-            var label = 'Auto-translated (' + captionDisplayLanguage(tlang) + ')';
-            return tracks.concat([{
-                baseUrl: url.href,
-                languageCode: tlang,
-                name: { simpleText: label },
-                vssId: 'wblock.tlang.' + tlang
-            }]);
+            var display = tlang;
+            try { if (typeof Intl !== 'undefined' && Intl.DisplayNames) display = new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' }).of(tlang) || tlang; } catch (e) {}
+            return tracks.concat([{ baseUrl: url.href, languageCode: tlang, name: { simpleText: 'Auto-translated (' + display + ')' }, vssId: 'wblock.tlang.' + tlang }]);
         } catch (e) { return tracks; }
     }
 
     function fetchNormalizedSubtitleVtt(track, signal) {
         var url = captionUrl(track);
         if (!url) return Promise.resolve(null);
-        return fetch(url, { credentials: 'same-origin', signal: signal }).then(function (response) {
-            if (!response.ok) return '';
-            return response.text();
-        }).then(function (text) {
-            text = String(text || '').replace(/^\uFEFF/, '');
-            if (text.slice(0, 6) !== 'WEBVTT' || text.indexOf('-->') === -1 || text.length > 5000000) return null;
-            return normalizeCaptionVtt(text);
-        }).catch(function () { return null; });
+        return fetch(url, { credentials: 'same-origin', signal: signal }).then(function (r) { return r.ok ? r.text() : ''; })
+            .then(function (text) {
+                text = String(text || '').replace(/^\uFEFF/, '');
+                return text.slice(0, 6) === 'WEBVTT' && text.indexOf('-->') !== -1 && text.length <= 5000000 ? normalizeCaptionVtt(text) : null;
+            }).catch(function () { return null; });
     }
 
-    function captionTrackKey(definition) {
-        var language = definition && definition.languageCode || '';
-        var label = youtubeText(definition && definition.name) || language || 'CC';
-        return (definition && definition.vssId) || language + '|' + label;
+    function captionTrackKey(def) {
+        var lang = def && def.languageCode || '';
+        return (def && def.vssId) || lang + '|' + (youtubeText(def && def.name) || lang || 'CC');
     }
 
     // Diagnostic counter for the PiP caption pump below.
@@ -4313,183 +3968,115 @@
 
     function setupNativeSubtitles(player, video) {
         if (!player || !video || !window.fetch || !window.Blob || !URL.createObjectURL) return;
-        var cancelled = false;
+        var cancelled = false, started = false, attempts = 0, retryTimer = null;
         var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-        var retryTimer = null;
-        var attempts = 0;
-        var started = false;
-        var elements = [];
-        var blobUrls = [];
+        var elements = [], blobUrls = [], usedAlt = false, altPromise = null, subtitleVideoId = null;
         var pendingDefs = typeof WeakMap === 'function' ? new WeakMap() : null;
         var trackStates = typeof WeakMap === 'function' ? new WeakMap() : null;
-        var usedAlternateClient = false;
-        var alternateFallbackPromise = null;
-        var subtitleVideoId = null;
 
-        function disableYouTubeSubtitles() {
-            try {
-                if (player && typeof player.setOption === 'function') { player.setOption('captions', 'track', null); }
-            } catch (e) { /* ignore */ }
-            try {
-                if (player && typeof player.unloadModule === 'function') { player.unloadModule('captions'); }
-            } catch (e) { /* ignore */ }
-        }
-
-        // Safari's CC menu only lists real subtitle tracks. YouTube's caption
-        // overlay sits under the native <video>, so clicking its hidden CC
-        // button cannot show text. Install <track> metadata immediately and
-        // lazy-fetch + normalize WebVTT into a Blob only when a track is turned
-        // on, avoiding burst /api/timedtext rate limits across video loads.
-        function stopRetry() {
-            if (retryTimer !== null) clearInterval(retryTimer);
-            retryTimer = null;
-        }
+        function stopRetry() { if (retryTimer !== null) clearInterval(retryTimer); retryTimer = null; }
 
         function removeForeignTrackElements() {
-            var tracks = video.querySelectorAll('track');
-            for (var i = 0; i < tracks.length; i++) {
-                var el = tracks[i];
-                if (el.hasAttribute('data-wblock-native-subtitle') || el.hasAttribute('data-wblock-native-chapters')) continue;
-                if (el.kind === 'subtitles' || el.kind === 'captions' || el.kind === 'forced') {
-                    try { if (el.track) el.track.mode = 'disabled'; } catch (e) { /* ignore */ }
+            Array.prototype.forEach.call(video.querySelectorAll('track'), function (el) {
+                if (!el.hasAttribute('data-wblock-native-subtitle') && !el.hasAttribute('data-wblock-native-chapters') &&
+                    /^(?:subtitles|captions|forced)$/.test(el.kind)) {
+                    try { if (el.track) el.track.mode = 'disabled'; } catch (e) {}
                     detachTrackElement(el);
                 }
-            }
+            });
         }
 
-        function refreshPendingFromAlternate(signal) {
-            if (alternateFallbackPromise) return alternateFallbackPromise;
-            usedAlternateClient = true;
-            alternateFallbackPromise = alternateCaptionTracks(subtitleVideoId, signal).then(function (altTracks) {
-                if (cancelled || !altTracks.length) return false;
-                var expanded = withAutoTranslatedTrack(altTracks);
-                var byKey = {};
-                var byLang = {};
-                for (var i = 0; i < expanded.length; i++) {
-                    var def = expanded[i];
-                    byKey[captionTrackKey(def)] = def;
-                    var lang = String(def.languageCode || '').toLowerCase();
-                    if (lang && !byLang[lang]) byLang[lang] = def;
-                }
-                for (var j = 0; j < elements.length; j++) {
-                    var el = elements[j];
-                    var key = el.getAttribute('data-wblock-native-subtitle') || '';
-                    var replacement = byKey[key] || byLang[String(el.srclang || '').toLowerCase()];
-                    if (replacement && pendingDefs) pendingDefs.set(el, replacement);
-                }
+        function refreshFromAlternate(signal) {
+            if (altPromise) return altPromise;
+            usedAlt = true;
+            altPromise = alternateCaptionTracks(subtitleVideoId, signal).then(function (alt) {
+                if (cancelled || !alt.length) return false;
+                var byKey = {}, byLang = {};
+                withAutoTranslatedTrack(alt).forEach(function (d) {
+                    byKey[captionTrackKey(d)] = d;
+                    var lang = String(d.languageCode || '').toLowerCase();
+                    if (lang && !byLang[lang]) byLang[lang] = d;
+                });
+                elements.forEach(function (el) {
+                    var rep = byKey[el.getAttribute('data-wblock-native-subtitle') || ''] || byLang[String(el.srclang || '').toLowerCase()];
+                    if (rep && pendingDefs) pendingDefs.set(el, rep);
+                });
                 return true;
             }).catch(function () { return false; });
-            return alternateFallbackPromise;
+            return altPromise;
         }
 
         function ensureTrackLoaded(el) {
-            if (cancelled || !el || !pendingDefs || !trackStates) return;
-            if (trackStates.get(el)) return;
+            if (cancelled || !el || !pendingDefs || !trackStates || trackStates.get(el)) return;
             var def = pendingDefs.get(el);
             if (!def) return;
             trackStates.set(el, 'loading');
             var signal = controller ? controller.signal : undefined;
             fetchNormalizedSubtitleVtt(def, signal).then(function (vtt) {
-                if (cancelled) return null;
-                if (vtt || usedAlternateClient) return vtt;
-                return refreshPendingFromAlternate(signal).then(function (refreshed) {
-                    if (cancelled || !refreshed) return null;
-                    var updated = pendingDefs.get(el);
+                if (cancelled || vtt || usedAlt) return vtt;
+                return refreshFromAlternate(signal).then(function (ok) {
+                    var updated = !cancelled && ok && pendingDefs.get(el);
                     return updated ? fetchNormalizedSubtitleVtt(updated, signal) : null;
                 });
             }).then(function (vtt) {
                 if (cancelled) return;
-                if (!vtt) {
-                    trackStates.delete(el);
-                    return;
-                }
-                var blobUrl = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
-                blobUrls.push(blobUrl);
+                if (!vtt) { trackStates.delete(el); return; }
+                var url = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+                blobUrls.push(url);
                 trackStates.set(el, 'loaded');
                 pendingDefs.delete(el);
-                el.src = blobUrl;
-            }).catch(function () {
-                if (!cancelled && trackStates) trackStates.delete(el);
-            });
+                el.src = url;
+            }).catch(function () { if (!cancelled) trackStates.delete(el); });
         }
 
         function hydrateActiveTracks() {
-            for (var i = 0; i < elements.length; i++) {
-                var el = elements[i];
-                if (el.track && el.track.mode !== 'disabled') {
-                    ensureTrackLoaded(el);
-                }
-            }
+            elements.forEach(function (el) { if (el.track && el.track.mode !== 'disabled') ensureTrackLoaded(el); });
         }
 
         function install(definitions) {
             if (cancelled || !definitions.length) return;
-            var priorForeignShowing = null;
-            if (video.textTracks) {
-                for (var p = 0; p < video.textTracks.length; p++) {
-                    var existing = video.textTracks[p];
-                    if ((existing.kind === 'subtitles' || existing.kind === 'captions') && existing.mode === 'showing') {
-                        priorForeignShowing = existing;
-                        break;
-                    }
-                }
-            }
+            var priorForeign = Array.prototype.filter.call(video.textTracks || [], function (t) {
+                return (t.kind === 'subtitles' || t.kind === 'captions') && t.mode === 'showing';
+            })[0] || null;
             removeForeignTrackElements();
             var seen = {};
-            for (var i = 0; i < definitions.length; i++) {
-                var definition = definitions[i];
-                if (!captionUrl(definition)) continue;
-                var language = definition.languageCode || '';
-                var label = youtubeText(definition.name) || language || 'CC';
-                var key = captionTrackKey(definition);
-                if (seen[key]) continue;
+            definitions.forEach(function (def) {
+                var key = captionUrl(def) && captionTrackKey(def);
+                if (!key || seen[key]) return;
                 seen[key] = true;
                 try {
-                    var element = document.createElement('track');
-                    element.kind = 'subtitles';
-                    element.label = label;
-                    element.srclang = language;
-                    element.setAttribute('data-wblock-native-subtitle', key);
-                    if (pendingDefs) pendingDefs.set(element, definition);
-                    protectOwnedTrackElement(video, element);
-                    video.appendChild(element);
-                    elements.push(element);
-                } catch (e) { /* skip one malformed track */ }
+                    var el = document.createElement('track');
+                    el.kind = 'subtitles';
+                    el.srclang = def.languageCode || '';
+                    el.label = youtubeText(def.name) || el.srclang || 'CC';
+                    el.setAttribute('data-wblock-native-subtitle', key);
+                    if (pendingDefs) pendingDefs.set(el, def);
+                    protectOwnedTrackElement(video, el);
+                    video.appendChild(el);
+                    elements.push(el);
+                } catch (e) {}
+            });
+            if (!elements.length) return;
+            log('applied', elements.length, 'Safari caption tracks (lazy)');
+            try { if (typeof player.setOption === 'function') player.setOption('captions', 'track', null); } catch (e) {}
+            try { if (typeof player.unloadModule === 'function') player.unloadModule('captions'); } catch (e) {}
+            disableForeignSubtitles(false);
+            var owned = ownedSubtitleTracks(video);
+            if (priorForeign && !owned.some(function (t) { return t.mode === 'showing'; })) {
+                var match = matchingSubtitleTrack(owned, priorForeign.language);
+                if (match) try { match.mode = 'showing'; } catch (e) {}
             }
-            // Safari owns the on/off choice and the language, and turns on the
-            // right track for each new video from its own caption setting.
-            // Don't set modes here unless a preexisting foreign subtitle track
-            // was already showing (Safari's setting is On) and Safari didn't
-            // activate one of ours on append: leaving all tracks disabled while
-            // Safari's setting is On leaves its On item doing nothing (#11).
-            if (elements.length) {
-                log('applied', elements.length, 'Safari caption tracks (lazy)');
-                disableYouTubeSubtitles();
-                disableForeignSubtitles(false);
-                var owned = ownedSubtitleTracks(video);
-                var anyOwnedShowing = owned.some(function (t) { return t.mode === 'showing'; });
-                if (!anyOwnedShowing && priorForeignShowing) {
-                    var match = matchingSubtitleTrack(owned, priorForeignShowing.language);
-                    if (match) {
-                        try { match.mode = 'showing'; } catch (e) { /* ignore */ }
-                    }
-                }
-                enforceSingleSubtitleTrack();
-                hydrateActiveTracks();
-                syncMediaSessionCaptions(video);
-            }
+            enforceSingleSubtitleTrack();
+            hydrateActiveTracks();
+            syncMediaSessionCaptions(video);
         }
 
         function loadTracks(tracks) {
-            var signal = controller ? controller.signal : undefined;
             subtitleVideoId = nativeSubtitleVideoId(player);
-            var useAlternateFirst = captionsNeedAlternateClient(tracks);
-            usedAlternateClient = useAlternateFirst;
-            var candidates = useAlternateFirst ? alternateCaptionTracks(subtitleVideoId, signal) : Promise.resolve(tracks);
-            candidates.then(function (candidateTracks) {
-                if (cancelled) return;
-                var list = candidateTracks && candidateTracks.length ? candidateTracks : tracks;
-                install(withAutoTranslatedTrack(list));
+            usedAlt = captionsNeedAlternateClient(tracks);
+            var candidates = usedAlt ? alternateCaptionTracks(subtitleVideoId, controller ? controller.signal : undefined) : Promise.resolve(tracks);
+            candidates.then(function (list) {
+                if (!cancelled) install(withAutoTranslatedTrack(list && list.length ? list : tracks));
             }).catch(function (error) {
                 if (!cancelled && (!error || error.name !== 'AbortError')) log('native subtitles unavailable', error);
             });
@@ -4576,18 +4163,10 @@
             }, 0);
         }
         function enforceSingleSubtitleTrack() {
-            var pool = ownedSubtitleTracks(video);
-            if (!pool.length) pool = nativeSubtitleTracks(video);
-            var showing = pool.filter(function (track) { return track.mode === 'showing'; });
+            var showing = activeSubtitlePool(video).filter(function (t) { return t.mode === 'showing'; });
             if (showing.length > 1) {
-                var keep = null;
-                for (var i = 0; i < showing.length; i++) {
-                    if (showingBefore.indexOf(showing[i]) === -1) { keep = showing[i]; break; }
-                }
-                if (!keep) keep = showing[showing.length - 1];
-                for (var j = 0; j < showing.length; j++) {
-                    if (showing[j] !== keep) { try { showing[j].mode = 'disabled'; } catch (e) { /* ignore */ } }
-                }
+                var keep = showing.filter(function (t) { return showingBefore.indexOf(t) === -1; })[0] || showing[showing.length - 1];
+                showing.forEach(function (t) { if (t !== keep) try { t.mode = 'disabled'; } catch (e) {} });
                 showing = [keep];
             }
             showingBefore = showing;
@@ -4676,76 +4255,48 @@
             disableForeignSubtitles(false);
             syncMediaSessionCaptions(video);
         }
-        function onTrackRemoved() {
-            syncMediaSessionCaptions(video);
-        }
-        // Safari's caption menus learn the selection from mode changes WebKit
-        // delivers while the page renders. The pump's flips happen while it
-        // doesn't, and one that gets dropped leaves fullscreen's menu saying
-        // Off while cues still paint (#11). Re-assert the showing track, in
-        // two tasks, once the page is visible again or when fullscreen starts
-        // after a hidden PiP pump. Avoid blinking the track on normal inline
-        // to fullscreen transitions so AVPlayerViewController never snapshots
-        // a hidden mode.
         var pumpedWhileHidden = false;
         function resyncSubtitleSelection() {
-            var pool = ownedSubtitleTracks(video);
-            if (!pool.length) pool = nativeSubtitleTracks(video);
-            var showing = pool.filter(function (track) { return track.mode === 'showing'; })[0];
+            var showing = activeSubtitlePool(video).filter(function (t) { return t.mode === 'showing'; })[0];
             if (!showing || cancelled) return;
-            try { showing.mode = 'hidden'; } catch (e) { /* ignore */ }
-            setTimeout(function () {
-                try { if (!cancelled && showing.mode === 'hidden') showing.mode = 'showing'; } catch (e) { /* ignore */ }
-            }, 0);
+            try { showing.mode = 'hidden'; } catch (e) {}
+            setTimeout(function () { try { if (!cancelled && showing.mode === 'hidden') showing.mode = 'showing'; } catch (e) {} }, 0);
         }
-        function onFullscreenBeginSubtitles() {
+        function onFullscreenSubtitles(event) {
             disableForeignSubtitles(false);
-            if (!pumpedWhileHidden) return;
-            pumpedWhileHidden = false;
-            resyncSubtitleSelection();
-        }
-        function onFullscreenEndSubtitles() {
-            disableForeignSubtitles(false);
-            syncMediaSessionCaptions(video);
+            if (event && event.type === 'webkitbeginfullscreen' && pumpedWhileHidden) {
+                pumpedWhileHidden = false;
+                resyncSubtitleSelection();
+            } else {
+                syncMediaSessionCaptions(video);
+            }
         }
         var stopSubtitleVisibility = observeRealVisibility(function () {
             if (_realHidden || !pumpedWhileHidden) return;
             pumpedWhileHidden = false;
             resyncSubtitleSelection();
         });
-        video.addEventListener('timeupdate', onPiPCaptionTick);
-        addOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenBeginSubtitles);
-        addOwnVideoListener(video, 'webkitendfullscreen', onFullscreenEndSubtitles);
+        onActive(video, 'timeupdate', onPiPCaptionTick);
+        onActive(video, ['webkitbeginfullscreen', 'webkitendfullscreen'], onFullscreenSubtitles);
         if (video.textTracks && typeof video.textTracks.addEventListener === 'function') {
-            video.textTracks.addEventListener('addtrack', onTrackAdded);
-            video.textTracks.addEventListener('removetrack', onTrackRemoved);
-            video.textTracks.addEventListener('change', onNativeSubtitleChange);
+            onActive(video.textTracks, 'addtrack', onTrackAdded);
+            onActive(video.textTracks, 'removetrack', function () { syncMediaSessionCaptions(video); });
+            onActive(video.textTracks, 'change', onNativeSubtitleChange);
         }
         pipPumpInterval = setInterval(onPiPCaptionTick, 500);
 
         registerCleanup(function () {
             cancelled = true;
             stopRetry();
-            video.removeEventListener('timeupdate', onPiPCaptionTick);
-            removeOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenBeginSubtitles);
-            removeOwnVideoListener(video, 'webkitendfullscreen', onFullscreenEndSubtitles);
             stopSubtitleVisibility();
-            if (video.textTracks && typeof video.textTracks.removeEventListener === 'function') {
-                video.textTracks.removeEventListener('addtrack', onTrackAdded);
-                video.textTracks.removeEventListener('removetrack', onTrackRemoved);
-                video.textTracks.removeEventListener('change', onNativeSubtitleChange);
-            }
             clearMediaSessionCaptions();
-            if (pipPumpInterval !== null) { clearInterval(pipPumpInterval); pipPumpInterval = null; }
+            if (pipPumpInterval !== null) clearInterval(pipPumpInterval);
+            if (pipPumpRestoreTimer !== null) clearTimeout(pipPumpRestoreTimer);
+            pipPumpInterval = pipPumpRestoreTimer = null;
             pipPumpRestorePending = false;
-            if (pipPumpRestoreTimer !== null) { clearTimeout(pipPumpRestoreTimer); pipPumpRestoreTimer = null; }
             if (controller) controller.abort();
-            for (var i = 0; i < elements.length; i++) {
-                detachTrackElement(elements[i]);
-            }
-            for (var j = 0; j < blobUrls.length; j++) {
-                try { URL.revokeObjectURL(blobUrls[j]); } catch (e) { /* ignore */ }
-            }
+            elements.forEach(detachTrackElement);
+            blobUrls.forEach(function (u) { try { URL.revokeObjectURL(u); } catch (e) {} });
         });
     }
 
@@ -5477,16 +5028,10 @@
             else onExit();
         }
 
-        addOwnVideoListener(video, 'webkitbeginfullscreen', onEnter);
-        addOwnVideoListener(video, 'webkitendfullscreen', onExit);
-        addOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationChange);
-
-        registerCleanup(function () {
-            stopAll();
-            removeOwnVideoListener(video, 'webkitbeginfullscreen', onEnter);
-            removeOwnVideoListener(video, 'webkitendfullscreen', onExit);
-            removeOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationChange);
-        });
+        onActive(video, 'webkitbeginfullscreen', onEnter);
+        onActive(video, 'webkitendfullscreen', onExit);
+        onActive(video, 'webkitpresentationmodechanged', onPresentationChange);
+        registerCleanup(stopAll);
     }
 
     function applyPreferredQuality() {
@@ -6107,31 +5652,16 @@
                 if (video.webkitCurrentPlaybackTargetIsWireless) show();
                 schedule();
             }
-            document.addEventListener('pointerdown', down, true);
-            document.addEventListener('pointerup', up, true);
-            document.addEventListener('pointercancel', up, true);
-            document.addEventListener('pointermove', move, true);
-            player.addEventListener('pointerleave', leave);
-            window.addEventListener('blur', reset);
-            addOwnVideoListener(video, 'webkitpresentationmodechanged', reset);
-            video.addEventListener('seeking', show);
-            video.addEventListener('seeked', schedule);
-            video.addEventListener('ended', show);
-            video.addEventListener('webkitcurrentplaybacktargetiswirelesschanged', wirelessChanged);
-            registerCleanup(function () {
-                toolbarPointers.clear();
-                document.removeEventListener('pointerdown', down, true);
-                document.removeEventListener('pointerup', up, true);
-                document.removeEventListener('pointercancel', up, true);
-                document.removeEventListener('pointermove', move, true);
-                player.removeEventListener('pointerleave', leave);
-                window.removeEventListener('blur', reset);
-                removeOwnVideoListener(video, 'webkitpresentationmodechanged', reset);
-                video.removeEventListener('seeking', show);
-                video.removeEventListener('seeked', schedule);
-                video.removeEventListener('ended', show);
-                video.removeEventListener('webkitcurrentplaybacktargetiswirelesschanged', wirelessChanged);
-            });
+            onActive(document, 'pointerdown', down, true);
+            onActive(document, ['pointerup', 'pointercancel'], up, true);
+            onActive(document, 'pointermove', move, true);
+            onActive(player, 'pointerleave', leave);
+            onActive(window, 'blur', reset);
+            onActive(video, 'webkitpresentationmodechanged', reset);
+            onActive(video, ['seeking', 'ended'], show);
+            onActive(video, 'seeked', schedule);
+            onActive(video, 'webkitcurrentplaybacktargetiswirelesschanged', wirelessChanged);
+            registerCleanup(function () { toolbarPointers.clear(); });
         }
 
         if (IS_IOS) {
@@ -6435,7 +5965,7 @@
                 }
                 lastPresentationMode = mode;
             }
-            addOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
+            onActive(video, 'webkitpresentationmodechanged', onPresentationModeChange);
 
             bindNativeToolbarInteractions(showToolbar, scheduleHideToolbar);
 
@@ -6460,7 +5990,6 @@
                 player.removeEventListener('mouseleave', onPlayerMouseLeave);
                 video.removeEventListener('play', onVideoPlay);
                 video.removeEventListener('pause', onVideoPause);
-                removeOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
             });
         }
 
@@ -6647,56 +6176,34 @@
         return preferredSubtitleTrack(tracks);
     }
 
-    function toggleNativeSubtitles(video) {
+    function activeSubtitlePool(video) {
         var owned = ownedSubtitleTracks(video);
-        var tracks = owned.length ? owned : nativeSubtitleTracks(video);
+        return owned.length ? owned : nativeSubtitleTracks(video);
+    }
+
+    function toggleNativeSubtitles(video) {
+        var tracks = activeSubtitlePool(video);
         if (!tracks.length) return false;
-        var showing = null;
-        for (var i = 0; i < tracks.length; i++) {
-            if (tracks[i].mode === 'showing') { showing = tracks[i]; break; }
-        }
-        if (showing) {
-            video._wblockLastSubtitleTrack = showing;
-            for (var j = 0; j < tracks.length; j++) {
-                try { tracks[j].mode = 'disabled'; } catch (e) { /* ignore */ }
-            }
-            syncMediaSessionCaptions(video);
-            return true;
-        }
-        var last = video._wblockLastSubtitleTrack;
-        var pick = last && tracks.indexOf(last) !== -1 ? last : preferredSubtitleTrack(tracks);
-        for (var k = 0; k < tracks.length; k++) {
-            try { tracks[k].mode = tracks[k] === pick ? 'showing' : 'disabled'; } catch (e) { /* ignore */ }
-        }
+        var showing = tracks.filter(function (t) { return t.mode === 'showing'; })[0];
+        var pick = showing ? null : (video._wblockLastSubtitleTrack && tracks.indexOf(video._wblockLastSubtitleTrack) !== -1 ? video._wblockLastSubtitleTrack : preferredSubtitleTrack(tracks));
+        if (showing) video._wblockLastSubtitleTrack = showing;
+        tracks.forEach(function (t) { try { t.mode = t === pick ? 'showing' : 'disabled'; } catch (e) {} });
         syncMediaSessionCaptions(video);
         return true;
     }
 
-    function onCaptionHotkey(event) {
-        if (event.ctrlKey || event.metaKey || event.altKey) { return; }
-        if (event.key !== 'c' && event.key !== 'C') { return; }
-        var video = activeVideo;
-        if (!video || !video.isConnected) { return; }
-        if (isTypingTarget(event.target)) { return; }
-        // YouTube's own C shortcut turns on its DOM caption overlay, which
-        // the native player hides and which would double any Safari
-        // subtitle track. Route the key to the native tracks instead.
+    function onPlayerHotkey(event) {
+        if (event.ctrlKey || event.metaKey || event.altKey) return;
+        var key = event.key;
+        var isFs = key === 'f' || key === 'F';
+        var isCc = key === 'c' || key === 'C';
+        if ((!isFs && !isCc) || !activeVideo || !activeVideo.isConnected || isTypingTarget(event.target)) return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        if (!event.repeat) { toggleNativeSubtitles(video); }
-    }
-
-    function onFullscreenHotkey(event) {
-        if (event.ctrlKey || event.metaKey || event.altKey) { return; }
-        if (event.key !== 'f' && event.key !== 'F') { return; }
-        var video = activeVideo;
-        if (!video || !video.isConnected) { return; }
-        if (isTypingTarget(event.target)) { return; }
-        // Consume key repeats too so YouTube never sees a held F, but only
-        // toggle once per press.
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        if (!event.repeat) { toggleNativeFullscreen(video); }
+        if (!event.repeat) {
+            if (isFs) toggleNativeFullscreen(activeVideo);
+            else toggleNativeSubtitles(activeVideo);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -6766,31 +6273,18 @@
         }
 
         var options = { capture: true, passive: false };
-        document.addEventListener('touchstart', onTouchStart, options);
-        document.addEventListener('touchmove', onTouchMove, options);
-        document.addEventListener('touchend', onTouchEnd, options);
-        document.addEventListener('touchcancel', onTouchEnd, options);
-        document.addEventListener('gesturestart', onGesture, options);
-        document.addEventListener('gesturechange', onGesture, options);
-        document.addEventListener('gestureend', onGesture, options);
-        registerCleanup(function () {
-            document.removeEventListener('touchstart', onTouchStart, options);
-            document.removeEventListener('touchmove', onTouchMove, options);
-            document.removeEventListener('touchend', onTouchEnd, options);
-            document.removeEventListener('touchcancel', onTouchEnd, options);
-            document.removeEventListener('gesturestart', onGesture, options);
-            document.removeEventListener('gesturechange', onGesture, options);
-            document.removeEventListener('gestureend', onGesture, options);
-        });
+        onActive(document, 'touchstart', onTouchStart, options);
+        onActive(document, 'touchmove', onTouchMove, options);
+        onActive(document, ['touchend', 'touchcancel'], onTouchEnd, options);
+        onActive(document, ['gesturestart', 'gesturechange', 'gestureend'], onGesture, options);
     }
 
     function setupFullscreenHotkey() {
-        document.addEventListener('keydown', onFullscreenHotkey, true);
-        document.addEventListener('keydown', onCaptionHotkey, true);
+        document.addEventListener('keydown', onPlayerHotkey, true);
         // Capture phase: these events do not bubble.
-        document.addEventListener('webkitbeginfullscreen', onNativeFullscreenEvent, true);
-        document.addEventListener('webkitendfullscreen', onNativeFullscreenEvent, true);
-        document.addEventListener('webkitpresentationmodechanged', onNativeFullscreenEvent, true);
+        ['webkitbeginfullscreen', 'webkitendfullscreen', 'webkitpresentationmodechanged'].forEach(function (t) {
+            document.addEventListener(t, onNativeFullscreenEvent, true);
+        });
     }
 
     // ------------------------------------------------------------------

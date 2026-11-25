@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.62
+// @version      0.1.63
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -133,13 +133,12 @@
     function onCleanup(video, fn) { stateOf(video).cleanups.push(fn); }
 
     function listen(video, target, type, fn, options) {
-        if (nativeVideoAddListener && typeof HTMLVideoElement !== 'undefined' && target instanceof HTMLVideoElement) {
-            nativeVideoAddListener.call(target, type, fn, options);
-            onCleanup(video, function () { nativeVideoRemoveListener.call(target, type, fn, options); });
-            return;
-        }
-        target.addEventListener(type, fn, options);
-        onCleanup(video, function () { target.removeEventListener(type, fn, options); });
+        var isVid = nativeVideoAddListener && typeof HTMLVideoElement !== 'undefined' && target instanceof HTMLVideoElement;
+        var add = isVid ? nativeVideoAddListener : target.addEventListener;
+        var rem = isVid ? nativeVideoRemoveListener : target.removeEventListener;
+        var list = Array.isArray(type) ? type : [type];
+        list.forEach(function (t) { add.call(target, t, fn, options); });
+        onCleanup(video, function () { list.forEach(function (t) { rem.call(target, t, fn, options); }); });
     }
 
     function release(video) {
@@ -197,15 +196,29 @@
     // ------------------------------------------------------------------
 
     // Captured before the document properties are shadowed below.
-    function findDocGetter(name) {
-        for (var proto = document; proto; proto = Object.getPrototypeOf(proto)) {
-            var descriptor = Object.getOwnPropertyDescriptor(proto, name);
-            if (descriptor && descriptor.get) { return descriptor.get; }
+    function findPropDesc(obj, prop) {
+        for (var cur = obj; cur; cur = Object.getPrototypeOf(cur)) {
+            var desc = Object.getOwnPropertyDescriptor(cur, prop);
+            if (desc) { return desc; }
         }
         return null;
     }
-    var nativeHidden = findDocGetter('hidden');
-    var nativeVisibilityState = findDocGetter('visibilityState');
+
+    function patchProp(obj, prop, makeSet) {
+        return attempt(function () {
+            var desc = findPropDesc(obj, prop);
+            if (!desc || !desc.set) { return null; }
+            Object.defineProperty(obj, prop, {
+                configurable: true, enumerable: desc.enumerable,
+                get: function () { return desc.get ? desc.get.call(this) : undefined; },
+                set: makeSet(desc)
+            });
+            return desc;
+        });
+    }
+
+    var nativeHidden = (findPropDesc(document, 'hidden') || {}).get || null;
+    var nativeVisibilityState = (findPropDesc(document, 'visibilityState') || {}).get || null;
     var reallyHidden = false;
     var everVisible = false;
     var bgPlaybackInstalled = false;
@@ -231,28 +244,22 @@
     var SPURIOUS_PLAY = { grace: 5000 };
     var spuriousPlayState = { armed: false, visible: true, visibleAt: 0, drop: false };
     function stepSpuriousPlay(op, paused) {
-        spuriousPlayState = spuriousPlayStep(SPURIOUS_PLAY, spuriousPlayState, {
-            op: op, paused: !!paused, t: Math.round(performance.now())
-        });
+        spuriousPlayState = spuriousPlayStep(SPURIOUS_PLAY, spuriousPlayState, { op: op, paused: !!paused, t: Math.round(performance.now()) });
         return spuriousPlayState;
     }
 
     function observeVisibility(video, fn) {
         visibilityObservers.push(fn);
-        onCleanup(video, function () {
-            var index = visibilityObservers.indexOf(fn);
-            if (index !== -1) { visibilityObservers.splice(index, 1); }
-        });
+        onCleanup(video, function () { var i = visibilityObservers.indexOf(fn); if (i !== -1) { visibilityObservers.splice(i, 1); } });
     }
 
     function installBackgroundPlaybackShadow() {
         if (bgPlaybackInstalled) { return; }
         bgPlaybackInstalled = true;
         bgPlaybackPending = false;
-        attempt(function () { Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return false; } }); });
-        attempt(function () { Object.defineProperty(document, 'visibilityState', { configurable: true, get: function () { return 'visible'; } }); });
-        attempt(function () { Object.defineProperty(document, 'webkitHidden', { configurable: true, get: function () { return false; } }); });
-        attempt(function () { Object.defineProperty(document, 'webkitVisibilityState', { configurable: true, get: function () { return 'visible'; } }); });
+        [['hidden', false], ['visibilityState', 'visible'], ['webkitHidden', false], ['webkitVisibilityState', 'visible']].forEach(function (entry) {
+            attempt(function () { Object.defineProperty(document, entry[0], { configurable: true, get: function () { return entry[1]; } }); });
+        });
     }
 
     function updateVisibility(event) {
@@ -260,14 +267,12 @@
             (nativeVisibilityState ? nativeVisibilityState.call(document) === 'hidden' : document.hidden);
         if (!reallyHidden) {
             everVisible = true;
-            if (bgPlaybackPending && !bgPlaybackInstalled && backgroundPlaybackOn()) {
-                installBackgroundPlaybackShadow();
-            }
+            if (bgPlaybackPending && !bgPlaybackInstalled && backgroundPlaybackOn()) { installBackgroundPlaybackShadow(); }
         }
-        if (!IS_IOS) {
-            stepSpuriousPlay(reallyHidden ? 'hide' : 'show', mediaSessionOwner ? mediaSessionOwner.paused : false);
+        if (!event || event.type === 'visibilitychange') {
+            if (!IS_IOS) { stepSpuriousPlay(reallyHidden ? 'hide' : 'show', mediaSessionOwner ? mediaSessionOwner.paused : false); }
+            visibilityObservers.slice().forEach(function (fn) { attempt(fn); });
         }
-        visibilityObservers.slice().forEach(function (fn) { attempt(fn); });
         if (reallyHidden && everVisible && bgPlaybackInstalled && backgroundPlaybackOn() &&
             event && typeof event.stopImmediatePropagation === 'function') {
             event.stopImmediatePropagation();
@@ -275,12 +280,7 @@
     }
     updateVisibility();
     document.addEventListener('visibilitychange', updateVisibility, true);
-    document.addEventListener('webkitvisibilitychange', function (event) {
-        if (reallyHidden && everVisible && bgPlaybackInstalled && backgroundPlaybackOn() &&
-            event && typeof event.stopImmediatePropagation === 'function') {
-            event.stopImmediatePropagation();
-        }
-    }, true);
+    document.addEventListener('webkitvisibilitychange', updateVisibility, true);
 
     function backgroundPlaybackOn() { return features.backgroundPlayback && loadPreferences().backgroundPlayback !== false; }
 
@@ -472,29 +472,21 @@
     attempt(function () {
         HTMLVideoElement.prototype.addEventListener = function (type, listener, options) {
             if (type === 'click' || type === 'dblclick') { guardNativeControlClicks(this); }
-            if ((type === 'webkitbeginfullscreen' || type === 'webkitendfullscreen' || type === 'webkitpresentationmodechanged') &&
+            if (/^webkit(?:beginfullscreen|endfullscreen|presentationmodechanged)$/.test(type) &&
                 (typeof listener === 'function' || (listener && typeof listener.handleEvent === 'function'))) {
-                var byType = gatedVideoListeners.get(listener);
-                if (!byType) { byType = {}; gatedVideoListeners.set(listener, byType); }
-                var gated = byType[type];
-                if (!gated) {
-                    gated = function (event) {
-                        if (this._wblockEnhanced) {
-                            if (type !== 'webkitpresentationmodechanged' || this.webkitPresentationMode === 'picture-in-picture') { return; }
-                        }
-                        return typeof listener === 'function' ? listener.apply(this, arguments) : listener.handleEvent(event);
-                    };
-                    byType[type] = gated;
-                }
+                var byType = gatedVideoListeners.get(listener) || (gatedVideoListeners.set(listener, {}), gatedVideoListeners.get(listener));
+                var gated = byType[type] || (byType[type] = function (event) {
+                    if (this._wblockEnhanced && (type !== 'webkitpresentationmodechanged' || this.webkitPresentationMode === 'picture-in-picture')) { return; }
+                    return typeof listener === 'function' ? listener.apply(this, arguments) : listener.handleEvent(event);
+                });
                 return nativeVideoAddListener.call(this, type, gated, options);
             }
             return nativeVideoAddListener.apply(this, arguments);
         };
         HTMLVideoElement.prototype.removeEventListener = function (type, listener, options) {
             var byType = listener && (typeof listener === 'function' || typeof listener === 'object') ? gatedVideoListeners.get(listener) : null;
-            var gated = byType && byType[type];
-            if (gated) { return nativeVideoRemoveListener.call(this, type, gated, options); }
-            return nativeVideoRemoveListener.apply(this, arguments);
+            return byType && byType[type] ? nativeVideoRemoveListener.call(this, type, byType[type], options) :
+                nativeVideoRemoveListener.apply(this, arguments);
         };
     });
 
@@ -503,20 +495,11 @@
     // bypass JS setters and still fire ratechange/volumechange.
     var ownMediaPropWrite = false;
     var nativeMediaPropDescs = {};
-    attempt(function () {
-        (IS_IOS ? ['playbackRate', 'defaultPlaybackRate'] : ['volume', 'playbackRate', 'defaultPlaybackRate']).forEach(function (prop) {
-            var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, prop);
-            if (!desc || !desc.get || !desc.set) { return; }
-            nativeMediaPropDescs[prop] = desc;
-            Object.defineProperty(HTMLMediaElement.prototype, prop, {
-                configurable: true, enumerable: desc.enumerable,
-                get: function () { return desc.get.call(this); },
-                set: function (value) {
-                    if (!ownMediaPropWrite && this._wblockEnhanced) { return; }
-                    desc.set.call(this, value);
-                }
-            });
+    (IS_IOS ? ['playbackRate', 'defaultPlaybackRate'] : ['volume', 'playbackRate', 'defaultPlaybackRate']).forEach(function (prop) {
+        var desc = patchProp(HTMLMediaElement.prototype, prop, function (d) {
+            return function (value) { if (!ownMediaPropWrite && this._wblockEnhanced) { return; } d.set.call(this, value); };
         });
+        if (desc) { nativeMediaPropDescs[prop] = desc; }
     });
 
     function writeMediaProp(video, prop, value) {
@@ -559,31 +542,21 @@
     var nativeMediaSessionSetActionHandler = null;
     var mediaSessionCaptionsGuarded = false;
 
-    function findPropDesc(obj, prop) {
-        for (var cur = obj; cur; cur = Object.getPrototypeOf(cur)) {
-            var desc = Object.getOwnPropertyDescriptor(cur, prop);
-            if (desc) { return desc; }
-        }
-        return null;
+    function withCaptionWrite(fn) {
+        ownMediaSessionCaptionWrite = true;
+        try { attempt(fn); } finally { ownMediaSessionCaptionWrite = false; }
     }
 
     function guardMediaSessionCaptions() {
-        if (mediaSessionCaptionsGuarded) { return; }
         var session = navigator.mediaSession;
-        if (!session || !('captionTracks' in session)) { return; }
+        if (mediaSessionCaptionsGuarded || !session || !('captionTracks' in session)) { return; }
         mediaSessionCaptionsGuarded = true;
         ['captionTracks', 'captionsEnabled'].forEach(function (prop) {
-            attempt(function () {
-                var desc = findPropDesc(session, prop);
-                if (!desc || !desc.set) { return; }
-                Object.defineProperty(session, prop, {
-                    configurable: true, enumerable: desc.enumerable,
-                    get: function () { return desc.get ? desc.get.call(this) : undefined; },
-                    set: function (value) {
-                        if (!ownMediaSessionCaptionWrite && mediaSessionOwner && mediaSessionOwner._wblockEnhanced) { return; }
-                        desc.set.call(this, value);
-                    }
-                });
+            patchProp(session, prop, function (desc) {
+                return function (value) {
+                    if (!ownMediaSessionCaptionWrite && mediaSessionOwner && mediaSessionOwner._wblockEnhanced) { return; }
+                    desc.set.call(this, value);
+                };
             });
         });
     }
@@ -658,12 +631,10 @@
             log('repeating a native play on the swapped source');
             playOwn(video).catch(function () {});
         });
-        ['pointerup', 'touchend', 'click', 'keydown'].forEach(function (type) {
-            listen(video, window, type, function (event) {
-                if ((event.composedPath ? event.composedPath() : [event.target]).indexOf(video) === -1) { unholdBoth(); }
-                else { video._wblockTappedAt = performance.now(); replays = 0; }
-            }, true);
-        });
+        listen(video, window, ['pointerup', 'touchend', 'click', 'keydown'], function (event) {
+            if ((event.composedPath ? event.composedPath() : [event.target]).indexOf(video) === -1) { unholdBoth(); }
+            else { video._wblockTappedAt = performance.now(); replays = 0; }
+        }, true);
         onCleanup(video, unholdBoth);
     }
 
@@ -683,9 +654,7 @@
         }
         // Not pointerdown or touchstart: the home swipe can begin on the page
         // and ends in touchcancel, while a tap on the controls ends in these.
-        ['pointerup', 'touchend', 'click', 'keydown'].forEach(function (name) {
-            listen(video, window, name, function () { send('input'); }, true);
-        });
+        listen(video, window, ['pointerup', 'touchend', 'click', 'keydown'], function () { send('input'); }, true);
         observeVisibility(video, function () { send(reallyHidden ? 'hide' : 'show'); });
         listen(video, video, 'pause', function () { send('pause'); });
         listen(video, video, 'playing', function () { send('play'); });
@@ -1042,14 +1011,12 @@
     }
 
     function syncMediaSessionCaptions(video) {
-        if (!video || mediaSessionOwner !== video || !video._wblockEnhanced) { return; }
         var session = navigator.mediaSession;
-        if (!session || !('captionTracks' in session)) { return; }
+        if (!video || mediaSessionOwner !== video || !video._wblockEnhanced || !session || !('captionTracks' in session)) { return; }
         guardMediaSessionCaptions();
         var tracks = subtitleTracks(video);
         var setHandler = nativeMediaSessionSetActionHandler || (typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
-        ownMediaSessionCaptionWrite = true;
-        try {
+        withCaptionWrite(function () {
             if (setHandler) {
                 var selectIndex = function (idx) {
                     var list = subtitleTracks(video);
@@ -1059,40 +1026,25 @@
                 };
                 setHandler.call(session, 'togglecaptions', function () {
                     var list = subtitleTracks(video);
-                    if (!list.length) { return; }
-                    if (list.some(function (t) { return t.mode === 'showing'; })) { selectIndex(-1); }
-                    else { selectIndex(0); }
+                    if (list.length) { selectIndex(list.some(function (t) { return t.mode === 'showing'; }) ? -1 : 0); }
                 });
-                setHandler.call(session, 'selectcaptiontrack', function (details) {
-                    selectIndex(details && typeof details.trackIndex === 'number' ? details.trackIndex : -1);
-                });
+                setHandler.call(session, 'selectcaptiontrack', function (d) { selectIndex(d && typeof d.trackIndex === 'number' ? d.trackIndex : -1); });
             }
-            session.captionTracks = tracks.map(function (t) {
-                return { label: t.label, language: t.language, enabled: t.mode === 'showing' };
-            });
+            session.captionTracks = tracks.map(function (t) { return { label: t.label, language: t.language, enabled: t.mode === 'showing' }; });
             session.captionsEnabled = tracks.some(function (t) { return t.mode === 'showing'; });
-        } catch (e) { /* ignore */ }
-        finally { ownMediaSessionCaptionWrite = false; }
+        });
     }
 
     function clearMediaSession(video) {
         var state = stateOf(video);
-        (state.mediaActions || []).forEach(function (action) {
-            attempt(function () { navigator.mediaSession.setActionHandler(action, null); });
-        });
         var session = navigator.mediaSession;
         var setHandler = nativeMediaSessionSetActionHandler || (session && typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
-        if (session && 'captionTracks' in session && setHandler) {
-            ownMediaSessionCaptionWrite = true;
-            try {
-                setHandler.call(session, 'togglecaptions', null);
-                setHandler.call(session, 'selectcaptiontrack', null);
-            } catch (e) { /* ignore */ }
-            finally { ownMediaSessionCaptionWrite = false; }
-        }
-        if (state.mediaMetadata && navigator.mediaSession.metadata === state.mediaMetadata) {
-            navigator.mediaSession.metadata = null;
-        }
+        withCaptionWrite(function () {
+            (state.mediaActions || []).concat('captionTracks' in session ? ['togglecaptions', 'selectcaptiontrack'] : []).forEach(function (action) {
+                attempt(function () { setHandler.call(session, action, null); });
+            });
+        });
+        if (state.mediaMetadata && session.metadata === state.mediaMetadata) { session.metadata = null; }
         state.mediaActions = state.mediaMetadata = null;
     }
 
@@ -1137,12 +1089,9 @@
         }
         listen(video, video, 'play', activate);
         listen(video, video, 'playing', function () { if (!IS_IOS) { stepSpuriousPlay('playing', false); } });
-        listen(video, video, 'timeupdate', updatePosition);
-        listen(video, video, 'ratechange', updatePosition);
+        listen(video, video, ['timeupdate', 'ratechange'], updatePosition);
         if (video.textTracks) {
-            ['addtrack', 'removetrack', 'change'].forEach(function (type) {
-                listen(video, video.textTracks, type, function () { syncMediaSessionCaptions(video); });
-            });
+            listen(video, video.textTracks, ['addtrack', 'removetrack', 'change'], function () { syncMediaSessionCaptions(video); });
         }
         onCleanup(video, function () {
             if (mediaSessionOwner === video) { mediaSessionOwner = null; clearMediaSession(video); }
@@ -1360,31 +1309,24 @@
         video.controls = true;
         video.playsInline = true;
         video.setAttribute('playsinline', '');
-        video.removeAttribute('disablepictureinpicture');
         video.disablePictureInPicture = false;
         video.removeAttribute('disabled');
-        // Prevent the site player from stripping PiP or forcing inline mode
-        // while the user is in Picture-in-Picture.
+        // Prevent the site player from stripping PiP or forcing inline mode while in PiP.
         attempt(function () {
             if ('disablePictureInPicture' in video) {
-                Object.defineProperty(video, 'disablePictureInPicture', {
-                    configurable: true, get: function () { return false; }, set: function () {}
-                });
+                Object.defineProperty(video, 'disablePictureInPicture', { configurable: true, get: function () { return false; }, set: function () {} });
             }
-            var customPresentation = null;
-            var hasCustomPresentation = Object.prototype.hasOwnProperty.call(video, 'webkitSetPresentationMode');
-            if (hasCustomPresentation) { customPresentation = video.webkitSetPresentationMode; }
+            var customMode = Object.prototype.hasOwnProperty.call(video, 'webkitSetPresentationMode') ? video.webkitSetPresentationMode : undefined;
             Object.defineProperty(video, 'webkitSetPresentationMode', {
                 configurable: true,
                 get: function () {
-                    var target = hasCustomPresentation ? customPresentation : Object.getPrototypeOf(this).webkitSetPresentationMode;
-                    if (typeof target !== 'function') { return target; }
-                    return function (mode) {
+                    var target = customMode !== undefined ? customMode : Object.getPrototypeOf(this).webkitSetPresentationMode;
+                    return typeof target !== 'function' ? target : function (mode) {
                         if (!ownPresentationWrite && this.webkitPresentationMode === 'picture-in-picture' && mode === 'inline') { return; }
                         return target.apply(this, arguments);
                     };
                 },
-                set: function (fn) { hasCustomPresentation = true; customPresentation = fn; }
+                set: function (fn) { customMode = fn; }
             });
             ['webkitExitFullscreen', 'webkitExitFullScreen'].forEach(function (name) {
                 if (typeof video[name] === 'function' || typeof Object.getPrototypeOf(video)[name] === 'function') {
@@ -1396,24 +1338,16 @@
                 }
             });
             onCleanup(video, function () {
-                attempt(function () { delete video.disablePictureInPicture; });
-                attempt(function () { delete video.webkitSetPresentationMode; });
-                attempt(function () { delete video.webkitExitFullscreen; });
-                attempt(function () { delete video.webkitExitFullScreen; });
+                ['disablePictureInPicture', 'webkitSetPresentationMode', 'webkitExitFullscreen', 'webkitExitFullScreen'].forEach(function (k) {
+                    attempt(function () { delete video[k]; });
+                });
             });
         });
-        // Custom players keep stripping these attributes; restore them at the
-        // pre-paint microtask checkpoint. Shadowing the controls property
-        // itself would break WebKit's native controls.
         var observer = new MutationObserver(function () { restoreNativeControls(video); });
         observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disablepictureinpicture', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
         onCleanup(video, function () { observer.disconnect(); });
-        // Keep the click guard for the video's lifetime: it goes inactive
-        // on release and must still precede page listeners on reattachment.
         guardNativeControlClicks(video);
-        ['contextmenu', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
-            listen(video, video, type, function (event) { event.stopPropagation(); });
-        });
+        listen(video, video, ['contextmenu', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'], function (e) { e.stopPropagation(); });
     }
 
     // ------------------------------------------------------------------
@@ -1775,13 +1709,11 @@
                 }
             }
         });
-        ['play', 'pause', 'ended'].forEach(function (type) { listen(video, video, type, passSoon); });
-        ['seeking', 'loadeddata', 'mouseenter', 'mousemove'].forEach(function (type) { listen(video, video, type, pass); });
+        listen(video, video, ['play', 'pause', 'ended'], passSoon);
+        listen(video, video, ['seeking', 'loadeddata', 'mouseenter', 'mousemove'], pass);
         listen(video, video, 'webkitbeginfullscreen', function () { video._wblockInNativeFullscreen = true; });
-        listen(video, video, 'webkitendfullscreen', exitFullscreen);
-        listen(video, video, 'webkitpresentationmodechanged', exitFullscreen);
-        listen(video, document, 'fullscreenchange', exitFullscreen);
-        listen(video, document, 'webkitfullscreenchange', exitFullscreen);
+        listen(video, video, ['webkitendfullscreen', 'webkitpresentationmodechanged'], exitFullscreen);
+        listen(video, document, ['fullscreenchange', 'webkitfullscreenchange'], exitFullscreen);
         listen(video, window, 'resize', passSoon);
         onCleanup(video, function () { state.boxObserver.disconnect(); timers.forEach(clearTimeout); });
         if (typeof IntersectionObserver !== 'undefined') {
