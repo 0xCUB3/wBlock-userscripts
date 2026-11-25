@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.83
+// @version      0.1.84
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -4289,21 +4289,23 @@
         } catch (e) { return tracks; }
     }
 
-    function downloadNativeSubtitleTracks(tracks, signal) {
-        return Promise.all(withAutoTranslatedTrack(tracks).map(function (track) {
-            var url = captionUrl(track);
-            if (!url) return Promise.resolve(null);
-            return fetch(url, { credentials: 'same-origin', signal: signal }).then(function (response) {
-                if (!response.ok) return '';
-                return response.text();
-            }).then(function (text) {
-                text = String(text || '').replace(/^\uFEFF/, '');
-                if (text.slice(0, 6) !== 'WEBVTT' || text.indexOf('-->') === -1 || text.length > 5000000) return null;
-                return { definition: track, vtt: normalizeCaptionVtt(text) };
-            }).catch(function () { return null; });
-        })).then(function (results) {
-            return results.filter(function (result) { return !!result; });
-        });
+    function fetchNormalizedSubtitleVtt(track, signal) {
+        var url = captionUrl(track);
+        if (!url) return Promise.resolve(null);
+        return fetch(url, { credentials: 'same-origin', signal: signal }).then(function (response) {
+            if (!response.ok) return '';
+            return response.text();
+        }).then(function (text) {
+            text = String(text || '').replace(/^\uFEFF/, '');
+            if (text.slice(0, 6) !== 'WEBVTT' || text.indexOf('-->') === -1 || text.length > 5000000) return null;
+            return normalizeCaptionVtt(text);
+        }).catch(function () { return null; });
+    }
+
+    function captionTrackKey(definition) {
+        var language = definition && definition.languageCode || '';
+        var label = youtubeText(definition && definition.name) || language || 'CC';
+        return (definition && definition.vssId) || language + '|' + label;
     }
 
     // Diagnostic counter for the PiP caption pump below.
@@ -4318,6 +4320,12 @@
         var started = false;
         var elements = [];
         var blobUrls = [];
+        var pendingDefs = typeof WeakMap === 'function' ? new WeakMap() : null;
+        var trackStates = typeof WeakMap === 'function' ? new WeakMap() : null;
+        var usedAlternateClient = false;
+        var alternateFallbackPromise = null;
+        var subtitleVideoId = null;
+
         function disableYouTubeSubtitles() {
             try {
                 if (player && typeof player.setOption === 'function') { player.setOption('captions', 'track', null); }
@@ -4329,8 +4337,9 @@
 
         // Safari's CC menu only lists real subtitle tracks. YouTube's caption
         // overlay sits under the native <video>, so clicking its hidden CC
-        // button cannot show text. Install downloaded WebVTT and let Safari
-        // toggle it. Videos with no usable captions get no tracks at all.
+        // button cannot show text. Install <track> metadata immediately and
+        // lazy-fetch + normalize WebVTT into a Blob only when a track is turned
+        // on, avoiding burst /api/timedtext rate limits across video loads.
         function stopRetry() {
             if (retryTimer !== null) clearInterval(retryTimer);
             retryTimer = null;
@@ -4348,8 +4357,73 @@
             }
         }
 
-        function install(downloads) {
-            if (cancelled || !downloads.length) return;
+        function refreshPendingFromAlternate(signal) {
+            if (alternateFallbackPromise) return alternateFallbackPromise;
+            usedAlternateClient = true;
+            alternateFallbackPromise = alternateCaptionTracks(subtitleVideoId, signal).then(function (altTracks) {
+                if (cancelled || !altTracks.length) return false;
+                var expanded = withAutoTranslatedTrack(altTracks);
+                var byKey = {};
+                var byLang = {};
+                for (var i = 0; i < expanded.length; i++) {
+                    var def = expanded[i];
+                    byKey[captionTrackKey(def)] = def;
+                    var lang = String(def.languageCode || '').toLowerCase();
+                    if (lang && !byLang[lang]) byLang[lang] = def;
+                }
+                for (var j = 0; j < elements.length; j++) {
+                    var el = elements[j];
+                    var key = el.getAttribute('data-wblock-native-subtitle') || '';
+                    var replacement = byKey[key] || byLang[String(el.srclang || '').toLowerCase()];
+                    if (replacement && pendingDefs) pendingDefs.set(el, replacement);
+                }
+                return true;
+            }).catch(function () { return false; });
+            return alternateFallbackPromise;
+        }
+
+        function ensureTrackLoaded(el) {
+            if (cancelled || !el || !pendingDefs || !trackStates) return;
+            if (trackStates.get(el)) return;
+            var def = pendingDefs.get(el);
+            if (!def) return;
+            trackStates.set(el, 'loading');
+            var signal = controller ? controller.signal : undefined;
+            fetchNormalizedSubtitleVtt(def, signal).then(function (vtt) {
+                if (cancelled) return null;
+                if (vtt || usedAlternateClient) return vtt;
+                return refreshPendingFromAlternate(signal).then(function (refreshed) {
+                    if (cancelled || !refreshed) return null;
+                    var updated = pendingDefs.get(el);
+                    return updated ? fetchNormalizedSubtitleVtt(updated, signal) : null;
+                });
+            }).then(function (vtt) {
+                if (cancelled) return;
+                if (!vtt) {
+                    trackStates.delete(el);
+                    return;
+                }
+                var blobUrl = URL.createObjectURL(new Blob([vtt], { type: 'text/vtt' }));
+                blobUrls.push(blobUrl);
+                trackStates.set(el, 'loaded');
+                pendingDefs.delete(el);
+                el.src = blobUrl;
+            }).catch(function () {
+                if (!cancelled && trackStates) trackStates.delete(el);
+            });
+        }
+
+        function hydrateActiveTracks() {
+            for (var i = 0; i < elements.length; i++) {
+                var el = elements[i];
+                if (el.track && el.track.mode !== 'disabled') {
+                    ensureTrackLoaded(el);
+                }
+            }
+        }
+
+        function install(definitions) {
+            if (cancelled || !definitions.length) return;
             var priorForeignShowing = null;
             if (video.textTracks) {
                 for (var p = 0; p < video.textTracks.length; p++) {
@@ -4362,25 +4436,24 @@
             }
             removeForeignTrackElements();
             var seen = {};
-            for (var i = 0; i < downloads.length; i++) {
-                var definition = downloads[i].definition;
+            for (var i = 0; i < definitions.length; i++) {
+                var definition = definitions[i];
+                if (!captionUrl(definition)) continue;
                 var language = definition.languageCode || '';
                 var label = youtubeText(definition.name) || language || 'CC';
-                var key = definition.vssId || language + '|' + label;
+                var key = captionTrackKey(definition);
                 if (seen[key]) continue;
                 seen[key] = true;
                 try {
-                    var blobUrl = URL.createObjectURL(new Blob([downloads[i].vtt], { type: 'text/vtt' }));
                     var element = document.createElement('track');
                     element.kind = 'subtitles';
                     element.label = label;
                     element.srclang = language;
-                    element.src = blobUrl;
                     element.setAttribute('data-wblock-native-subtitle', key);
+                    if (pendingDefs) pendingDefs.set(element, definition);
                     protectOwnedTrackElement(video, element);
                     video.appendChild(element);
                     elements.push(element);
-                    blobUrls.push(blobUrl);
                 } catch (e) { /* skip one malformed track */ }
             }
             // Safari owns the on/off choice and the language, and turns on the
@@ -4390,7 +4463,7 @@
             // activate one of ours on append: leaving all tracks disabled while
             // Safari's setting is On leaves its On item doing nothing (#11).
             if (elements.length) {
-                log('applied', elements.length, 'Safari caption tracks');
+                log('applied', elements.length, 'Safari caption tracks (lazy)');
                 disableYouTubeSubtitles();
                 disableForeignSubtitles(false);
                 var owned = ownedSubtitleTracks(video);
@@ -4402,25 +4475,21 @@
                     }
                 }
                 enforceSingleSubtitleTrack();
+                hydrateActiveTracks();
                 syncMediaSessionCaptions(video);
             }
         }
 
         function loadTracks(tracks) {
             var signal = controller ? controller.signal : undefined;
-            var videoId = nativeSubtitleVideoId(player);
+            subtitleVideoId = nativeSubtitleVideoId(player);
             var useAlternateFirst = captionsNeedAlternateClient(tracks);
-            var candidates = useAlternateFirst ? alternateCaptionTracks(videoId, signal) : Promise.resolve(tracks);
+            usedAlternateClient = useAlternateFirst;
+            var candidates = useAlternateFirst ? alternateCaptionTracks(subtitleVideoId, signal) : Promise.resolve(tracks);
             candidates.then(function (candidateTracks) {
-                if (cancelled) return [];
-                return downloadNativeSubtitleTracks(candidateTracks.length ? candidateTracks : tracks, signal);
-            }).then(function (downloads) {
-                if (cancelled || downloads.length || useAlternateFirst) return downloads;
-                return alternateCaptionTracks(videoId, signal).then(function (alternate) {
-                    return downloadNativeSubtitleTracks(alternate, signal);
-                });
-            }).then(function (downloads) {
-                if (!cancelled && downloads) install(downloads);
+                if (cancelled) return;
+                var list = candidateTracks && candidateTracks.length ? candidateTracks : tracks;
+                install(withAutoTranslatedTrack(list));
             }).catch(function (error) {
                 if (!cancelled && (!error || error.name !== 'AbortError')) log('native subtitles unavailable', error);
             });
@@ -4566,6 +4635,7 @@
             disableForeignSubtitles(true);
             enforceSingleSubtitleTrack();
             if (showingBefore.length) video._wblockLastSubtitleTrack = showingBefore[0];
+            hydrateActiveTracks();
             syncMediaSessionCaptions(video);
         }
         function activeCueSignature(track, time) {

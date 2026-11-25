@@ -121,7 +121,7 @@ try {
     await page.waitForSelector('.wblock-tc-native');
     await page.waitForFunction(() => document.querySelectorAll('track[data-wblock-native-subtitle]').length === 2);
 
-    const result = await page.evaluate(() => {
+    const result = await page.evaluate(async () => {
       const video = document.querySelector('#movie_player video');
       const desc = Object.getOwnPropertyDescriptor(window, 'setupCaptionMirroring');
       const mirrorBlocked = !!(desc && desc.configurable === false && typeof window.setupCaptionMirroring === 'function');
@@ -131,9 +131,10 @@ try {
       forced.mode = 'showing';
       const forcedModeSync = forced.mode;
 
-      // Auto-translated track added for en-US on a Japanese-only video
+      // Auto-translated track added for en-US on a Japanese-only video (lazy: 0 requests until selected)
       const trackEls = Array.from(video.querySelectorAll('track[data-wblock-native-subtitle]'));
       const labels = trackEls.map(el => el.label);
+      const tlangBeforeSelect = window.__tlangRequests.length;
 
       // MediaSession captionTracks synced and locked against YouTube overwrites
       navigator.mediaSession.captionTracks = [{ label: 'Fake YouTube', language: 'xx', enabled: true }];
@@ -142,10 +143,13 @@ try {
       navigator.mediaSession.setActionHandler('togglecaptions', () => { siteHandlerInstalled = true; });
       const msLabelsBefore = window.__msState.captionTracks.map(t => t.label);
       window.__msState.handlers.selectcaptiontrack({ trackIndex: 1 });
+      await new Promise(r => setTimeout(r, 80));
       const afterSelect = {
         enabled: window.__msState.captionsEnabled,
         modes: trackEls.map(el => el.track.mode),
         msEnabled: window.__msState.captionTracks.map(t => t.enabled),
+        selectedBlob: /^blob:/.test(trackEls[1].src || ''),
+        unselectedEmpty: !trackEls[0].getAttribute('src'),
       };
       window.__msState.handlers.togglecaptions();
       const afterToggleOff = {
@@ -164,8 +168,6 @@ try {
       const lockedRate = video.playbackRate;
 
       // Desktop mute sync when native mute toggles (bypassing JS muted setter)
-      const nativeMutedSet = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
-      // Simulate native UI muting (without calling JS setter): redefine muted getter temporarily
       Object.defineProperty(video, 'muted', { configurable: true, get: () => true });
       video.dispatchEvent(new Event('volumechange'));
       delete video.muted;
@@ -200,7 +202,7 @@ try {
       const afterSecond = playCalls;
 
       return {
-        mirrorBlocked, forcedModeSync, labels, tlangRequests: window.__tlangRequests.length,
+        mirrorBlocked, forcedModeSync, labels, tlangBeforeSelect, tlangRequests: window.__tlangRequests.length,
         msLabelsBefore, afterSelect, afterToggleOff,
         audioSelected: window.__audioSelected && window.__audioSelected.id,
         restoredVol, restoredRate, lockedVol, lockedRate,
@@ -215,11 +217,14 @@ try {
     assert.equal(result.forcedModeSync, 'disabled', 'CaptionMirror forced track clamped synchronously');
     assert.equal(result.labels.length, 2, 'adds auto-translated track alongside Japanese');
     assert.ok(result.labels[1].startsWith('Auto-translated ('), `label=${result.labels[1]}`);
-    assert.equal(result.tlangRequests, 1, 'fetches &tlang= caption track');
+    assert.equal(result.tlangBeforeSelect, 0, 'does not fetch &tlang= before selection');
+    assert.equal(result.tlangRequests, 1, 'lazy-fetches &tlang= caption track on selection');
     assert.deepEqual(result.msLabelsBefore, result.labels, 'MediaSession captionTracks locked against YouTube');
     assert.equal(result.afterSelect.enabled, true, 'selectcaptiontrack enables chosen track');
     assert.deepEqual(result.afterSelect.modes, ['disabled', 'showing']);
     assert.deepEqual(result.afterSelect.msEnabled, [false, true]);
+    assert.equal(result.afterSelect.selectedBlob, true, 'selected track receives Blob src');
+    assert.equal(result.afterSelect.unselectedEmpty, true, 'unselected track stays unloaded');
     assert.equal(result.afterToggleOff.enabled, false, 'togglecaptions disables active track');
     assert.deepEqual(result.afterToggleOff.modes, ['disabled', 'disabled']);
     assert.equal(result.afterToggleOff.siteHandlerInstalled, false, 'YouTube cannot overwrite togglecaptions');
