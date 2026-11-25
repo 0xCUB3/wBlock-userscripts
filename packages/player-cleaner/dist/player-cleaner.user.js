@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Player Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.61
+// @version      0.1.62
 // @description  Gives custom web players native controls, auto PiP, background playback, restored subtitle and chapter tracks, Now Playing metadata, and remembered playback preferences.
 // @description:de  Bietet Web-Playern native Steuerelemente, Auto-PiP, Hintergrundwiedergabe, wiederhergestellte Untertitel und Kapitel, Now-Playing-Metadaten und gespeicherte Wiedergabeeinstellungen.
 // @description:es  Añade a los reproductores web controles nativos, PiP automático, reproducción en segundo plano, subtítulos y capítulos restaurados, metadatos Now Playing y preferencias recordadas.
@@ -133,6 +133,11 @@
     function onCleanup(video, fn) { stateOf(video).cleanups.push(fn); }
 
     function listen(video, target, type, fn, options) {
+        if (nativeVideoAddListener && typeof HTMLVideoElement !== 'undefined' && target instanceof HTMLVideoElement) {
+            nativeVideoAddListener.call(target, type, fn, options);
+            onCleanup(video, function () { nativeVideoRemoveListener.call(target, type, fn, options); });
+            return;
+        }
         target.addEventListener(type, fn, options);
         onCleanup(video, function () { target.removeEventListener(type, fn, options); });
     }
@@ -192,27 +197,97 @@
     // ------------------------------------------------------------------
 
     // Captured before the document properties are shadowed below.
-    var nativeHidden = (function () {
+    function findDocGetter(name) {
         for (var proto = document; proto; proto = Object.getPrototypeOf(proto)) {
-            var descriptor = Object.getOwnPropertyDescriptor(proto, 'hidden');
+            var descriptor = Object.getOwnPropertyDescriptor(proto, name);
             if (descriptor && descriptor.get) { return descriptor.get; }
         }
         return null;
-    })();
+    }
+    var nativeHidden = findDocGetter('hidden');
+    var nativeVisibilityState = findDocGetter('visibilityState');
     var reallyHidden = false;
+    var everVisible = false;
+    var bgPlaybackInstalled = false;
+    var bgPlaybackPending = false;
+    var visibilityObservers = [];
 
-    function updateVisibility() {
-        reallyHidden = nativeHidden ? !!nativeHidden.call(document) : document.hidden;
+    // Spurious Media Session play suppression (macOS): shared with Tube
+    // Cleaner, proven and held to tests/rules/spurious-play.rule.mjs.
+    // @gdp-begin spuriousPlayStep
+    function spuriousPlayStep(config, state, event) {
+        var op = event.op, t = event.t;
+        var visible = op === 'show' ? true : op === 'hide' ? false : state.visible;
+        var visibleAt = op === 'show' ? t : state.visibleAt;
+        var inGrace = !state.visible || t <= state.visibleAt + config.grace;
+        var drop = op === 'playCmd' && state.armed && event.paused && inGrace;
+        var armed = op === 'pauseCmd' ? event.paused :
+            op === 'playCmd' || op === 'playing' ? false :
+            state.armed;
+        return { armed: armed, visible: visible, visibleAt: visibleAt, drop: drop };
+    }
+    // @gdp-end
+
+    var SPURIOUS_PLAY = { grace: 5000 };
+    var spuriousPlayState = { armed: false, visible: true, visibleAt: 0, drop: false };
+    function stepSpuriousPlay(op, paused) {
+        spuriousPlayState = spuriousPlayStep(SPURIOUS_PLAY, spuriousPlayState, {
+            op: op, paused: !!paused, t: Math.round(performance.now())
+        });
+        return spuriousPlayState;
+    }
+
+    function observeVisibility(video, fn) {
+        visibilityObservers.push(fn);
+        onCleanup(video, function () {
+            var index = visibilityObservers.indexOf(fn);
+            if (index !== -1) { visibilityObservers.splice(index, 1); }
+        });
+    }
+
+    function installBackgroundPlaybackShadow() {
+        if (bgPlaybackInstalled) { return; }
+        bgPlaybackInstalled = true;
+        bgPlaybackPending = false;
+        attempt(function () { Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return false; } }); });
+        attempt(function () { Object.defineProperty(document, 'visibilityState', { configurable: true, get: function () { return 'visible'; } }); });
+        attempt(function () { Object.defineProperty(document, 'webkitHidden', { configurable: true, get: function () { return false; } }); });
+        attempt(function () { Object.defineProperty(document, 'webkitVisibilityState', { configurable: true, get: function () { return 'visible'; } }); });
+    }
+
+    function updateVisibility(event) {
+        reallyHidden = nativeHidden ? !!nativeHidden.call(document) :
+            (nativeVisibilityState ? nativeVisibilityState.call(document) === 'hidden' : document.hidden);
+        if (!reallyHidden) {
+            everVisible = true;
+            if (bgPlaybackPending && !bgPlaybackInstalled && backgroundPlaybackOn()) {
+                installBackgroundPlaybackShadow();
+            }
+        }
+        if (!IS_IOS) {
+            stepSpuriousPlay(reallyHidden ? 'hide' : 'show', mediaSessionOwner ? mediaSessionOwner.paused : false);
+        }
+        visibilityObservers.slice().forEach(function (fn) { attempt(fn); });
+        if (reallyHidden && everVisible && bgPlaybackInstalled && backgroundPlaybackOn() &&
+            event && typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+        }
     }
     updateVisibility();
-    document.addEventListener('visibilitychange', updateVisibility);
+    document.addEventListener('visibilitychange', updateVisibility, true);
+    document.addEventListener('webkitvisibilitychange', function (event) {
+        if (reallyHidden && everVisible && bgPlaybackInstalled && backgroundPlaybackOn() &&
+            event && typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+        }
+    }, true);
 
     function backgroundPlaybackOn() { return features.backgroundPlayback && loadPreferences().backgroundPlayback !== false; }
 
     function enableBackgroundPlayback() {
         if (!backgroundPlaybackOn()) { return; }
-        attempt(function () { Object.defineProperty(document, 'hidden', { configurable: true, get: function () { return false; } }); });
-        attempt(function () { Object.defineProperty(document, 'visibilityState', { configurable: true, get: function () { return 'visible'; } }); });
+        if (everVisible) { installBackgroundPlaybackShadow(); }
+        else { bgPlaybackPending = true; }
     }
 
     // ------------------------------------------------------------------
@@ -240,14 +315,19 @@
         });
     }
 
+    var ownPresentationWrite = false;
+
     function leavePiP(video) {
-        attempt(function () {
-            if (video.webkitSupportsPresentationMode && video.webkitSetPresentationMode) {
-                video.webkitSetPresentationMode('inline');
-            } else if (document.exitPictureInPicture) {
-                document.exitPictureInPicture().catch(function () {});
-            }
-        });
+        ownPresentationWrite = true;
+        try {
+            attempt(function () {
+                if (video.webkitSupportsPresentationMode && video.webkitSetPresentationMode) {
+                    video.webkitSetPresentationMode('inline');
+                } else if (document.exitPictureInPicture) {
+                    document.exitPictureInPicture().catch(function () {});
+                }
+            });
+        } finally { ownPresentationWrite = false; }
     }
 
     // When to enter or leave PiP: the reducer Tube Cleaner ships too, proven
@@ -287,7 +367,7 @@
             if (state.enter && !requestPiP(video, function () { send('left'); })) { send('left'); }
             if (state.exit) { leavePiP(video); }
         }
-        listen(video, document, 'visibilitychange', function () { send(reallyHidden ? 'hide' : 'show'); });
+        observeVisibility(video, function () { send(reallyHidden ? 'hide' : 'show'); });
         listen(video, window, 'focus', function () { send('focus'); });
         listen(video, video, 'webkitpresentationmodechanged', function () {
             if (video.webkitPresentationMode !== 'picture-in-picture') { send('left'); }
@@ -377,6 +457,8 @@
     // the video blocks their clicks too. Register a bubbling guard before
     // the site's first click listener, so native buttons answer first.
     var nativeVideoAddListener = HTMLVideoElement.prototype.addEventListener;
+    var nativeVideoRemoveListener = HTMLVideoElement.prototype.removeEventListener;
+    var gatedVideoListeners = new WeakMap();
     var controlClickGuards = new WeakSet();
     function guardNativeControlClicks(video) {
         if (controlClickGuards.has(video)) { return; }
@@ -388,11 +470,64 @@
         });
     }
     attempt(function () {
-        HTMLVideoElement.prototype.addEventListener = function (type) {
+        HTMLVideoElement.prototype.addEventListener = function (type, listener, options) {
             if (type === 'click' || type === 'dblclick') { guardNativeControlClicks(this); }
+            if ((type === 'webkitbeginfullscreen' || type === 'webkitendfullscreen' || type === 'webkitpresentationmodechanged') &&
+                (typeof listener === 'function' || (listener && typeof listener.handleEvent === 'function'))) {
+                var byType = gatedVideoListeners.get(listener);
+                if (!byType) { byType = {}; gatedVideoListeners.set(listener, byType); }
+                var gated = byType[type];
+                if (!gated) {
+                    gated = function (event) {
+                        if (this._wblockEnhanced) {
+                            if (type !== 'webkitpresentationmodechanged' || this.webkitPresentationMode === 'picture-in-picture') { return; }
+                        }
+                        return typeof listener === 'function' ? listener.apply(this, arguments) : listener.handleEvent(event);
+                    };
+                    byType[type] = gated;
+                }
+                return nativeVideoAddListener.call(this, type, gated, options);
+            }
             return nativeVideoAddListener.apply(this, arguments);
         };
+        HTMLVideoElement.prototype.removeEventListener = function (type, listener, options) {
+            var byType = listener && (typeof listener === 'function' || typeof listener === 'object') ? gatedVideoListeners.get(listener) : null;
+            var gated = byType && byType[type];
+            if (gated) { return nativeVideoRemoveListener.call(this, type, gated, options); }
+            return nativeVideoRemoveListener.apply(this, arguments);
+        };
     });
+
+    // Lock playbackRate, defaultPlaybackRate, and (on desktop) volume against
+    // site players resetting them after nativeization. Safari's native controls
+    // bypass JS setters and still fire ratechange/volumechange.
+    var ownMediaPropWrite = false;
+    var nativeMediaPropDescs = {};
+    attempt(function () {
+        (IS_IOS ? ['playbackRate', 'defaultPlaybackRate'] : ['volume', 'playbackRate', 'defaultPlaybackRate']).forEach(function (prop) {
+            var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, prop);
+            if (!desc || !desc.get || !desc.set) { return; }
+            nativeMediaPropDescs[prop] = desc;
+            Object.defineProperty(HTMLMediaElement.prototype, prop, {
+                configurable: true, enumerable: desc.enumerable,
+                get: function () { return desc.get.call(this); },
+                set: function (value) {
+                    if (!ownMediaPropWrite && this._wblockEnhanced) { return; }
+                    desc.set.call(this, value);
+                }
+            });
+        });
+    });
+
+    function writeMediaProp(video, prop, value) {
+        if (!video || typeof value !== 'number' || !isFinite(value)) { return; }
+        ownMediaPropWrite = true;
+        try {
+            var desc = nativeMediaPropDescs[prop];
+            if (desc && desc.set) { desc.set.call(video, value); }
+            else { video[prop] = value; }
+        } finally { ownMediaPropWrite = false; }
+    }
 
     // The site's play() and pause() calls and every Media Session pause or
     // stop handler (the site's and Player Cleaner's own) are reported before
@@ -420,21 +555,64 @@
             return nativePlay.apply(this, arguments);
         };
     });
-    if (IS_IOS) {
-        attempt(function () {
-            var setActionHandler = MediaSession.prototype.setActionHandler;
-            if (setActionHandler._wblockPlayerCleaner) { return; }
-            var patched = function (action, handler) {
-                var inner = handler;
-                if ((action === 'pause' || action === 'stop') && typeof inner === 'function') {
-                    handler = function () { notify(pauseIntentListeners, action); return inner.apply(this, arguments); };
-                }
-                return setActionHandler.call(this, action, handler);
-            };
-            patched._wblockPlayerCleaner = true;
-            MediaSession.prototype.setActionHandler = patched;
+    var ownMediaSessionCaptionWrite = false;
+    var nativeMediaSessionSetActionHandler = null;
+    var mediaSessionCaptionsGuarded = false;
+
+    function findPropDesc(obj, prop) {
+        for (var cur = obj; cur; cur = Object.getPrototypeOf(cur)) {
+            var desc = Object.getOwnPropertyDescriptor(cur, prop);
+            if (desc) { return desc; }
+        }
+        return null;
+    }
+
+    function guardMediaSessionCaptions() {
+        if (mediaSessionCaptionsGuarded) { return; }
+        var session = navigator.mediaSession;
+        if (!session || !('captionTracks' in session)) { return; }
+        mediaSessionCaptionsGuarded = true;
+        ['captionTracks', 'captionsEnabled'].forEach(function (prop) {
+            attempt(function () {
+                var desc = findPropDesc(session, prop);
+                if (!desc || !desc.set) { return; }
+                Object.defineProperty(session, prop, {
+                    configurable: true, enumerable: desc.enumerable,
+                    get: function () { return desc.get ? desc.get.call(this) : undefined; },
+                    set: function (value) {
+                        if (!ownMediaSessionCaptionWrite && mediaSessionOwner && mediaSessionOwner._wblockEnhanced) { return; }
+                        desc.set.call(this, value);
+                    }
+                });
+            });
         });
     }
+
+    attempt(function () {
+        var setActionHandler = typeof MediaSession !== 'undefined' && MediaSession.prototype.setActionHandler;
+        if (!setActionHandler || setActionHandler._wblockPlayerCleaner) { return; }
+        nativeMediaSessionSetActionHandler = setActionHandler;
+        var patched = function (action, handler) {
+            if (!ownMediaSessionCaptionWrite && mediaSessionOwner && mediaSessionOwner._wblockEnhanced &&
+                (action === 'togglecaptions' || action === 'selectcaptiontrack')) {
+                return;
+            }
+            var inner = handler;
+            if ((action === 'pause' || action === 'stop' || (!IS_IOS && action === 'play')) && typeof inner === 'function') {
+                handler = function () {
+                    if (IS_IOS && (action === 'pause' || action === 'stop')) { notify(pauseIntentListeners, action); }
+                    if (!IS_IOS && mediaSessionOwner && mediaSessionOwner._wblockEnhanced) {
+                        if (action === 'pause') { stepSpuriousPlay('pauseCmd', mediaSessionOwner.paused); }
+                        else if (action === 'play' && stepSpuriousPlay('playCmd', mediaSessionOwner.paused).drop) { return; }
+                    }
+                    return inner.apply(this, arguments);
+                };
+            }
+            return setActionHandler.call(this, action, handler);
+        };
+        patched._wblockPlayerCleaner = true;
+        MediaSession.prototype.setActionHandler = patched;
+    });
 
     // Controlled players keep their own play state and answer a pause they
     // did not make with play(): NYT's Betamax restarts within milliseconds, so
@@ -508,7 +686,7 @@
         ['pointerup', 'touchend', 'click', 'keydown'].forEach(function (name) {
             listen(video, window, name, function () { send('input'); }, true);
         });
-        listen(video, document, 'visibilitychange', function () { send(reallyHidden ? 'hide' : 'show'); });
+        observeVisibility(video, function () { send(reallyHidden ? 'hide' : 'show'); });
         listen(video, video, 'pause', function () { send('pause'); });
         listen(video, video, 'playing', function () { send('play'); });
         subscribe(pagePauseListeners, function (element) { if (element === video) { send('pageCall'); } });
@@ -586,8 +764,14 @@
         if (!once(video, 'preferences')) { return; }
         var preferences = loadPreferences();
         var applying = true;
-        if (preferences.playbackRate > 0) { video.playbackRate = Math.max(0.25, Math.min(4, preferences.playbackRate)); }
-        if (typeof preferences.volume === 'number') { video.volume = Math.max(0, Math.min(1, preferences.volume)); }
+        if (preferences.playbackRate > 0) {
+            var clampedRate = Math.max(0.25, Math.min(4, preferences.playbackRate));
+            writeMediaProp(video, 'defaultPlaybackRate', clampedRate);
+            writeMediaProp(video, 'playbackRate', clampedRate);
+        }
+        if (!IS_IOS && typeof preferences.volume === 'number') {
+            writeMediaProp(video, 'volume', Math.max(0, Math.min(1, preferences.volume)));
+        }
         // Safari pauses a muted autoplay that is unmuted without a tap, so a
         // saved unmute waits for the user's own play.
         if (preferences.muted === true || preferences.muted === false && video.paused && !video.autoplay) { video.muted = preferences.muted; }
@@ -785,7 +969,8 @@
 
     function setRate(video, rate) {
         rate = Math.max(0.25, Math.min(4, Math.round(rate * 100) / 100));
-        video.playbackRate = rate;
+        writeMediaProp(video, 'defaultPlaybackRate', rate);
+        writeMediaProp(video, 'playbackRate', rate);
         savePreference('playbackRate', rate);
         showToast(video, rate.toFixed(2) + 'x');
     }
@@ -856,11 +1041,55 @@
         return data;
     }
 
+    function syncMediaSessionCaptions(video) {
+        if (!video || mediaSessionOwner !== video || !video._wblockEnhanced) { return; }
+        var session = navigator.mediaSession;
+        if (!session || !('captionTracks' in session)) { return; }
+        guardMediaSessionCaptions();
+        var tracks = subtitleTracks(video);
+        var setHandler = nativeMediaSessionSetActionHandler || (typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
+        ownMediaSessionCaptionWrite = true;
+        try {
+            if (setHandler) {
+                var selectIndex = function (idx) {
+                    var list = subtitleTracks(video);
+                    list.forEach(function (track, i) { attempt(function () { track.mode = i === idx ? 'showing' : 'disabled'; }); });
+                    savePreference('subtitleLanguage', idx >= 0 && idx < list.length ? (list[idx].language || '') : '');
+                    syncMediaSessionCaptions(video);
+                };
+                setHandler.call(session, 'togglecaptions', function () {
+                    var list = subtitleTracks(video);
+                    if (!list.length) { return; }
+                    if (list.some(function (t) { return t.mode === 'showing'; })) { selectIndex(-1); }
+                    else { selectIndex(0); }
+                });
+                setHandler.call(session, 'selectcaptiontrack', function (details) {
+                    selectIndex(details && typeof details.trackIndex === 'number' ? details.trackIndex : -1);
+                });
+            }
+            session.captionTracks = tracks.map(function (t) {
+                return { label: t.label, language: t.language, enabled: t.mode === 'showing' };
+            });
+            session.captionsEnabled = tracks.some(function (t) { return t.mode === 'showing'; });
+        } catch (e) { /* ignore */ }
+        finally { ownMediaSessionCaptionWrite = false; }
+    }
+
     function clearMediaSession(video) {
         var state = stateOf(video);
         (state.mediaActions || []).forEach(function (action) {
             attempt(function () { navigator.mediaSession.setActionHandler(action, null); });
         });
+        var session = navigator.mediaSession;
+        var setHandler = nativeMediaSessionSetActionHandler || (session && typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
+        if (session && 'captionTracks' in session && setHandler) {
+            ownMediaSessionCaptionWrite = true;
+            try {
+                setHandler.call(session, 'togglecaptions', null);
+                setHandler.call(session, 'selectcaptiontrack', null);
+            } catch (e) { /* ignore */ }
+            finally { ownMediaSessionCaptionWrite = false; }
+        }
         if (state.mediaMetadata && navigator.mediaSession.metadata === state.mediaMetadata) {
             navigator.mediaSession.metadata = null;
         }
@@ -896,6 +1125,7 @@
             for (var action in actions) {
                 attempt(function () { navigator.mediaSession.setActionHandler(action, actions[action]); });
             }
+            syncMediaSessionCaptions(video);
         }
         function updatePosition() {
             if (mediaSessionOwner !== video || !navigator.mediaSession.setPositionState) { return; }
@@ -906,8 +1136,14 @@
             });
         }
         listen(video, video, 'play', activate);
+        listen(video, video, 'playing', function () { if (!IS_IOS) { stepSpuriousPlay('playing', false); } });
         listen(video, video, 'timeupdate', updatePosition);
         listen(video, video, 'ratechange', updatePosition);
+        if (video.textTracks) {
+            ['addtrack', 'removetrack', 'change'].forEach(function (type) {
+                listen(video, video.textTracks, type, function () { syncMediaSessionCaptions(video); });
+            });
+        }
         onCleanup(video, function () {
             if (mediaSessionOwner === video) { mediaSessionOwner = null; clearMediaSession(video); }
         });
@@ -1108,6 +1344,7 @@
     function restoreNativeControls(video) {
         applyRemotePlaybackPolicy(video);
         if (!video.hasAttribute('controls')) { video.setAttribute('controls', ''); }
+        if (video.hasAttribute('disablepictureinpicture')) { video.removeAttribute('disablepictureinpicture'); }
         // THEOplayer pins pointer-events:none on the video so its overlay
         // owns every hit, which leaves native controls painted but dead.
         if (attempt(function () { return getComputedStyle(video).pointerEvents; }) === 'none') {
@@ -1126,16 +1363,55 @@
         video.removeAttribute('disablepictureinpicture');
         video.disablePictureInPicture = false;
         video.removeAttribute('disabled');
+        // Prevent the site player from stripping PiP or forcing inline mode
+        // while the user is in Picture-in-Picture.
+        attempt(function () {
+            if ('disablePictureInPicture' in video) {
+                Object.defineProperty(video, 'disablePictureInPicture', {
+                    configurable: true, get: function () { return false; }, set: function () {}
+                });
+            }
+            var customPresentation = null;
+            var hasCustomPresentation = Object.prototype.hasOwnProperty.call(video, 'webkitSetPresentationMode');
+            if (hasCustomPresentation) { customPresentation = video.webkitSetPresentationMode; }
+            Object.defineProperty(video, 'webkitSetPresentationMode', {
+                configurable: true,
+                get: function () {
+                    var target = hasCustomPresentation ? customPresentation : Object.getPrototypeOf(this).webkitSetPresentationMode;
+                    if (typeof target !== 'function') { return target; }
+                    return function (mode) {
+                        if (!ownPresentationWrite && this.webkitPresentationMode === 'picture-in-picture' && mode === 'inline') { return; }
+                        return target.apply(this, arguments);
+                    };
+                },
+                set: function (fn) { hasCustomPresentation = true; customPresentation = fn; }
+            });
+            ['webkitExitFullscreen', 'webkitExitFullScreen'].forEach(function (name) {
+                if (typeof video[name] === 'function' || typeof Object.getPrototypeOf(video)[name] === 'function') {
+                    video[name] = function () {
+                        if (!ownPresentationWrite && this.webkitPresentationMode === 'picture-in-picture') { return; }
+                        var fn = Object.getPrototypeOf(this)[name];
+                        if (typeof fn === 'function') { return fn.apply(this, arguments); }
+                    };
+                }
+            });
+            onCleanup(video, function () {
+                attempt(function () { delete video.disablePictureInPicture; });
+                attempt(function () { delete video.webkitSetPresentationMode; });
+                attempt(function () { delete video.webkitExitFullscreen; });
+                attempt(function () { delete video.webkitExitFullScreen; });
+            });
+        });
         // Custom players keep stripping these attributes; restore them at the
         // pre-paint microtask checkpoint. Shadowing the controls property
         // itself would break WebKit's native controls.
         var observer = new MutationObserver(function () { restoreNativeControls(video); });
-        observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
+        observer.observe(video, { attributes: true, attributeFilter: ['controls', 'disablepictureinpicture', 'disableremoteplayback', 'x-webkit-airplay', 'style'] });
         onCleanup(video, function () { observer.disconnect(); });
         // Keep the click guard for the video's lifetime: it goes inactive
         // on release and must still precede page listeners on reattachment.
         guardNativeControlClicks(video);
-        ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
+        ['contextmenu', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'touchstart', 'touchend'].forEach(function (type) {
             listen(video, video, type, function (event) { event.stopPropagation(); });
         });
     }

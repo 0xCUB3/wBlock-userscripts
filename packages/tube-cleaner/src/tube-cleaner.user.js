@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.82
+// @version      0.1.83
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -72,6 +72,7 @@
     var STORAGE_QUALITY = 'wblock.tubeCleaner.quality';
     var STORAGE_TOOLBAR_HIDDEN = 'wblock.tubeCleaner.hideToolbar';
     var STORAGE_POSITION = 'wblock.tubeCleaner.position.';
+    var STORAGE_PLAYBACK = 'wblock.tubeCleaner.playback';
     var ATTR_CLEANED = 'data-wblock-tc-cleaned';
 
     var debug = !!window.__wblockTubeCleanerDebug;
@@ -185,7 +186,10 @@
         return false;
     }
 
+    var ownPresentationWrite = false;
+
     function leavePiP(video) {
+        ownPresentationWrite = true;
         try {
             if (supportsWebkitPiP(video) && typeof video.webkitSetPresentationMode === 'function') {
                 video.webkitSetPresentationMode('inline');
@@ -195,6 +199,7 @@
                 if (request && request.catch) request.catch(function (e) { log('PiP exit rejected', e); });
             }
         } catch (e) { warn('exitPiP failed', e); }
+        finally { ownPresentationWrite = false; }
     }
 
     // Returns the cleanup. YouTube Music passes watchScroll false: its player
@@ -247,7 +252,7 @@
             log('presentation mode changed:', video.webkitPresentationMode);
         }
         function onLeavePictureInPicture() { send('left'); }
-        video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
+        addOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
         video.addEventListener('leavepictureinpicture', onLeavePictureInPicture);
 
         // Release all of the above when this video is superseded, so listeners
@@ -258,7 +263,7 @@
             window.removeEventListener('focus', onFocus);
             window.removeEventListener('blur', onBlur);
             try { if (scrollObserver) scrollObserver.disconnect(); } catch (e) { /* ignore */ }
-            video.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
+            removeOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
             video.removeEventListener('leavepictureinpicture', onLeavePictureInPicture);
         };
     }
@@ -742,11 +747,22 @@
     }
 
     var nativeHiddenGetter = findDocumentGetter('hidden');
+    var nativeVisibilityStateGetter = findDocumentGetter('visibilityState');
+    var backgroundPlaybackInstalled = false;
+    var backgroundPlaybackPending = false;
+    var everVisible = false;
 
     function updateRealVisibility() {
         try {
-            _realHidden = nativeHiddenGetter ? nativeHiddenGetter.call(document) : document.hidden;
+            _realHidden = nativeHiddenGetter ? !!nativeHiddenGetter.call(document) :
+                (nativeVisibilityStateGetter ? nativeVisibilityStateGetter.call(document) === 'hidden' : document.hidden);
         } catch (e) { /* ignore */ }
+        if (!_realHidden) {
+            everVisible = true;
+            if (backgroundPlaybackPending && !backgroundPlaybackInstalled) {
+                installBackgroundPlaybackShadow();
+            }
+        }
     }
 
     function observeRealVisibility(callback) {
@@ -763,7 +779,16 @@
         for (var i = 0; i < observers.length; i++) {
             try { observers[i](); } catch (e) { /* ignore */ }
         }
-        if (_realHidden && event && typeof event.stopImmediatePropagation === 'function') {
+        if (_realHidden && everVisible && featureEnabled('backgroundPlayback') &&
+            event && typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+        }
+    }
+
+    function onWebkitVisibilityChange(event) {
+        updateRealVisibility();
+        if (_realHidden && everVisible && featureEnabled('backgroundPlayback') &&
+            event && typeof event.stopImmediatePropagation === 'function') {
             event.stopImmediatePropagation();
         }
     }
@@ -772,6 +797,7 @@
     // document instance properties are shadowed for background playback.
     updateRealVisibility();
     document.addEventListener('visibilitychange', onRealVisibilityChange, true);
+    document.addEventListener('webkitvisibilitychange', onWebkitVisibilityChange, true);
 
     // ------------------------------------------------------------------
     // Background recovery (macOS)
@@ -834,23 +860,161 @@
     }
     // @gdp-end
 
+    // Spurious Media Session play suppression (macOS): proven and held to
+    // tests/rules/spurious-play.rule.mjs. Safari can send a redundant pause
+    // followed by a spurious play on an already-paused tab during tab switches;
+    // drop one such play while still paused, within the visible grace window.
+    // @gdp-begin spuriousPlayStep
+    function spuriousPlayStep(config, state, event) {
+        var op = event.op, t = event.t;
+        var visible = op === 'show' ? true : op === 'hide' ? false : state.visible;
+        var visibleAt = op === 'show' ? t : state.visibleAt;
+        var inGrace = !state.visible || t <= state.visibleAt + config.grace;
+        var drop = op === 'playCmd' && state.armed && event.paused && inGrace;
+        var armed = op === 'pauseCmd' ? event.paused :
+            op === 'playCmd' || op === 'playing' ? false :
+            state.armed;
+        return { armed: armed, visible: visible, visibleAt: visibleAt, drop: drop };
+    }
+    // @gdp-end
+
+    var SPURIOUS_PLAY = { grace: 5000 };
+    var spuriousPlayState = { armed: false, visible: !_realHidden, visibleAt: 0, drop: false };
+
+    function stepSpuriousPlay(op, paused) {
+        var now = Math.round(typeof performance !== 'undefined' ? performance.now() : Date.now());
+        spuriousPlayState = spuriousPlayStep(SPURIOUS_PLAY, spuriousPlayState, { op: op, paused: !!paused, t: now });
+        return spuriousPlayState;
+    }
+
+    if (!IS_IOS) {
+        observeRealVisibility(function () {
+            stepSpuriousPlay(_realHidden ? 'hide' : 'show', activeVideo ? activeVideo.paused : false);
+        });
+    }
+
     var BACKGROUND_RECOVERY = { enabled: true, budget: 3, window: 6000, lead: 400 };
     var pauseIntentListeners = [];
+    var ownMediaSessionCaptionWrite = false;
+    var nativeSetActionHandler = null;
+    var mediaSessionCaptionHandlersBound = false;
+    var mediaSessionCaptionsGuarded = false;
+
+    function findPropertyDescriptor(obj, prop) {
+        for (var cur = obj; cur; cur = Object.getPrototypeOf(cur)) {
+            var desc = Object.getOwnPropertyDescriptor(cur, prop);
+            if (desc) return desc;
+        }
+        return null;
+    }
+
+    function guardMediaSessionCaptions() {
+        if (mediaSessionCaptionsGuarded) return;
+        var session = navigator.mediaSession;
+        if (!session || !('captionTracks' in session)) return;
+        mediaSessionCaptionsGuarded = true;
+        ['captionTracks', 'captionsEnabled'].forEach(function (prop) {
+            try {
+                var desc = findPropertyDescriptor(session, prop);
+                if (!desc || !desc.set) return;
+                Object.defineProperty(session, prop, {
+                    configurable: true,
+                    enumerable: desc.enumerable,
+                    get: function () { return desc.get ? desc.get.call(this) : undefined; },
+                    set: function (value) {
+                        if (!ownMediaSessionCaptionWrite && activeVideo && featureEnabled('captions')) return;
+                        desc.set.call(this, value);
+                    }
+                });
+            } catch (e) { /* ignore */ }
+        });
+    }
+
+    function syncMediaSessionCaptions(video) {
+        if (!video || video !== activeVideo || !featureEnabled('captions')) return;
+        var session = navigator.mediaSession;
+        if (!session || !('captionTracks' in session)) return;
+        guardMediaSessionCaptions();
+        var setHandler = nativeSetActionHandler || (typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
+        if (!mediaSessionCaptionHandlersBound && setHandler) {
+            ownMediaSessionCaptionWrite = true;
+            try {
+                setHandler.call(session, 'togglecaptions', function () {
+                    if (!activeVideo) return;
+                    toggleNativeSubtitles(activeVideo);
+                    syncMediaSessionCaptions(activeVideo);
+                });
+                setHandler.call(session, 'selectcaptiontrack', function (details) {
+                    if (!activeVideo) return;
+                    var owned = ownedSubtitleTracks(activeVideo);
+                    var pool = owned.length ? owned : nativeSubtitleTracks(activeVideo);
+                    var idx = details && typeof details.trackIndex === 'number' ? details.trackIndex : -1;
+                    for (var i = 0; i < pool.length; i++) {
+                        try { pool[i].mode = i === idx ? 'showing' : 'disabled'; } catch (e) { /* ignore */ }
+                    }
+                    if (idx >= 0 && idx < pool.length) activeVideo._wblockLastSubtitleTrack = pool[idx];
+                    syncMediaSessionCaptions(activeVideo);
+                });
+                mediaSessionCaptionHandlersBound = true;
+            } catch (e) { /* ignore */ }
+            finally { ownMediaSessionCaptionWrite = false; }
+        }
+        var owned = ownedSubtitleTracks(video);
+        var tracks = owned.length ? owned : nativeSubtitleTracks(video);
+        ownMediaSessionCaptionWrite = true;
+        try {
+            session.captionTracks = tracks.map(function (track) {
+                return { label: track.label, language: track.language, enabled: track.mode === 'showing' };
+            });
+            session.captionsEnabled = tracks.some(function (track) { return track.mode === 'showing'; });
+        } catch (e) { /* ignore */ }
+        finally { ownMediaSessionCaptionWrite = false; }
+    }
+
+    function clearMediaSessionCaptions() {
+        if (!mediaSessionCaptionHandlersBound) return;
+        mediaSessionCaptionHandlersBound = false;
+        var session = navigator.mediaSession;
+        var setHandler = nativeSetActionHandler || (session && typeof session.setActionHandler === 'function' ? session.setActionHandler : null);
+        if (!session || !setHandler) return;
+        ownMediaSessionCaptionWrite = true;
+        try {
+            setHandler.call(session, 'togglecaptions', null);
+            setHandler.call(session, 'selectcaptiontrack', null);
+        } catch (e) { /* ignore */ }
+        finally { ownMediaSessionCaptionWrite = false; }
+    }
 
     // Every Media Session pause or stop the page registers (Tube Cleaner's
     // own, YouTube's, YouTube Music's) first tells recovery about the
     // command, so Now Playing and media keys keep working even right after a
-    // Tab Group switch.
+    // Tab Group switch. On macOS, also drop spurious play commands after a
+    // redundant pause on an already-paused video, and keep YouTube from
+    // overwriting native caption action handlers while Tube Cleaner owns them.
     (function patchMediaSessionIntent() {
         try {
             var proto = typeof MediaSession !== 'undefined' && MediaSession.prototype;
             var original = proto && proto.setActionHandler;
             if (!original || original._wblockTubeCleaner) return;
+            nativeSetActionHandler = original;
             var patched = function (action, handler) {
-                if ((action === 'pause' || action === 'stop') && typeof handler === 'function') {
+                if (!ownMediaSessionCaptionWrite && activeVideo && featureEnabled('captions') &&
+                    (action === 'togglecaptions' || action === 'selectcaptiontrack')) {
+                    return;
+                }
+                if ((action === 'pause' || action === 'stop' || (!IS_IOS && action === 'play')) && typeof handler === 'function') {
                     var inner = handler;
                     handler = function () {
-                        pauseIntentListeners.slice().forEach(function (listener) { try { listener(action); } catch (e) { /* ignore */ } });
+                        if (action === 'pause' || action === 'stop') {
+                            pauseIntentListeners.slice().forEach(function (listener) { try { listener(action); } catch (e) { /* ignore */ } });
+                        }
+                        if (!IS_IOS && !IS_YOUTUBE_MUSIC && activeVideo) {
+                            if (action === 'pause') {
+                                stepSpuriousPlay('pauseCmd', activeVideo.paused);
+                            } else if (action === 'play') {
+                                if (stepSpuriousPlay('playCmd', activeVideo.paused).drop) return;
+                            }
+                        }
                         return inner.apply(this, arguments);
                     };
                 }
@@ -1007,7 +1171,10 @@
         };
     }
 
-    function enableBackgroundPlayback() {
+    function installBackgroundPlaybackShadow() {
+        if (backgroundPlaybackInstalled) return;
+        backgroundPlaybackInstalled = true;
+        backgroundPlaybackPending = false;
         try {
             Object.defineProperty(document, 'hidden', {
                 get: function () { return false; },
@@ -1032,6 +1199,322 @@
                 configurable: true
             });
         } catch (e) { /* ignore */ }
+    }
+
+    function enableBackgroundPlayback() {
+        // Defer spoofing visibility when a tab opens in the background (e.g.
+        // Cmd-click) so YouTube does not start playing before the tab is viewed.
+        if (everVisible) {
+            installBackgroundPlaybackShadow();
+        } else {
+            backgroundPlaybackPending = true;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Early prototype guards (native video events, CaptionMirror, playback)
+    // ------------------------------------------------------------------
+
+    var nativeVideoAddEventListener = typeof HTMLVideoElement !== 'undefined' && HTMLVideoElement.prototype && HTMLVideoElement.prototype.addEventListener;
+    var nativeVideoRemoveEventListener = typeof HTMLVideoElement !== 'undefined' && HTMLVideoElement.prototype && HTMLVideoElement.prototype.removeEventListener;
+    var gatedVideoListeners = typeof WeakMap === 'function' ? new WeakMap() : null;
+
+    function addOwnVideoListener(video, type, listener, options) {
+        if (!video || !listener) return;
+        if (nativeVideoAddEventListener) nativeVideoAddEventListener.call(video, type, listener, options);
+        else video.addEventListener(type, listener, options);
+    }
+
+    function removeOwnVideoListener(video, type, listener, options) {
+        if (!video || !listener) return;
+        if (nativeVideoRemoveEventListener) nativeVideoRemoveEventListener.call(video, type, listener, options);
+        else video.removeEventListener(type, listener, options);
+    }
+
+    function installEarlyVideoGuards() {
+        if (IS_YOUTUBE_MUSIC) return;
+        // Stop WebKit's built-in YouTube CaptionMirror quirk at the source and
+        // clamp its forced "YouTube Captions" track synchronously on mode writes.
+        if (featureEnabled('captions')) {
+            try {
+                Object.defineProperty(window, 'setupCaptionMirroring', {
+                    get: function () { return function () {}; },
+                    set: function () {},
+                    configurable: false
+                });
+            } catch (e) { /* ignore */ }
+            try {
+                var modeDesc = typeof TextTrack !== 'undefined' && Object.getOwnPropertyDescriptor(TextTrack.prototype, 'mode');
+                if (modeDesc && modeDesc.get && modeDesc.set && !modeDesc.set._wblockTubeCleaner) {
+                    var guardedSet = function (value) {
+                        if (this.kind === 'forced' && this.label === 'YouTube Captions' &&
+                            activeVideo && activeVideo.textTracks &&
+                            Array.prototype.indexOf.call(activeVideo.textTracks, this) !== -1) {
+                            value = 'disabled';
+                        }
+                        return modeDesc.set.call(this, value);
+                    };
+                    guardedSet._wblockTubeCleaner = true;
+                    Object.defineProperty(TextTrack.prototype, 'mode', {
+                        configurable: true,
+                        enumerable: modeDesc.enumerable,
+                        get: function () { return modeDesc.get.call(this); },
+                        set: guardedSet
+                    });
+                }
+            } catch (e) { /* ignore */ }
+            guardMediaSessionCaptions();
+        }
+        // Keep YouTube's fullscreen and PiP-entry listeners quiet while Tube
+        // Cleaner owns the active video so YouTube does not swap tracks, lock
+        // the page inert, or exit PiP behind Safari's back.
+        try {
+            if (nativeVideoAddEventListener && !nativeVideoAddEventListener._wblockTubeCleaner && gatedVideoListeners) {
+                var wrappedAdd = function (type, listener, options) {
+                    if ((type === 'webkitbeginfullscreen' || type === 'webkitendfullscreen' || type === 'webkitpresentationmodechanged') &&
+                        (typeof listener === 'function' || (listener && typeof listener.handleEvent === 'function'))) {
+                        var byType = gatedVideoListeners.get(listener);
+                        if (!byType) { byType = {}; gatedVideoListeners.set(listener, byType); }
+                        var gated = byType[type];
+                        if (!gated) {
+                            gated = function (event) {
+                                if (this === activeVideo) {
+                                    if (type !== 'webkitpresentationmodechanged' || this.webkitPresentationMode === 'picture-in-picture') return;
+                                }
+                                if (typeof listener === 'function') return listener.apply(this, arguments);
+                                return listener.handleEvent(event);
+                            };
+                            byType[type] = gated;
+                        }
+                        return nativeVideoAddEventListener.call(this, type, gated, options);
+                    }
+                    return nativeVideoAddEventListener.apply(this, arguments);
+                };
+                wrappedAdd._wblockTubeCleaner = true;
+                HTMLVideoElement.prototype.addEventListener = wrappedAdd;
+                if (nativeVideoRemoveEventListener) {
+                    HTMLVideoElement.prototype.removeEventListener = function (type, listener, options) {
+                        var byType = listener && (typeof listener === 'function' || typeof listener === 'object') ? gatedVideoListeners.get(listener) : null;
+                        var gated = byType && byType[type];
+                        if (gated) return nativeVideoRemoveEventListener.call(this, type, gated, options);
+                        return nativeVideoRemoveEventListener.apply(this, arguments);
+                    };
+                }
+            }
+        } catch (e) { /* ignore */ }
+        installPlaybackPropertyLocks();
+    }
+
+    var ownMediaPropWrite = false;
+    var nativeMediaPropDescs = {};
+    var lastProgrammaticMuted = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var playbackPropertyLocksInstalled = false;
+
+    function installPlaybackPropertyLocks() {
+        if (playbackPropertyLocksInstalled || IS_YOUTUBE_MUSIC || typeof HTMLMediaElement === 'undefined') return;
+        playbackPropertyLocksInstalled = true;
+        var props = IS_IOS ? ['playbackRate', 'defaultPlaybackRate'] : ['volume', 'playbackRate', 'defaultPlaybackRate'];
+        props.forEach(function (prop) {
+            try {
+                var desc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, prop);
+                if (!desc || !desc.get || !desc.set) return;
+                nativeMediaPropDescs[prop] = desc;
+                Object.defineProperty(HTMLMediaElement.prototype, prop, {
+                    configurable: true,
+                    enumerable: desc.enumerable,
+                    get: function () { return desc.get.call(this); },
+                    set: function (value) {
+                        if (!ownMediaPropWrite && this === activeVideo && this._wblockPlaybackLocked) return;
+                        desc.set.call(this, value);
+                    }
+                });
+            } catch (e) { /* ignore */ }
+        });
+        if (!IS_IOS && lastProgrammaticMuted) {
+            try {
+                var mutedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
+                if (mutedDesc && mutedDesc.get && mutedDesc.set) {
+                    Object.defineProperty(HTMLMediaElement.prototype, 'muted', {
+                        configurable: true,
+                        enumerable: mutedDesc.enumerable,
+                        get: function () { return mutedDesc.get.call(this); },
+                        set: function (value) {
+                            lastProgrammaticMuted.set(this, !!value);
+                            mutedDesc.set.call(this, value);
+                        }
+                    });
+                }
+            } catch (e) { /* ignore */ }
+        }
+    }
+
+    function writeMediaProp(video, prop, value) {
+        var desc = nativeMediaPropDescs[prop];
+        if (!video || typeof value !== 'number' || !isFinite(value)) return;
+        ownMediaPropWrite = true;
+        try {
+            if (desc && desc.set) desc.set.call(video, value);
+            else video[prop] = value;
+        } catch (e) { /* ignore */ }
+        finally { ownMediaPropWrite = false; }
+    }
+
+    function readPlaybackPreferences() {
+        try {
+            var parsed = JSON.parse(localStorage.getItem(STORAGE_PLAYBACK) || 'null');
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch (e) { return {}; }
+    }
+
+    function setupPlaybackPreferences(player, video) {
+        if (!video || IS_YOUTUBE_MUSIC) return;
+        var saved = readPlaybackPreferences();
+        if (!IS_IOS && typeof saved.volume === 'number' && saved.volume >= 0 && saved.volume <= 1) {
+            writeMediaProp(video, 'volume', saved.volume);
+        }
+        if (typeof saved.playbackRate === 'number' && saved.playbackRate >= 0.25 && saved.playbackRate <= 4) {
+            writeMediaProp(video, 'defaultPlaybackRate', saved.playbackRate);
+            writeMediaProp(video, 'playbackRate', saved.playbackRate);
+        }
+        video._wblockPlaybackLocked = true;
+
+        function persist() {
+            if (ownMediaPropWrite) return;
+            var current = readPlaybackPreferences();
+            if (!IS_IOS && typeof video.volume === 'number' && isFinite(video.volume) && video.volume >= 0 && video.volume <= 1) {
+                current.volume = video.volume;
+            }
+            if (typeof video.playbackRate === 'number' && isFinite(video.playbackRate) && video.playbackRate >= 0.25 && video.playbackRate <= 4) {
+                current.playbackRate = video.playbackRate;
+            }
+            storageSet(STORAGE_PLAYBACK, JSON.stringify(current));
+        }
+
+        function onVolumeChange() {
+            persist();
+            if (IS_IOS || !lastProgrammaticMuted) return;
+            if (lastProgrammaticMuted.get(video) === video.muted) return;
+            if (player && typeof player.isMuted === 'function') {
+                try {
+                    if (player.isMuted() !== video.muted) {
+                        var muteBtn = player.querySelector('.ytp-mute-button');
+                        if (muteBtn) muteBtn.click();
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        }
+
+        function onRateChange() { persist(); }
+
+        video.addEventListener('volumechange', onVolumeChange);
+        video.addEventListener('ratechange', onRateChange);
+        registerCleanup(function () {
+            video._wblockPlaybackLocked = false;
+            video.removeEventListener('volumechange', onVolumeChange);
+            video.removeEventListener('ratechange', onRateChange);
+        });
+    }
+
+    // Prefer the original audio track when YouTube auto-dubs a multi-track
+    // upload. Applied at most once per video activation so a manual track
+    // choice is never overridden.
+    function isOriginalAudioTrack(track) {
+        if (!track || typeof track !== 'object') return false;
+        if (track.isOriginal === true) return true;
+        try {
+            var id = typeof track.id === 'string' ? track.id : '';
+            var part = id.split(';')[1];
+            if (part && atob(part).toLowerCase().indexOf('original') !== -1) return true;
+        } catch (e) { /* ignore non-base64 track ids */ }
+        for (var key in track) {
+            try {
+                var val = track[key];
+                if (val && typeof val === 'object' && typeof val.name === 'string' &&
+                    val.name.toLowerCase().indexOf('original') !== -1) return true;
+            } catch (e) { /* ignore */ }
+        }
+        return false;
+    }
+
+    function setupOriginalAudioTrack(player, video) {
+        if (!player || !video || IS_YOUTUBE_MUSIC) return;
+        var applied = false;
+        function trySelect() {
+            if (applied || video !== activeVideo) return;
+            if (typeof player.getAvailableAudioTracks !== 'function' || typeof player.setAudioTrack !== 'function') return;
+            var tracks;
+            try { tracks = player.getAvailableAudioTracks(); } catch (e) { return; }
+            if (!Array.isArray(tracks) || tracks.length <= 1) return;
+            var original = null;
+            for (var i = 0; i < tracks.length; i++) {
+                if (isOriginalAudioTrack(tracks[i])) { original = tracks[i]; break; }
+            }
+            applied = true;
+            if (!original) return;
+            try {
+                var current = typeof player.getAudioTrack === 'function' ? player.getAudioTrack() : null;
+                if (current && (current === original || (current.id && current.id === original.id) || isOriginalAudioTrack(current))) return;
+                player.setAudioTrack(original);
+                log('selected original audio track');
+            } catch (e) { /* ignore */ }
+        }
+        trySelect();
+        if (!applied) {
+            video.addEventListener('loadedmetadata', trySelect);
+            video.addEventListener('loadeddata', trySelect);
+            video.addEventListener('playing', trySelect);
+            registerCleanup(function () {
+                video.removeEventListener('loadedmetadata', trySelect);
+                video.removeEventListener('loadeddata', trySelect);
+                video.removeEventListener('playing', trySelect);
+            });
+        }
+    }
+
+    // Mobile YouTube sets inert on .page-container and faux-fullscreen on body
+    // during player transitions, which can freeze page scrolling/taps after
+    // native fullscreen. Keep both clear while Tube Cleaner owns the video.
+    function setupMobilePageGuards() {
+        if (!IS_IOS || IS_YOUTUBE_MUSIC) return;
+        function clearLocks() {
+            try {
+                if (document.body && document.body.hasAttribute('faux-fullscreen')) {
+                    document.body.removeAttribute('faux-fullscreen');
+                }
+                var containers = document.querySelectorAll('.page-container[inert]');
+                for (var i = 0; i < containers.length; i++) containers[i].inert = false;
+            } catch (e) { /* ignore */ }
+        }
+        clearLocks();
+        var observer = null;
+        try {
+            if (document.documentElement) {
+                observer = new MutationObserver(function (records) {
+                    for (var i = 0; i < records.length; i++) {
+                        var target = records[i].target;
+                        if (target === document.body && target.hasAttribute('faux-fullscreen')) {
+                            target.removeAttribute('faux-fullscreen');
+                        } else if (target && target.inert && target.classList && target.classList.contains('page-container')) {
+                            target.inert = false;
+                        }
+                    }
+                });
+                observer.observe(document.documentElement, {
+                    attributes: true,
+                    attributeFilter: ['inert', 'faux-fullscreen'],
+                    subtree: true
+                });
+            }
+        } catch (e) { /* ignore */ }
+        var onReady = null;
+        if (document.readyState === 'loading') {
+            onReady = clearLocks;
+            document.addEventListener('DOMContentLoaded', onReady);
+        }
+        registerCleanup(function () {
+            if (observer) { try { observer.disconnect(); } catch (e) { /* ignore */ } }
+            if (onReady) document.removeEventListener('DOMContentLoaded', onReady);
+        });
     }
 
     // ------------------------------------------------------------------
@@ -1934,9 +2417,9 @@
         }
         document.addEventListener('fullscreenchange', scheduleUpdate);
         document.addEventListener('webkitfullscreenchange', scheduleUpdate);
-        video.addEventListener('webkitbeginfullscreen', scheduleUpdate);
-        video.addEventListener('webkitendfullscreen', scheduleUpdate);
-        video.addEventListener('webkitpresentationmodechanged', scheduleUpdate);
+        addOwnVideoListener(video, 'webkitbeginfullscreen', scheduleUpdate);
+        addOwnVideoListener(video, 'webkitendfullscreen', scheduleUpdate);
+        addOwnVideoListener(video, 'webkitpresentationmodechanged', scheduleUpdate);
         video.addEventListener('enterpictureinpicture', scheduleUpdate);
         video.addEventListener('leavepictureinpicture', scheduleUpdate);
         scheduleUpdate();
@@ -1948,9 +2431,9 @@
             window.removeEventListener('resize', scheduleUpdate);
             document.removeEventListener('fullscreenchange', scheduleUpdate);
             document.removeEventListener('webkitfullscreenchange', scheduleUpdate);
-            video.removeEventListener('webkitbeginfullscreen', scheduleUpdate);
-            video.removeEventListener('webkitendfullscreen', scheduleUpdate);
-            video.removeEventListener('webkitpresentationmodechanged', scheduleUpdate);
+            removeOwnVideoListener(video, 'webkitbeginfullscreen', scheduleUpdate);
+            removeOwnVideoListener(video, 'webkitendfullscreen', scheduleUpdate);
+            removeOwnVideoListener(video, 'webkitpresentationmodechanged', scheduleUpdate);
             video.removeEventListener('enterpictureinpicture', scheduleUpdate);
             video.removeEventListener('leavepictureinpicture', scheduleUpdate);
             if (resizeObserver) { try { resizeObserver.disconnect(); } catch (e) { /* ignore */ } }
@@ -1982,7 +2465,7 @@
         // still see the stream; pinNativeControls() is what actually keeps a
         // native scrubber drag alive.
         var competingEvents = [
-            'click', 'pointerdown', 'pointermove', 'pointerup',
+            'click', 'contextmenu', 'pointerdown', 'pointermove', 'pointerup',
             'mousedown', 'mousemove', 'mouseup',
             'touchstart', 'touchmove', 'touchend'
         ];
@@ -1990,12 +2473,18 @@
         for (var i = 0; i < competingEvents.length; i++) {
             video.addEventListener(competingEvents[i], blockCompetingClicks);
         }
+        function onSpuriousPlaying() { if (!IS_IOS) stepSpuriousPlay('playing', false); }
+        video.addEventListener('playing', onSpuriousPlaying);
         registerCleanup(function () {
             for (var i = 0; i < competingEvents.length; i++) {
                 video.removeEventListener(competingEvents[i], blockCompetingClicks);
             }
+            video.removeEventListener('playing', onSpuriousPlaying);
         });
 
+        setupPlaybackPreferences(player, video);
+        setupOriginalAudioTrack(player, video);
+        setupMobilePageGuards();
         setupVideoAspectLayout(player, video);
         setupPinchFullscreen(player, video);
         // Keep YouTube's media listeners intact. SABR/MSE uses waiting,
@@ -2482,14 +2971,45 @@
                 };
             }
             // YouTube answers every PiP presentation change by exiting
-            // fullscreen on the video (#919). After its swipe-down player that
-            // tears PiP down, and with it background playback. Exiting
-            // fullscreen never applies to a video that is in PiP.
-            if (typeof video.webkitExitFullscreen === 'function') {
-                video.webkitExitFullscreen = function () {
-                    if (this.webkitPresentationMode === 'picture-in-picture') return;
-                    return Object.getPrototypeOf(this).webkitExitFullscreen.apply(this, arguments);
-                };
+            // fullscreen or forcing inline mode on the video (#919). Ignore
+            // site-driven exits while PiP is active; Tube Cleaner's own
+            // leavePiP sets ownPresentationWrite. Use configurable accessors so
+            // prototype methods and test mocks both route through the guard.
+            var customPresentationMode = null;
+            var hasCustomPresentationMode = Object.prototype.hasOwnProperty.call(video, 'webkitSetPresentationMode');
+            if (hasCustomPresentationMode) customPresentationMode = video.webkitSetPresentationMode;
+            Object.defineProperty(video, 'webkitSetPresentationMode', {
+                configurable: true,
+                get: function () {
+                    var target = hasCustomPresentationMode ? customPresentationMode :
+                        Object.getPrototypeOf(this).webkitSetPresentationMode;
+                    if (typeof target !== 'function') return target;
+                    return function (mode) {
+                        if (!ownPresentationWrite && this.webkitPresentationMode === 'picture-in-picture' && mode === 'inline') return;
+                        return target.apply(this, arguments);
+                    };
+                },
+                set: function (fn) {
+                    hasCustomPresentationMode = true;
+                    customPresentationMode = fn;
+                }
+            });
+            ['webkitExitFullscreen', 'webkitExitFullScreen'].forEach(function (exitName) {
+                var exitProto = Object.getPrototypeOf(video)[exitName];
+                if (typeof video[exitName] === 'function' || typeof exitProto === 'function') {
+                    video[exitName] = function () {
+                        if (!ownPresentationWrite && this.webkitPresentationMode === 'picture-in-picture') return;
+                        var fn = Object.getPrototypeOf(this)[exitName];
+                        if (typeof fn === 'function') return fn.apply(this, arguments);
+                    };
+                }
+            });
+            if ('disablePictureInPicture' in video) {
+                Object.defineProperty(video, 'disablePictureInPicture', {
+                    configurable: true,
+                    get: function () { return false; },
+                    set: function () {}
+                });
             }
             var descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'controls');
             if (descriptor && descriptor.get && descriptor.set) {
@@ -2517,7 +3037,10 @@
             try { delete video.removeAttribute; } catch (e) { /* ignore */ }
             try { delete video.setAttribute; } catch (e) { /* ignore */ }
             try { delete video.toggleAttribute; } catch (e) { /* ignore */ }
+            try { delete video.webkitSetPresentationMode; } catch (e) { /* ignore */ }
             try { delete video.webkitExitFullscreen; } catch (e) { /* ignore */ }
+            try { delete video.webkitExitFullScreen; } catch (e) { /* ignore */ }
+            try { delete video.disablePictureInPicture; } catch (e) { /* ignore */ }
             try { delete video.controls; } catch (e) { /* ignore */ }
         });
     }
@@ -3069,8 +3592,8 @@
         video.addEventListener('ended', clearBoundaryTimer);
         document.addEventListener('wblock-tc-sponsor-settings', onSettingsChange);
         if (IS_IOS) {
-            video.addEventListener('webkitbeginfullscreen', onFullscreenChange);
-            video.addEventListener('webkitendfullscreen', onFullscreenChange);
+            addOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenChange);
+            addOwnVideoListener(video, 'webkitendfullscreen', onFullscreenChange);
             document.addEventListener('fullscreenchange', onFullscreenChange);
             document.addEventListener('webkitfullscreenchange', onFullscreenChange);
             startPoll();
@@ -3090,8 +3613,8 @@
             video.removeEventListener('ended', clearBoundaryTimer);
             document.removeEventListener('wblock-tc-sponsor-settings', onSettingsChange);
             if (IS_IOS) {
-                video.removeEventListener('webkitbeginfullscreen', onFullscreenChange);
-                video.removeEventListener('webkitendfullscreen', onFullscreenChange);
+                removeOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenChange);
+                removeOwnVideoListener(video, 'webkitendfullscreen', onFullscreenChange);
                 document.removeEventListener('fullscreenchange', onFullscreenChange);
                 document.removeEventListener('webkitfullscreenchange', onFullscreenChange);
             }
@@ -3713,8 +4236,61 @@
             .replace(/<\d{1,2}:\d{2}:\d{2}\.\d{3}>|<\/?c(?:\.[\w.-]*)?>/g, '');
     }
 
+    function captionDisplayLanguage(language) {
+        if (!language) return '';
+        try {
+            if (typeof Intl !== 'undefined' && typeof Intl.DisplayNames === 'function') {
+                return new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' }).of(language) || language;
+            }
+        } catch (e) { /* fall back to language code */ }
+        return language;
+    }
+
+    function youtubeTranslationCode(language) {
+        var normalized = String(language || '').trim().toLowerCase().replace(/_/g, '-');
+        if (!normalized) return '';
+        if (normalized.indexOf('zh-') === 0) {
+            if (normalized.indexOf('hant') !== -1 || normalized === 'zh-tw' || normalized === 'zh-hk' || normalized === 'zh-mo') {
+                return 'zh-Hant';
+            }
+            return 'zh-Hans';
+        }
+        return normalized.split('-')[0];
+    }
+
+    function withAutoTranslatedTrack(tracks) {
+        if (!Array.isArray(tracks) || !tracks.length) return [];
+        var rawLang = String((navigator.languages && navigator.languages[0]) || navigator.language || '').trim();
+        var tlang = youtubeTranslationCode(rawLang);
+        if (!tlang) return tracks;
+        var userBase = tlang.toLowerCase().split('-')[0];
+        for (var i = 0; i < tracks.length; i++) {
+            var code = String(tracks[i] && tracks[i].languageCode || '').toLowerCase().split('-')[0];
+            if (code === userBase) return tracks;
+        }
+        var source = tracks[0];
+        for (var j = 0; j < tracks.length; j++) {
+            if (String(tracks[j] && tracks[j].languageCode || '').toLowerCase().split('-')[0] === 'en') {
+                source = tracks[j];
+                break;
+            }
+        }
+        if (!source || !source.baseUrl) return tracks;
+        try {
+            var url = new URL(source.baseUrl, location.href);
+            url.searchParams.set('tlang', tlang);
+            var label = 'Auto-translated (' + captionDisplayLanguage(tlang) + ')';
+            return tracks.concat([{
+                baseUrl: url.href,
+                languageCode: tlang,
+                name: { simpleText: label },
+                vssId: 'wblock.tlang.' + tlang
+            }]);
+        } catch (e) { return tracks; }
+    }
+
     function downloadNativeSubtitleTracks(tracks, signal) {
-        return Promise.all(tracks.map(function (track) {
+        return Promise.all(withAutoTranslatedTrack(tracks).map(function (track) {
             var url = captionUrl(track);
             if (!url) return Promise.resolve(null);
             return fetch(url, { credentials: 'same-origin', signal: signal }).then(function (response) {
@@ -3826,6 +4402,7 @@
                     }
                 }
                 enforceSingleSubtitleTrack();
+                syncMediaSessionCaptions(video);
             }
         }
 
@@ -3989,6 +4566,7 @@
             disableForeignSubtitles(true);
             enforceSingleSubtitleTrack();
             if (showingBefore.length) video._wblockLastSubtitleTrack = showingBefore[0];
+            syncMediaSessionCaptions(video);
         }
         function activeCueSignature(track, time) {
             var cues = track.cues;
@@ -4026,6 +4604,10 @@
                 }
             }
             disableForeignSubtitles(false);
+            syncMediaSessionCaptions(video);
+        }
+        function onTrackRemoved() {
+            syncMediaSessionCaptions(video);
         }
         // Safari's caption menus learn the selection from mode changes WebKit
         // delivers while the page renders. The pump's flips happen while it
@@ -4054,6 +4636,7 @@
         }
         function onFullscreenEndSubtitles() {
             disableForeignSubtitles(false);
+            syncMediaSessionCaptions(video);
         }
         var stopSubtitleVisibility = observeRealVisibility(function () {
             if (_realHidden || !pumpedWhileHidden) return;
@@ -4061,10 +4644,11 @@
             resyncSubtitleSelection();
         });
         video.addEventListener('timeupdate', onPiPCaptionTick);
-        video.addEventListener('webkitbeginfullscreen', onFullscreenBeginSubtitles);
-        video.addEventListener('webkitendfullscreen', onFullscreenEndSubtitles);
+        addOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenBeginSubtitles);
+        addOwnVideoListener(video, 'webkitendfullscreen', onFullscreenEndSubtitles);
         if (video.textTracks && typeof video.textTracks.addEventListener === 'function') {
             video.textTracks.addEventListener('addtrack', onTrackAdded);
+            video.textTracks.addEventListener('removetrack', onTrackRemoved);
             video.textTracks.addEventListener('change', onNativeSubtitleChange);
         }
         pipPumpInterval = setInterval(onPiPCaptionTick, 500);
@@ -4073,13 +4657,15 @@
             cancelled = true;
             stopRetry();
             video.removeEventListener('timeupdate', onPiPCaptionTick);
-            video.removeEventListener('webkitbeginfullscreen', onFullscreenBeginSubtitles);
-            video.removeEventListener('webkitendfullscreen', onFullscreenEndSubtitles);
+            removeOwnVideoListener(video, 'webkitbeginfullscreen', onFullscreenBeginSubtitles);
+            removeOwnVideoListener(video, 'webkitendfullscreen', onFullscreenEndSubtitles);
             stopSubtitleVisibility();
             if (video.textTracks && typeof video.textTracks.removeEventListener === 'function') {
                 video.textTracks.removeEventListener('addtrack', onTrackAdded);
+                video.textTracks.removeEventListener('removetrack', onTrackRemoved);
                 video.textTracks.removeEventListener('change', onNativeSubtitleChange);
             }
+            clearMediaSessionCaptions();
             if (pipPumpInterval !== null) { clearInterval(pipPumpInterval); pipPumpInterval = null; }
             pipPumpRestorePending = false;
             if (pipPumpRestoreTimer !== null) { clearTimeout(pipPumpRestoreTimer); pipPumpRestoreTimer = null; }
@@ -4821,15 +5407,15 @@
             else onExit();
         }
 
-        video.addEventListener('webkitbeginfullscreen', onEnter);
-        video.addEventListener('webkitendfullscreen', onExit);
-        video.addEventListener('webkitpresentationmodechanged', onPresentationChange);
+        addOwnVideoListener(video, 'webkitbeginfullscreen', onEnter);
+        addOwnVideoListener(video, 'webkitendfullscreen', onExit);
+        addOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationChange);
 
         registerCleanup(function () {
             stopAll();
-            video.removeEventListener('webkitbeginfullscreen', onEnter);
-            video.removeEventListener('webkitendfullscreen', onExit);
-            video.removeEventListener('webkitpresentationmodechanged', onPresentationChange);
+            removeOwnVideoListener(video, 'webkitbeginfullscreen', onEnter);
+            removeOwnVideoListener(video, 'webkitendfullscreen', onExit);
+            removeOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationChange);
         });
     }
 
@@ -5457,7 +6043,7 @@
             document.addEventListener('pointermove', move, true);
             player.addEventListener('pointerleave', leave);
             window.addEventListener('blur', reset);
-            video.addEventListener('webkitpresentationmodechanged', reset);
+            addOwnVideoListener(video, 'webkitpresentationmodechanged', reset);
             video.addEventListener('seeking', show);
             video.addEventListener('seeked', schedule);
             video.addEventListener('ended', show);
@@ -5470,7 +6056,7 @@
                 document.removeEventListener('pointermove', move, true);
                 player.removeEventListener('pointerleave', leave);
                 window.removeEventListener('blur', reset);
-                video.removeEventListener('webkitpresentationmodechanged', reset);
+                removeOwnVideoListener(video, 'webkitpresentationmodechanged', reset);
                 video.removeEventListener('seeking', show);
                 video.removeEventListener('seeked', schedule);
                 video.removeEventListener('ended', show);
@@ -5779,7 +6365,7 @@
                 }
                 lastPresentationMode = mode;
             }
-            video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
+            addOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
 
             bindNativeToolbarInteractions(showToolbar, scheduleHideToolbar);
 
@@ -5804,7 +6390,7 @@
                 player.removeEventListener('mouseleave', onPlayerMouseLeave);
                 video.removeEventListener('play', onVideoPlay);
                 video.removeEventListener('pause', onVideoPause);
-                video.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
+                removeOwnVideoListener(video, 'webkitpresentationmodechanged', onPresentationModeChange);
             });
         }
 
@@ -5899,13 +6485,16 @@
     }
 
     function exitNativeFullscreen(video, useElementApi) {
-        if (!useElementApi && typeof video.webkitSetPresentationMode === 'function' &&
-            (video.webkitPresentationMode === 'fullscreen' ||
-                typeof video.webkitSupportsPresentationMode === 'function')) {
-            video.webkitSetPresentationMode('inline');
-            return;
-        }
-        if (typeof video.webkitExitFullscreen === 'function') video.webkitExitFullscreen();
+        ownPresentationWrite = true;
+        try {
+            if (!useElementApi && typeof video.webkitSetPresentationMode === 'function' &&
+                (video.webkitPresentationMode === 'fullscreen' ||
+                    typeof video.webkitSupportsPresentationMode === 'function')) {
+                video.webkitSetPresentationMode('inline');
+                return;
+            }
+            if (typeof video.webkitExitFullscreen === 'function') video.webkitExitFullscreen();
+        } finally { ownPresentationWrite = false; }
     }
 
     var fullscreenVerifyTimer = null;
@@ -6001,6 +6590,7 @@
             for (var j = 0; j < tracks.length; j++) {
                 try { tracks[j].mode = 'disabled'; } catch (e) { /* ignore */ }
             }
+            syncMediaSessionCaptions(video);
             return true;
         }
         var last = video._wblockLastSubtitleTrack;
@@ -6008,6 +6598,7 @@
         for (var k = 0; k < tracks.length; k++) {
             try { tracks[k].mode = tracks[k] === pick ? 'showing' : 'disabled'; } catch (e) { /* ignore */ }
         }
+        syncMediaSessionCaptions(video);
         return true;
     }
 
@@ -6270,6 +6861,7 @@
             setupYouTubeMusic();
             return;
         }
+        installEarlyVideoGuards();
         observeDocumentForPlayer();
         injectStyles();
         lastUrl = location.href;
