@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.81
+// @version      0.1.82
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2355,6 +2355,21 @@
     // Cleaner owns the video, writes that would turn the controls attribute
     // off are ignored. Shadowing is installed only after the attribute is
     // natively set, so WebKit's media-controls initialization is unaffected.
+    function protectOwnedTrackElement(video, element) {
+        if (!element) return;
+        try {
+            element.remove = function () {
+                if (this.parentNode === video && video && video._wblockControlsPinned) return;
+                return Element.prototype.remove.call(this);
+            };
+        } catch (e) { /* ignore */ }
+    }
+
+    function detachTrackElement(element) {
+        if (!element || !element.parentNode) return;
+        try { Element.prototype.remove.call(element); } catch (e) { /* ignore */ }
+    }
+
     function pinNativeControls(video) {
         if (!video || video._wblockControlsPinned) return;
         video._wblockControlsPinned = true;
@@ -2364,6 +2379,11 @@
         var nativeToggleAttribute = video.toggleAttribute;
         var nativeRemoveChild = video.removeChild;
         var nativeAppendChild = video.appendChild;
+        var nativeInsertBefore = video.insertBefore;
+        var nativeReplaceChild = video.replaceChild;
+        var nativeAppend = video.append;
+        var nativePrepend = video.prepend;
+        var nativeReplaceChildren = video.replaceChildren;
 
         function isControlsName(name) {
             return String(name).toLowerCase() === 'controls';
@@ -2371,10 +2391,25 @@
 
         // Tube Cleaner marks its tracks before appending them. On fullscreen
         // changes YouTube removes every TRACK and appends raw timed-word
-        // captions; keep ours connected and drop YouTube's copy.
+        // captions; keep ours connected and drop YouTube's copy across every
+        // DOM mutation entry point.
         function ownedTrack(node) {
-            return node.nodeName === 'TRACK' &&
+            return !!node && node.nodeName === 'TRACK' &&
                 (node.hasAttribute('data-wblock-native-subtitle') || node.hasAttribute('data-wblock-native-chapters'));
+        }
+
+        function blockedForeignTrack(node) {
+            return !!node && node.nodeName === 'TRACK' && !ownedTrack(node) &&
+                (node.kind === 'chapters' ? featureEnabled('chapters') :
+                 (node.kind === 'subtitles' || node.kind === 'captions' || node.kind === 'forced') && featureEnabled('captions'));
+        }
+
+        function filterForeignTrackArgs(args) {
+            var kept = [];
+            for (var i = 0; i < args.length; i++) {
+                if (!blockedForeignTrack(args[i])) kept.push(args[i]);
+            }
+            return kept;
         }
 
         try {
@@ -2383,11 +2418,48 @@
                 return nativeRemoveChild.apply(this, arguments);
             };
             video.appendChild = function (node) {
-                if (this === video && node && node.nodeName === 'TRACK' && !ownedTrack(node) &&
-                    (node.kind === 'chapters' ? featureEnabled('chapters') :
-                     (node.kind === 'subtitles' || node.kind === 'captions') && featureEnabled('captions'))) return node;
+                if (this === video && blockedForeignTrack(node)) return node;
                 return nativeAppendChild.apply(this, arguments);
             };
+            if (typeof nativeInsertBefore === 'function') {
+                video.insertBefore = function (node) {
+                    if (this === video && blockedForeignTrack(node)) return node;
+                    return nativeInsertBefore.apply(this, arguments);
+                };
+            }
+            if (typeof nativeReplaceChild === 'function') {
+                video.replaceChild = function (newNode, oldNode) {
+                    if (this === video && ((oldNode && oldNode.parentNode === video && ownedTrack(oldNode)) || blockedForeignTrack(newNode))) {
+                        return oldNode;
+                    }
+                    return nativeReplaceChild.apply(this, arguments);
+                };
+            }
+            if (typeof nativeAppend === 'function') {
+                video.append = function () {
+                    if (this !== video) return nativeAppend.apply(this, arguments);
+                    var kept = filterForeignTrackArgs(arguments);
+                    if (kept.length) return nativeAppend.apply(this, kept);
+                };
+            }
+            if (typeof nativePrepend === 'function') {
+                video.prepend = function () {
+                    if (this !== video) return nativePrepend.apply(this, arguments);
+                    var kept = filterForeignTrackArgs(arguments);
+                    if (kept.length) return nativePrepend.apply(this, kept);
+                };
+            }
+            if (typeof nativeReplaceChildren === 'function') {
+                video.replaceChildren = function () {
+                    if (this !== video) return nativeReplaceChildren.apply(this, arguments);
+                    var kept = filterForeignTrackArgs(arguments);
+                    var preserved = Array.prototype.filter.call(video.children || [], ownedTrack);
+                    for (var i = 0; i < preserved.length; i++) {
+                        if (kept.indexOf(preserved[i]) === -1) kept.push(preserved[i]);
+                    }
+                    return nativeReplaceChildren.apply(this, kept);
+                };
+            }
             video.removeAttribute = function (name) {
                 if (isControlsName(name)) return;
                 return nativeRemoveAttribute.apply(this, arguments);
@@ -2437,6 +2509,11 @@
             video._wblockControlsPinned = false;
             try { delete video.removeChild; } catch (e) { /* ignore */ }
             try { delete video.appendChild; } catch (e) { /* ignore */ }
+            try { delete video.insertBefore; } catch (e) { /* ignore */ }
+            try { delete video.replaceChild; } catch (e) { /* ignore */ }
+            try { delete video.append; } catch (e) { /* ignore */ }
+            try { delete video.prepend; } catch (e) { /* ignore */ }
+            try { delete video.replaceChildren; } catch (e) { /* ignore */ }
             try { delete video.removeAttribute; } catch (e) { /* ignore */ }
             try { delete video.setAttribute; } catch (e) { /* ignore */ }
             try { delete video.toggleAttribute; } catch (e) { /* ignore */ }
@@ -3326,8 +3403,12 @@
                 element._wblockRevokeUrl = null;
             }
             if (element.parentNode) {
-                try { element.remove(); } catch (e) { /* ignore */ }
+                detachTrackElement(element);
             }
+        }
+        var staleChapters = video.querySelectorAll('track[data-wblock-native-chapters]');
+        for (var c = 0; c < staleChapters.length; c++) {
+            detachTrackElement(staleChapters[c]);
         }
         if (video._wblockChaptersBlobUrl) {
             try { URL.revokeObjectURL(video._wblockChaptersBlobUrl); } catch (e) { /* ignore */ }
@@ -3369,6 +3450,7 @@
             element.srclang = 'en';
             element.default = true;
             element.setAttribute('data-wblock-native-chapters', '1');
+            protectOwnedTrackElement(video, element);
             element.addEventListener('load', function () { hideAndRevokeChapterTrack(element); });
             try {
                 video.appendChild(element);
@@ -3678,8 +3760,31 @@
             retryTimer = null;
         }
 
+        function removeForeignTrackElements() {
+            var tracks = video.querySelectorAll('track');
+            for (var i = 0; i < tracks.length; i++) {
+                var el = tracks[i];
+                if (el.hasAttribute('data-wblock-native-subtitle') || el.hasAttribute('data-wblock-native-chapters')) continue;
+                if (el.kind === 'subtitles' || el.kind === 'captions' || el.kind === 'forced') {
+                    try { if (el.track) el.track.mode = 'disabled'; } catch (e) { /* ignore */ }
+                    detachTrackElement(el);
+                }
+            }
+        }
+
         function install(downloads) {
             if (cancelled || !downloads.length) return;
+            var priorForeignShowing = null;
+            if (video.textTracks) {
+                for (var p = 0; p < video.textTracks.length; p++) {
+                    var existing = video.textTracks[p];
+                    if ((existing.kind === 'subtitles' || existing.kind === 'captions') && existing.mode === 'showing') {
+                        priorForeignShowing = existing;
+                        break;
+                    }
+                }
+            }
+            removeForeignTrackElements();
             var seen = {};
             for (var i = 0; i < downloads.length; i++) {
                 var definition = downloads[i].definition;
@@ -3696,6 +3801,7 @@
                     element.srclang = language;
                     element.src = blobUrl;
                     element.setAttribute('data-wblock-native-subtitle', key);
+                    protectOwnedTrackElement(video, element);
                     video.appendChild(element);
                     elements.push(element);
                     blobUrls.push(blobUrl);
@@ -3703,13 +3809,23 @@
             }
             // Safari owns the on/off choice and the language, and turns on the
             // right track for each new video from its own caption setting.
-            // Don't set modes here: disabling every track while Safari's
-            // setting is On leaves its On item doing nothing until the user
-            // picks Off first (#11).
+            // Don't set modes here unless a preexisting foreign subtitle track
+            // was already showing (Safari's setting is On) and Safari didn't
+            // activate one of ours on append: leaving all tracks disabled while
+            // Safari's setting is On leaves its On item doing nothing (#11).
             if (elements.length) {
                 log('applied', elements.length, 'Safari caption tracks');
                 disableYouTubeSubtitles();
-                disableForeignSubtitles();
+                disableForeignSubtitles(false);
+                var owned = ownedSubtitleTracks(video);
+                var anyOwnedShowing = owned.some(function (t) { return t.mode === 'showing'; });
+                if (!anyOwnedShowing && priorForeignShowing) {
+                    var match = matchingSubtitleTrack(owned, priorForeignShowing.language);
+                    if (match) {
+                        try { match.mode = 'showing'; } catch (e) { /* ignore */ }
+                    }
+                }
+                enforceSingleSubtitleTrack();
             }
         }
 
@@ -3805,8 +3921,18 @@
         // subtitle tracks end up showing at once the text renders twice.
         // Keep only the most recently enabled one.
         var showingBefore = [];
+        var justAddedForeign = [];
+        function markJustAddedForeign(track) {
+            if (justAddedForeign.indexOf(track) === -1) justAddedForeign.push(track);
+            setTimeout(function () {
+                var idx = justAddedForeign.indexOf(track);
+                if (idx !== -1) justAddedForeign.splice(idx, 1);
+            }, 0);
+        }
         function enforceSingleSubtitleTrack() {
-            var showing = nativeSubtitleTracks(video).filter(function (track) { return track.mode === 'showing'; });
+            var pool = ownedSubtitleTracks(video);
+            if (!pool.length) pool = nativeSubtitleTracks(video);
+            var showing = pool.filter(function (track) { return track.mode === 'showing'; });
             if (showing.length > 1) {
                 var keep = null;
                 for (var i = 0; i < showing.length; i++) {
@@ -3821,28 +3947,46 @@
             showingBefore = showing;
         }
         // Other caption tracks must not show on top of ours. YouTube can attach
-        // its timed-word track by paths the appendChild guard never sees, and
-        // the rule above would keep it over ours. WebKit's YouTube quirk
-        // (CaptionMirror) also adds a "forced" track and shows it in
-        // fullscreen and PiP. It copies YouTube's caption window into one
-        // cue that lasts the whole video. With that window hidden here,
-        // YouTube never trims old lines and the copy grows into a block over
-        // the video. Forced tracks show whatever Safari's caption setting
-        // says. Once our tracks are in, switch every other one off.
-        function disableForeignSubtitles() {
-            var owned = Array.prototype.map.call(video.querySelectorAll('track[data-wblock-native-subtitle]'),
-                function (element) { return element.track; });
+        // its timed-word track by paths the DOM guards never see, and WebKit's
+        // YouTube quirk (CaptionMirror) adds a "forced" track and shows it in
+        // fullscreen and PiP. Once our tracks are in, remove foreign <track>
+        // elements and switch every remaining foreign track off. If Safari's
+        // menu activates an unremovable foreign subtitles/captions track while
+        // none of ours is showing, hand showing over to our matching track so
+        // Safari's On item does not snap back to Off (#11).
+        function disableForeignSubtitles(transferShowing) {
+            var owned = ownedSubtitleTracks(video);
             if (!owned.length || !video.textTracks) return;
+            removeForeignTrackElements();
+            var ownedShowing = false;
+            for (var o = 0; o < owned.length; o++) {
+                if (owned[o].mode === 'showing') { ownedShowing = true; break; }
+            }
+            var transferFrom = null;
             var tracks = video.textTracks;
             for (var i = 0; i < tracks.length; i++) {
-                if (!/^(?:subtitles|captions|forced)$/.test(tracks[i].kind)) continue;
-                if (owned.indexOf(tracks[i]) === -1 && tracks[i].mode !== 'disabled') {
-                    try { tracks[i].mode = 'disabled'; } catch (e) { /* ignore */ }
+                var track = tracks[i];
+                if (!/^(?:subtitles|captions|forced)$/.test(track.kind)) continue;
+                if (owned.indexOf(track) !== -1) continue;
+                var wasShowing = track.mode === 'showing';
+                if (track.mode !== 'disabled') {
+                    try { track.mode = 'disabled'; } catch (e) { /* ignore */ }
+                }
+                if (transferShowing && wasShowing && !ownedShowing && !transferFrom &&
+                    (track.kind === 'subtitles' || track.kind === 'captions') &&
+                    justAddedForeign.indexOf(track) === -1) {
+                    transferFrom = track;
+                }
+            }
+            if (transferFrom) {
+                var replacement = matchingSubtitleTrack(owned, transferFrom.language);
+                if (replacement) {
+                    try { replacement.mode = 'showing'; } catch (e) { /* ignore */ }
                 }
             }
         }
         function onNativeSubtitleChange() {
-            disableForeignSubtitles();
+            disableForeignSubtitles(true);
             enforceSingleSubtitleTrack();
             if (showingBefore.length) video._wblockLastSubtitleTrack = showingBefore[0];
         }
@@ -3873,23 +4017,43 @@
             }
         }
         function onTrackAdded(event) {
-            if (event && event.track) event.track.addEventListener('cuechange', onPiPCaptionTick);
-            disableForeignSubtitles();
+            var track = event && event.track;
+            if (track) {
+                track.addEventListener('cuechange', onPiPCaptionTick);
+                var owned = ownedSubtitleTracks(video);
+                if (owned.length && /^(?:subtitles|captions|forced)$/.test(track.kind) && owned.indexOf(track) === -1) {
+                    markJustAddedForeign(track);
+                }
+            }
+            disableForeignSubtitles(false);
         }
         // Safari's caption menus learn the selection from mode changes WebKit
         // delivers while the page renders. The pump's flips happen while it
         // doesn't, and one that gets dropped leaves fullscreen's menu saying
         // Off while cues still paint (#11). Re-assert the showing track, in
-        // two tasks, once the page is visible again and whenever native
-        // fullscreen starts.
+        // two tasks, once the page is visible again or when fullscreen starts
+        // after a hidden PiP pump. Avoid blinking the track on normal inline
+        // to fullscreen transitions so AVPlayerViewController never snapshots
+        // a hidden mode.
         var pumpedWhileHidden = false;
         function resyncSubtitleSelection() {
-            var showing = nativeSubtitleTracks(video).filter(function (track) { return track.mode === 'showing'; })[0];
+            var pool = ownedSubtitleTracks(video);
+            if (!pool.length) pool = nativeSubtitleTracks(video);
+            var showing = pool.filter(function (track) { return track.mode === 'showing'; })[0];
             if (!showing || cancelled) return;
             try { showing.mode = 'hidden'; } catch (e) { /* ignore */ }
             setTimeout(function () {
                 try { if (!cancelled && showing.mode === 'hidden') showing.mode = 'showing'; } catch (e) { /* ignore */ }
             }, 0);
+        }
+        function onFullscreenBeginSubtitles() {
+            disableForeignSubtitles(false);
+            if (!pumpedWhileHidden) return;
+            pumpedWhileHidden = false;
+            resyncSubtitleSelection();
+        }
+        function onFullscreenEndSubtitles() {
+            disableForeignSubtitles(false);
         }
         var stopSubtitleVisibility = observeRealVisibility(function () {
             if (_realHidden || !pumpedWhileHidden) return;
@@ -3897,7 +4061,8 @@
             resyncSubtitleSelection();
         });
         video.addEventListener('timeupdate', onPiPCaptionTick);
-        video.addEventListener('webkitbeginfullscreen', resyncSubtitleSelection);
+        video.addEventListener('webkitbeginfullscreen', onFullscreenBeginSubtitles);
+        video.addEventListener('webkitendfullscreen', onFullscreenEndSubtitles);
         if (video.textTracks && typeof video.textTracks.addEventListener === 'function') {
             video.textTracks.addEventListener('addtrack', onTrackAdded);
             video.textTracks.addEventListener('change', onNativeSubtitleChange);
@@ -3908,7 +4073,8 @@
             cancelled = true;
             stopRetry();
             video.removeEventListener('timeupdate', onPiPCaptionTick);
-            video.removeEventListener('webkitbeginfullscreen', resyncSubtitleSelection);
+            video.removeEventListener('webkitbeginfullscreen', onFullscreenBeginSubtitles);
+            video.removeEventListener('webkitendfullscreen', onFullscreenEndSubtitles);
             stopSubtitleVisibility();
             if (video.textTracks && typeof video.textTracks.removeEventListener === 'function') {
                 video.textTracks.removeEventListener('addtrack', onTrackAdded);
@@ -3919,7 +4085,7 @@
             if (pipPumpRestoreTimer !== null) { clearTimeout(pipPumpRestoreTimer); pipPumpRestoreTimer = null; }
             if (controller) controller.abort();
             for (var i = 0; i < elements.length; i++) {
-                if (elements[i].parentNode) elements[i].remove();
+                detachTrackElement(elements[i]);
             }
             for (var j = 0; j < blobUrls.length; j++) {
                 try { URL.revokeObjectURL(blobUrls[j]); } catch (e) { /* ignore */ }
@@ -5774,6 +5940,16 @@
         } catch (e) { /* ignore */ }
     }
 
+    function ownedSubtitleTracks(video) {
+        if (!video) return [];
+        var elements = video.querySelectorAll('track[data-wblock-native-subtitle]');
+        var result = [];
+        for (var i = 0; i < elements.length; i++) {
+            if (elements[i].track) result.push(elements[i].track);
+        }
+        return result;
+    }
+
     function nativeSubtitleTracks(video) {
         var result = [];
         var tracks = video && video.textTracks;
@@ -5797,8 +5973,24 @@
         return tracks[0];
     }
 
+    function matchingSubtitleTrack(tracks, language) {
+        if (!tracks.length) return null;
+        var wanted = String(language || '').toLowerCase();
+        if (wanted) {
+            var base = wanted.split('-')[0];
+            for (var i = 0; i < tracks.length; i++) {
+                if (String(tracks[i].language || '').toLowerCase() === wanted) return tracks[i];
+            }
+            for (var j = 0; j < tracks.length; j++) {
+                if (String(tracks[j].language || '').toLowerCase().split('-')[0] === base) return tracks[j];
+            }
+        }
+        return preferredSubtitleTrack(tracks);
+    }
+
     function toggleNativeSubtitles(video) {
-        var tracks = nativeSubtitleTracks(video);
+        var owned = ownedSubtitleTracks(video);
+        var tracks = owned.length ? owned : nativeSubtitleTracks(video);
         if (!tracks.length) return false;
         var showing = null;
         for (var i = 0; i < tracks.length; i++) {

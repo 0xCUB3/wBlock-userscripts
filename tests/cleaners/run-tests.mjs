@@ -1786,48 +1786,101 @@ HTMLMediaElement.prototype.appendChild = function (node) {
   }, { timeout: 1 });
 
   // YouTube's fullscreen swap wipes every TRACK and appends its own timed-word
-  // track. Ours must survive with their modes; YouTube's copy must not attach.
+  // track. Ours must survive removeChild/remove/replaceChildren with their
+  // modes; YouTube's copy must not attach via appendChild/insertBefore/append.
   await check(page, S, 'keeps native tracks and modes through YouTube fullscreen churn', () => {
     const video = document.querySelector('#movie_player video');
     const tracks = Array.from(video.querySelectorAll('track'));
     const modes = tracks.map(t => t.track.mode);
-    tracks.forEach(t => t.parentNode.removeChild(t));
+    tracks.forEach(t => { t.parentNode.removeChild(t); t.remove(); });
     const raw = document.createElement('track');
     raw.kind = 'subtitles';
     raw.id = 'yt';
     video.appendChild(raw);
+    const rawInserted = document.createElement('track');
+    rawInserted.kind = 'subtitles';
+    rawInserted.id = 'yt-inserted';
+    video.insertBefore(rawInserted, video.firstChild);
+    const rawAppended = document.createElement('track');
+    rawAppended.kind = 'captions';
+    rawAppended.id = 'yt-appended';
+    video.append(rawAppended);
+    video.replaceChildren(rawAppended);
     const pass = tracks.length === 2 && tracks.every((t, i) => t.parentNode === video && t.track.mode === modes[i]) &&
-      !video.querySelector('#yt');
-    return { pass, detail: `tracks=${tracks.length} connected=${tracks.filter(t => t.isConnected).length} raw=${!!video.querySelector('#yt')}` };
+      !video.querySelector('#yt, #yt-inserted, #yt-appended');
+    return { pass, detail: `tracks=${tracks.length} connected=${tracks.filter(t => t.isConnected).length} raw=${!!video.querySelector('#yt, #yt-inserted, #yt-appended')}` };
   }, { timeout: 1 });
 
-  // YouTube's raw captions can still arrive by other paths and turn
-  // themselves on; they must not show, or replace ours.
+  // YouTube's raw captions can still arrive via addTextTrack or WebKit's
+  // CaptionMirror quirk and turn themselves on; they must not show, or replace
+  // ours. When captions are off, a newly added foreign track or forced mirror
+  // must not turn ours on; when Safari later selects an existing foreign track
+  // via On, Tube Cleaner hands showing over to our matching owned track (#11).
   await page.evaluate(() => {
     const video = document.querySelector('#movie_player video');
     video.querySelector('track[data-wblock-native-subtitle][srclang="en"]').track.mode = 'showing';
-    const raw = document.createElement('track');
-    raw.kind = 'subtitles';
-    raw.id = 'yt-inserted';
-    raw.default = true;
-    video.insertBefore(raw, video.firstChild);
-    raw.track.mode = 'showing';
-    video.addTextTrack('captions', 'yt-js').mode = 'showing';
+    window.__ytJsTrack = video.addTextTrack('captions', 'yt-js', 'es');
+    window.__ytJsTrack.mode = 'showing';
     // WebKit's YouTube CaptionMirror quirk adds this and shows it in fullscreen and PiP.
-    const mirror = video.addTextTrack('forced', 'YouTube Captions');
-    mirror.mode = 'hidden';
-    mirror.mode = 'showing';
+    window.__mirrorTrack = video.addTextTrack('forced', 'YouTube Captions');
+    window.__mirrorTrack.mode = 'hidden';
+    window.__mirrorTrack.mode = 'showing';
   });
   await page.waitForTimeout(100);
-  await check(page, S, 'switches off YouTube and CaptionMirror tracks that bypass the append guard', () => {
+  await check(page, S, 'switches off YouTube and CaptionMirror tracks that bypass DOM guards', () => {
     const video = document.querySelector('#movie_player video');
     const owned = Array.from(video.querySelectorAll('track[data-wblock-native-subtitle]')).map(t => t.track);
     const all = Array.from(video.textTracks).filter(t => /^(subtitles|captions|forced)$/.test(t.kind));
     const foreign = all.filter(t => owned.indexOf(t) === -1);
     const modes = all.map(t => `${t.kind}/${t.label || t.language}:${t.mode}`).join(',');
-    return { pass: foreign.length === 3 && foreign.every(t => t.mode === 'disabled') &&
+    return { pass: foreign.length === 2 && foreign.every(t => t.mode === 'disabled') &&
       owned.some(t => t.language === 'en' && t.mode === 'showing'), detail: `modes=${modes}` };
   }, { timeout: 1 });
+
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    // Turn everything off, then verify a forced mirror stays off without turning ours on,
+    // while Safari selecting the existing foreign captions track transfers to our matching track.
+    Array.from(video.textTracks).forEach(t => { t.mode = 'disabled'; });
+    window.__mirrorTrack.mode = 'showing';
+  });
+  await page.waitForTimeout(50);
+  await check(page, S, 'disables forced CaptionMirror without turning owned captions on', () => {
+    const video = document.querySelector('#movie_player video');
+    const owned = Array.from(video.querySelectorAll('track[data-wblock-native-subtitle]')).map(t => t.track);
+    return {
+      pass: window.__mirrorTrack.mode === 'disabled' && owned.every(t => t.mode !== 'showing'),
+      detail: `mirror=${window.__mirrorTrack.mode} owned=${owned.map(t => `${t.language}:${t.mode}`).join(',')}`,
+    };
+  }, { timeout: 1 });
+
+  await page.evaluate(() => {
+    window.__ytJsTrack.mode = 'showing';
+  });
+  await page.waitForTimeout(50);
+  await check(page, S, 'transfers showing from an existing foreign subtitle track to matching owned track', () => {
+    const video = document.querySelector('#movie_player video');
+    const owned = Array.from(video.querySelectorAll('track[data-wblock-native-subtitle]')).map(t => t.track);
+    const modes = owned.map(t => `${t.language}:${t.mode}`).join(',');
+    return {
+      pass: window.__ytJsTrack.mode === 'disabled' && owned.some(t => t.language === 'en' && t.mode === 'showing'),
+      detail: `foreign=${window.__ytJsTrack.mode} owned=${modes}`,
+    };
+  }, { timeout: 1 });
+
+  await page.evaluate(() => {
+    const video = document.querySelector('#movie_player video');
+    window.__fullscreenBlinkHidden = false;
+    const owned = Array.from(video.querySelectorAll('track[data-wblock-native-subtitle]')).map(t => t.track);
+    const active = owned.find(t => t.mode === 'showing');
+    video.dispatchEvent(new Event('webkitbeginfullscreen'));
+    if (active && active.mode === 'hidden') window.__fullscreenBlinkHidden = true;
+  });
+  await check(page, S, 'does not blink showing captions hidden on normal fullscreen entry', () => ({
+    pass: window.__fullscreenBlinkHidden === false,
+    detail: `blinkedHidden=${window.__fullscreenBlinkHidden}`,
+  }), { timeout: 1 });
+
   await page.evaluate(() => {
     window.__releasedCaptionVideo = document.querySelector('#movie_player video');
     document.getElementById('movie_player').classList.add('ytp-miniplayer');
@@ -1837,7 +1890,10 @@ HTMLMediaElement.prototype.appendChild = function (node) {
     const video = window.__releasedCaptionVideo;
     const proto = Object.getPrototypeOf(video);
     const left = video.querySelectorAll('[data-wblock-native-subtitle], [data-wblock-native-chapters]').length;
-    return { pass: video.removeChild === proto.removeChild && video.appendChild === proto.appendChild && left === 0,
+    return { pass: video.removeChild === proto.removeChild && video.appendChild === proto.appendChild &&
+      video.insertBefore === proto.insertBefore && video.replaceChild === proto.replaceChild &&
+      video.append === proto.append && video.prepend === proto.prepend &&
+      video.replaceChildren === proto.replaceChildren && left === 0,
       detail: `remaining=${left}` };
   });
 
