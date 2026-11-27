@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.85
+// @version      0.1.86
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -897,14 +897,108 @@
     var BACKGROUND_RECOVERY = { enabled: true, budget: 3, window: 6000, lead: 400 };
     var pauseIntentListeners = [];
     var ownMediaSessionCaptionWrite = false;
+    var ownMediaSessionWrite = false;
     var nativeSetActionHandler = null;
     var mediaSessionCaptionHandlersBound = false;
     var mediaSessionCaptionsGuarded = false;
+    var mediaSessionGuarded = false;
+    var externalTrackHandlers = false;
+    var OWNED_MEDIA_ACTIONS = {
+        play: 1, pause: 1, seekbackward: 1, seekforward: 1,
+        seekto: 1, stop: 1, nexttrack: 1, previoustrack: 1
+    };
+
+    function ownsMediaSession() {
+        return !IS_YOUTUBE_MUSIC && !!activeVideo;
+    }
 
     function withCaptionWrite(fn) {
         ownMediaSessionCaptionWrite = true;
         try { fn(); } catch (e) { /* ignore */ }
         finally { ownMediaSessionCaptionWrite = false; }
+    }
+
+    function withMediaSessionWrite(fn) {
+        ownMediaSessionWrite = true;
+        try { fn(); } catch (e) { /* ignore */ }
+        finally { ownMediaSessionWrite = false; }
+    }
+
+    function wrapSetActionHandler(target) {
+        try {
+            var original = target && target.setActionHandler;
+            if (typeof original !== 'function' || original._wblockTubeCleaner) return;
+            if (!nativeSetActionHandler) nativeSetActionHandler = original;
+            var patched = function (action, handler) {
+                if (!ownMediaSessionCaptionWrite && activeVideo && featureEnabled('captions') &&
+                    (action === 'togglecaptions' || action === 'selectcaptiontrack')) {
+                    return;
+                }
+                if (!ownMediaSessionWrite && !IS_YOUTUBE_MUSIC && OWNED_MEDIA_ACTIONS[action]) {
+                    if (activeVideo) return;
+                    if ((action === 'nexttrack' || action === 'previoustrack') && typeof handler === 'function') {
+                        externalTrackHandlers = true;
+                    }
+                }
+                if ((action === 'pause' || action === 'stop' || (!IS_IOS && action === 'play')) && typeof handler === 'function') {
+                    var inner = handler;
+                    handler = function () {
+                        if (action === 'pause' || action === 'stop') {
+                            pauseIntentListeners.slice().forEach(function (listener) { try { listener(action); } catch (e) { /* ignore */ } });
+                        }
+                        if (!IS_IOS && !IS_YOUTUBE_MUSIC && activeVideo) {
+                            if (action === 'pause') {
+                                stepSpuriousPlay('pauseCmd', activeVideo.paused);
+                            } else if (action === 'play') {
+                                if (stepSpuriousPlay('playCmd', activeVideo.paused).drop) return;
+                            }
+                        }
+                        return inner.apply(this, arguments);
+                    };
+                }
+                return original.call(this, action, handler);
+            };
+            patched._wblockTubeCleaner = true;
+            target.setActionHandler = patched;
+        } catch (e) { /* ignore */ }
+    }
+
+    function guardMediaSession() {
+        var session = navigator.mediaSession;
+        if (mediaSessionGuarded || !session || IS_YOUTUBE_MUSIC) return;
+        mediaSessionGuarded = true;
+        ['metadata', 'playbackState'].forEach(function (prop) {
+            patchProp(session, prop, function (desc) {
+                return function (value) {
+                    if (!ownMediaSessionWrite && ownsMediaSession()) return;
+                    desc.set.call(this, value);
+                };
+            });
+        });
+        wrapSetActionHandler(session);
+        var posTarget = (typeof MediaSession !== 'undefined' && MediaSession.prototype &&
+            typeof MediaSession.prototype.setPositionState === 'function') ? MediaSession.prototype : session;
+        try {
+            var origPos = posTarget && posTarget.setPositionState;
+            if (typeof origPos === 'function' && !origPos._wblockTubeCleaner) {
+                var patchedPos = function () {
+                    if (!ownMediaSessionWrite && ownsMediaSession()) return;
+                    return origPos.apply(this, arguments);
+                };
+                patchedPos._wblockTubeCleaner = true;
+                posTarget.setPositionState = patchedPos;
+            }
+            if (posTarget !== session && typeof session.setPositionState === 'function' &&
+                !session.setPositionState._wblockTubeCleaner) {
+                var ownPos = session.setPositionState;
+                var patchedOwnPos = function () {
+                    if (!ownMediaSessionWrite && ownsMediaSession()) return;
+                    return ownPos.apply(this, arguments);
+                };
+                patchedOwnPos._wblockTubeCleaner = true;
+                session.setPositionState = patchedOwnPos;
+            }
+        } catch (e) { /* ignore */ }
     }
 
     function guardMediaSessionCaptions() {
@@ -969,38 +1063,13 @@
     // command, so Now Playing and media keys keep working even right after a
     // Tab Group switch. On macOS, also drop spurious play commands after a
     // redundant pause on an already-paused video, and keep YouTube from
-    // overwriting native caption action handlers while Tube Cleaner owns them.
+    // overwriting or wiping Now Playing metadata, state, and handlers while
+    // Tube Cleaner owns the active watch player.
     (function patchMediaSessionIntent() {
         try {
             var proto = typeof MediaSession !== 'undefined' && MediaSession.prototype;
-            var original = proto && proto.setActionHandler;
-            if (!original || original._wblockTubeCleaner) return;
-            nativeSetActionHandler = original;
-            var patched = function (action, handler) {
-                if (!ownMediaSessionCaptionWrite && activeVideo && featureEnabled('captions') &&
-                    (action === 'togglecaptions' || action === 'selectcaptiontrack')) {
-                    return;
-                }
-                if ((action === 'pause' || action === 'stop' || (!IS_IOS && action === 'play')) && typeof handler === 'function') {
-                    var inner = handler;
-                    handler = function () {
-                        if (action === 'pause' || action === 'stop') {
-                            pauseIntentListeners.slice().forEach(function (listener) { try { listener(action); } catch (e) { /* ignore */ } });
-                        }
-                        if (!IS_IOS && !IS_YOUTUBE_MUSIC && activeVideo) {
-                            if (action === 'pause') {
-                                stepSpuriousPlay('pauseCmd', activeVideo.paused);
-                            } else if (action === 'play') {
-                                if (stepSpuriousPlay('playCmd', activeVideo.paused).drop) return;
-                            }
-                        }
-                        return inner.apply(this, arguments);
-                    };
-                }
-                return original.call(this, action, handler);
-            };
-            patched._wblockTubeCleaner = true;
-            proto.setActionHandler = patched;
+            if (proto) wrapSetActionHandler(proto);
+            guardMediaSession();
         } catch (e) { /* recovery still honors in-page pauses */ }
     })();
 
@@ -2067,8 +2136,11 @@
         activeCleanups.push(fn);
     }
 
-    function releaseActiveVideo() {
+    var releasingForVideo = null;
+
+    function releaseActiveVideo(nextVideo) {
         var previousVideo = activeVideo;
+        releasingForVideo = nextVideo || null;
         if (previousVideo && previousVideo._wblockPlaybackState) {
             // An emptied element is YouTube swapping streams, not a user pause.
             previousVideo._wblockPlaybackState.paused = previousVideo.paused && previousVideo.readyState > 0;
@@ -2080,6 +2152,7 @@
         for (var i = 0; i < cleanups.length; i++) {
             try { cleanups[i](); } catch (e) { /* ignore */ }
         }
+        releasingForVideo = null;
         // The same media element can survive a YouTube SPA navigation. Reset
         // hook flags after teardown so activateVideo() reattaches resources when
         // that element is immediately activated again.
@@ -2291,7 +2364,7 @@
     // then apply every per-video enhancement. Called on first transform and again
     // whenever the player recreates its <video> element.
     function activateVideo(player, video) {
-        releaseActiveVideo();
+        releaseActiveVideo(video);
         activeVideo = video;
         if (featureEnabled('resumePosition')) setupPlaybackPosition(player, video);
         registerCleanup(cancelQualityRequest);
@@ -2344,6 +2417,7 @@
         if (!video || video._wblockMediaSessionHooked || !navigator.mediaSession ||
             typeof MediaMetadata === 'undefined') return;
         video._wblockMediaSessionHooked = true;
+        guardMediaSession();
         var session = navigator.mediaSession;
         var positionTimer = null;
         var metadataTimer = null;
@@ -2355,27 +2429,97 @@
             return element && element.content || '';
         }
 
+        function metaMatchesVideo(videoId) {
+            if (!videoId) return true;
+            var ogUrl = meta('og:url');
+            return !ogUrl || ogUrl.indexOf(videoId) !== -1;
+        }
+
+        function domText(selector) {
+            try {
+                var el = document.querySelector(selector);
+                return el && el.textContent ? el.textContent.trim() : '';
+            } catch (e) { return ''; }
+        }
+
+        function cleanDocumentTitle() {
+            var raw = (document.title || '').replace(/^\(\d+\)\s*/, '').replace(/\s*-\s*YouTube$/, '').trim();
+            return raw && raw !== 'YouTube' ? raw : '';
+        }
+
+        function inferImageType(url) {
+            var clean = String(url || '').split(/[?#]/)[0].toLowerCase();
+            if (/\.jpe?g$/.test(clean)) return 'image/jpeg';
+            if (/\.png$/.test(clean)) return 'image/png';
+            if (/\.webp$/.test(clean)) return 'image/webp';
+            return '';
+        }
+
+        function buildArtwork(thumbnails, videoId, metaImage) {
+            var entries = [];
+            var seen = {};
+            function add(url, width, height) {
+                var src = url ? String(url) : '';
+                if (!src || seen[src]) return;
+                seen[src] = 1;
+                var art = { src: src };
+                if (width > 0 && height > 0) art.sizes = width + 'x' + height;
+                var type = inferImageType(src);
+                if (type) art.type = type;
+                entries.push(art);
+            }
+            if (video.poster) add(video.poster);
+            if (thumbnails && thumbnails.length) {
+                for (var i = thumbnails.length - 1; i >= 0; i--) {
+                    var t = thumbnails[i];
+                    if (t && t.url) add(t.url, t.width, t.height);
+                }
+            }
+            if (videoId) add('https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg', 480, 360);
+            if (!entries.length && metaImage) add(metaImage);
+            return entries;
+        }
+
         function playerData() {
             var player = findPlayer();
             try { return player && typeof player.getVideoData === 'function' ? player.getVideoData() || {} : {}; }
             catch (e) { return {}; }
         }
 
+        function playerResponseDetails(videoId) {
+            var player = findPlayer();
+            try {
+                var response = player && typeof player.getPlayerResponse === 'function' ? player.getPlayerResponse() : null;
+                var details = response && response.videoDetails || {};
+                if (videoId && details.videoId && details.videoId !== videoId) return {};
+                return details;
+            } catch (e) { return {}; }
+        }
+
         function metadataData() {
             var data = playerData();
             var videoId = youtubeVideoIdentity(container);
+            var playerDetails = playerResponseDetails(videoId);
             // Page data and meta tags describe the first page loaded, not
             // the video reached by SPA navigation.
-            var details = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails || {};
-            if (videoId && details.videoId !== videoId) details = {};
-            var title = data.title || details.title || meta('og:title') || document.title || location.hostname;
-            var artist = data.author || data.ownerChannelName || details.author || details.channelTitle ||
+            var initialDetails = window.ytInitialPlayerResponse && window.ytInitialPlayerResponse.videoDetails || {};
+            if (videoId && initialDetails.videoId !== videoId) initialDetails = {};
+            var metaOk = metaMatchesVideo(videoId);
+            var title = data.title || playerDetails.title || initialDetails.title ||
+                (metaOk ? meta('og:title') : '') ||
+                domText('ytm-slim-video-information-renderer h2, ytd-watch-metadata h1 yt-formatted-string, ytd-watch-metadata h1, #watch-metadata h1') ||
+                cleanDocumentTitle() || location.hostname;
+            var artist = data.author || data.ownerChannelName ||
+                playerDetails.author || playerDetails.channelTitle ||
+                initialDetails.author || initialDetails.channelTitle ||
+                domText('ytm-slim-owner-renderer .slim-owner-channel-name, ytd-watch-metadata ytd-channel-name a, #watch-metadata ytd-channel-name a') ||
                 meta('og:site_name') || location.hostname;
-            var thumbnails = (data.thumbnail && data.thumbnail.thumbnails) || (details.thumbnail && details.thumbnail.thumbnails);
-            var artwork = video.poster || (thumbnails && thumbnails.length && thumbnails[thumbnails.length - 1].url) ||
-                (videoId ? 'https://i.ytimg.com/vi/' + videoId + '/hqdefault.jpg' : meta('og:image'));
+            var thumbnails = (data.thumbnail && data.thumbnail.thumbnails) ||
+                (playerDetails.thumbnail && playerDetails.thumbnail.thumbnails) ||
+                (initialDetails.thumbnail && initialDetails.thumbnail.thumbnails);
+            var artwork = buildArtwork(thumbnails, videoId, metaOk ? meta('og:image') : '');
             var result = { title: String(title), artist: String(artist) };
-            if (artwork) result.artwork = [{ src: String(artwork) }];
+            if (artwork.length) result.artwork = artwork;
             var chapters = video._wblockChapterData;
             if (chapters && chapters.length) {
                 result.chapterInfo = chapters.map(function (chapter) {
@@ -2387,20 +2531,32 @@
 
         function clearOwner(previous) {
             if (!previous || mediaSessionOwner !== previous) return;
-            (previous._wblockMediaActions || []).forEach(function (action) {
-                try { if (typeof session.setActionHandler === 'function') session.setActionHandler(action, null); } catch (e) { /* ignore */ }
+            withMediaSessionWrite(function () {
+                (previous._wblockMediaActions || []).forEach(function (action) {
+                    try { if (typeof session.setActionHandler === 'function') session.setActionHandler(action, null); } catch (e) { /* ignore */ }
+                });
+                if (session.metadata === previous._wblockMediaMetadata) {
+                    try { session.metadata = null; } catch (e) { /* ignore */ }
+                }
             });
-            if (session.metadata === previous._wblockMediaMetadata) {
-                try { session.metadata = null; } catch (e) { /* ignore */ }
-            }
             previous._wblockMediaActions = null;
             previous._wblockMediaMetadata = null;
+            previous._wblockMediaMetadataKey = null;
         }
 
         function refreshMetadata() {
             if (mediaSessionOwner !== video) return;
             var data = metadataData();
-            if (IS_IOS && data.title) video.setAttribute('title', data.title);
+            if (IS_IOS && data.title && video.getAttribute('title') !== data.title) {
+                video.setAttribute('title', data.title);
+            }
+            var fingerprint = JSON.stringify(data);
+            if (video._wblockMediaMetadata && video._wblockMediaMetadataKey === fingerprint) {
+                if (session.metadata !== video._wblockMediaMetadata) {
+                    withMediaSessionWrite(function () { session.metadata = video._wblockMediaMetadata; });
+                }
+                return;
+            }
             var metadata;
             try { metadata = new MediaMetadata(data); }
             catch (e) {
@@ -2413,7 +2569,8 @@
             }
             if (mediaSessionOwner !== video) return;
             video._wblockMediaMetadata = metadata;
-            try { session.metadata = metadata; } catch (e) { /* ignore */ }
+            video._wblockMediaMetadataKey = fingerprint;
+            withMediaSessionWrite(function () { session.metadata = metadata; });
         }
 
         function scheduleMetadata() {
@@ -2426,8 +2583,9 @@
 
         function updateState() {
             if (mediaSessionOwner !== video) return;
-            try { session.playbackState = video.ended ? 'none' : (video.paused ? 'paused' : 'playing'); }
-            catch (e) { /* ignore */ }
+            withMediaSessionWrite(function () {
+                session.playbackState = video.ended ? 'none' : (video.paused ? 'paused' : 'playing');
+            });
         }
 
         function updatePosition() {
@@ -2438,13 +2596,14 @@
                 // A live stream's duration is synthetic; Now Playing would show
                 // a days-long scrubber, so publish no position at all.
                 if (isYouTubeLive(container)) {
-                    try { session.setPositionState(); } catch (e) { /* ignore */ }
+                    withMediaSessionWrite(function () { session.setPositionState(); });
                     return;
                 }
                 var duration = Number(video.duration), position = Number(video.currentTime), rate = Number(video.playbackRate) || 1;
                 if (!isFinite(duration) || duration <= 0 || !isFinite(position) || position < 0 || !isFinite(rate) || rate <= 0) return;
-                try { session.setPositionState({ duration: duration, playbackRate: rate, position: Math.min(position, duration) }); }
-                catch (e) { /* ignore transient media state */ }
+                withMediaSessionWrite(function () {
+                    session.setPositionState({ duration: duration, playbackRate: rate, position: Math.min(position, duration) });
+                });
             }, 200);
         }
 
@@ -2463,7 +2622,7 @@
             refreshMetadata();
             updateState();
             updatePosition();
-            if (typeof session.setActionHandler !== 'function') return;
+            if (typeof session.setActionHandler !== 'function' || video._wblockMediaActions) return;
             var actions = {
                 play: function () { var request = video.play(); if (request && request.catch) request.catch(function () {}); },
                 pause: function () { try { video.pause(); } catch (e) {} },
@@ -2479,30 +2638,58 @@
                 stop: function () { try { video.pause(); if (!video.ended) video.currentTime = 0; } catch (e) {} }
             };
             video._wblockMediaActions = Object.keys(actions);
-            for (var action in actions) {
-                try { session.setActionHandler(action, actions[action]); } catch (e) { /* unsupported action */ }
-            }
+            withMediaSessionWrite(function () {
+                if (externalTrackHandlers) {
+                    externalTrackHandlers = false;
+                    try { session.setActionHandler('nexttrack', null); } catch (e) { /* ignore */ }
+                    try { session.setActionHandler('previoustrack', null); } catch (e) { /* ignore */ }
+                }
+                for (var action in actions) {
+                    try { session.setActionHandler(action, actions[action]); } catch (e) { /* unsupported action */ }
+                }
+            });
         }
 
-        onActive(video, 'play', claim);
+        function ensureClaimed() {
+            if (mediaSessionOwner !== video && !video.paused && !video.ended) claim();
+        }
+
+        video._wblockRefreshMediaSession = scheduleMetadata;
+        onActive(video, ['play', 'playing'], claim);
         onActive(video, ['pause', 'ended'], function () { updateState(); updatePosition(); });
-        onActive(video, ['loadedmetadata', 'durationchange', 'loadeddata', 'ratechange'], function () { scheduleMetadata(); updatePosition(); });
-        onActive(video, 'timeupdate', updatePosition);
+        onActive(video, ['loadedmetadata', 'durationchange', 'loadeddata', 'ratechange'], function () {
+            ensureClaimed();
+            scheduleMetadata();
+            updatePosition();
+        });
+        onActive(video, 'timeupdate', function () { ensureClaimed(); updatePosition(); });
         onActive(document, ['yt-navigate-finish', 'yt-page-data-updated'], scheduleMetadata, true);
+        onActive(window, 'state-navigateend', scheduleMetadata, true);
         if (!video.paused) claim();
+        else if (IS_IOS) {
+            var initialTitle = metadataData().title;
+            if (initialTitle && initialTitle !== location.hostname) video.setAttribute('title', initialTitle);
+        }
 
         registerCleanup(function () {
             if (positionTimer !== null) clearTimeout(positionTimer);
             if (metadataTimer !== null) clearTimeout(metadataTimer);
             positionTimer = metadataTimer = null;
+            video._wblockRefreshMediaSession = null;
+            // Re-activating the same <video> (e.g. mobile toolbar re-mount or
+            // SPA identity update) must not wipe Now Playing metadata/handlers
+            // and force iOS to drop lock-screen artwork.
+            if (releasingForVideo === video) return;
             if (mediaSessionOwner !== video) return;
             mediaSessionOwner = null;
-            if (session.metadata === video._wblockMediaMetadata) try { session.metadata = null; } catch (e) {}
-            (video._wblockMediaActions || []).forEach(function (action) {
-                try { if (typeof session.setActionHandler === 'function') session.setActionHandler(action, null); } catch (e) {}
+            withMediaSessionWrite(function () {
+                if (session.metadata === video._wblockMediaMetadata) try { session.metadata = null; } catch (e) {}
+                (video._wblockMediaActions || []).forEach(function (action) {
+                    try { if (typeof session.setActionHandler === 'function') session.setActionHandler(action, null); } catch (e) {}
+                });
+                try { session.playbackState = 'none'; } catch (e) {}
             });
-            try { session.playbackState = 'none'; } catch (e) {}
-            video._wblockMediaMetadata = video._wblockMediaActions = null;
+            video._wblockMediaMetadata = video._wblockMediaMetadataKey = video._wblockMediaActions = null;
             if (hadVideoTitle) video.setAttribute('title', originalVideoTitle || '');
             else video.removeAttribute('title');
         });
@@ -3714,6 +3901,7 @@
             video._wblockChapterFingerprint = fingerprint;
             video._wblockRejectedChapterFingerprint = null;
             video._wblockRejectedChapterVideoId = null;
+            if (typeof video._wblockRefreshMediaSession === 'function') video._wblockRefreshMediaSession();
         } else if (video._wblockChapterVideoId === videoId &&
             video._wblockChapterData && video._wblockChapterData.length) {
             chapters = video._wblockChapterData;
@@ -3791,6 +3979,7 @@
 
         onActive(video, ['loadedmetadata', 'durationchange'], refreshChapters);
         onActive(document, ['yt-page-data-updated', 'yt-navigate-finish'], refreshChapters, true);
+        onActive(window, 'state-navigateend', refreshChapters, true);
         refreshChapters();
 
         registerCleanup(function () {
@@ -6033,6 +6222,7 @@
         try {
             document.addEventListener('yt-page-data-updated', onNavigate, true);
         } catch (e) { /* ignore */ }
+        window.addEventListener('state-navigateend', onNavigate, true);
         window.addEventListener('popstate', onNavigate, true);
     }
 

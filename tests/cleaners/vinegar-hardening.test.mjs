@@ -323,6 +323,205 @@ try {
   }
 
   // ------------------------------------------------------------------
+  // 2b. Tube Cleaner (iPhone): Now Playing MediaSession ownership guard,
+  //     structured artwork, background-resume dedupe, and m.youtube.com
+  //     state-navigateend SPA refresh
+  // ------------------------------------------------------------------
+  {
+    const context = await browser.newContext(devices['iPhone 13']);
+    await context.route('https://m.youtube.com/watch*', route => route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><html><head>
+        <meta name="viewport" content="width=device-width">
+        <title>YouTube</title>
+        <meta property="og:url" content="https://www.youtube.com/watch?v=tpYdGgzCW-M">
+        <meta property="og:title" content="Scar Tissue">
+        <meta property="og:image" content="https://i.ytimg.com/vi/tpYdGgzCW-M/hqdefault.jpg">
+        <meta property="og:site_name" content="YouTube">
+        <style>#movie_player { width: 390px; height: 220px; } video { width: 100%; height: 100%; }</style>
+        <script>
+          if (navigator.mediaSession) {
+            try {
+              navigator.mediaSession.setActionHandler('nexttrack', () => {});
+              navigator.mediaSession.setActionHandler('previoustrack', () => {});
+            } catch (e) {}
+          }
+        </script>
+      </head><body>
+        <div id="movie_player" class="html5-video-player">
+          <div class="html5-video-container"><video playsinline></video></div>
+        </div>
+        <ytm-slim-video-information-renderer><h2>Scar Tissue</h2></ytm-slim-video-information-renderer>
+        <ytm-slim-owner-renderer><span class="slim-owner-channel-name">Red Hot Chili Peppers - Topic</span></ytm-slim-owner-renderer>
+      </body></html>`,
+    }));
+    await context.addInitScript(`
+      window.__msLog = { metaWrites: 0, stateWrites: 0, positions: [], handlers: {} };
+      if (window.MediaSession) {
+        const metaDesc = Object.getOwnPropertyDescriptor(MediaSession.prototype, 'metadata');
+        const stateDesc = Object.getOwnPropertyDescriptor(MediaSession.prototype, 'playbackState');
+        const origHandler = MediaSession.prototype.setActionHandler;
+        const origPos = MediaSession.prototype.setPositionState;
+        Object.defineProperty(MediaSession.prototype, 'metadata', {
+          configurable: true,
+          get() { return metaDesc.get.call(this); },
+          set(v) { window.__msLog.metaWrites++; return metaDesc.set.call(this, v); }
+        });
+        Object.defineProperty(MediaSession.prototype, 'playbackState', {
+          configurable: true,
+          get() { return stateDesc.get.call(this); },
+          set(v) { window.__msLog.stateWrites++; return stateDesc.set.call(this, v); }
+        });
+        MediaSession.prototype.setActionHandler = function (action, handler) {
+          window.__msLog.handlers[action] = handler;
+          try { return origHandler.call(this, action, handler); } catch (e) {}
+        };
+        if (typeof origPos === 'function') {
+          MediaSession.prototype.setPositionState = function (pos) {
+            window.__msLog.positions.push(pos || null);
+            try { return origPos.apply(this, arguments); } catch (e) {}
+          };
+        }
+      }
+    ` + '\n' + tubeScript);
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('https://m.youtube.com/watch?v=tpYdGgzCW-M&');
+    await page.waitForSelector('.wblock-tc-native');
+
+    const np = await page.evaluate(async () => {
+      const player = document.getElementById('movie_player');
+      const video = player.querySelector('video');
+      let paused = true;
+      Object.defineProperty(video, 'paused', { configurable: true, get: () => paused });
+      Object.defineProperty(video, 'ended', { configurable: true, get: () => false });
+      Object.defineProperty(video, 'duration', { configurable: true, get: () => 216 });
+      Object.defineProperty(video, 'currentTime', { configurable: true, get: () => 15, set: () => {} });
+      // Empty getVideoData(), full getPlayerResponse().videoDetails
+      player.getVideoData = () => ({ video_id: 'tpYdGgzCW-M' });
+      player.getPlayerResponse = () => ({
+        videoDetails: {
+          videoId: 'tpYdGgzCW-M',
+          title: 'Scar Tissue',
+          author: 'Red Hot Chili Peppers - Topic',
+          thumbnail: {
+            thumbnails: [
+              { url: 'https://i.ytimg.com/vi/tpYdGgzCW-M/mqdefault.jpg', width: 320, height: 180 },
+              { url: 'https://i.ytimg.com/vi/tpYdGgzCW-M/sddefault.jpg', width: 640, height: 480 }
+            ]
+          }
+        }
+      });
+
+      // Playback starts via 'playing' (even if initial 'play' was missed).
+      paused = false;
+      video.dispatchEvent(new Event('playing'));
+      await new Promise(r => setTimeout(r, 250));
+
+      const initialMeta = navigator.mediaSession.metadata;
+      const initialArt = Array.from(initialMeta?.artwork || []).map(a => ({ src: a.src, sizes: a.sizes, type: a.type }));
+      const initialNext = window.__msLog.handlers.nexttrack;
+      const initialPrev = window.__msLog.handlers.previoustrack;
+      const writesAfterClaim = window.__msLog.metaWrites;
+
+      // Background resume fires play + playing again: metadata object must not be replaced.
+      video.dispatchEvent(new Event('play'));
+      video.dispatchEvent(new Event('playing'));
+      await new Promise(r => setTimeout(r, 100));
+      const sameMetadataOnResume = navigator.mediaSession.metadata === initialMeta;
+      const writesAfterResume = window.__msLog.metaWrites;
+
+      // Re-activating the same <video> (e.g. mobile toolbar re-mount) must not wipe metadata.
+      const toolbar = player.querySelector('.wblock-tc-toolbar');
+      if (toolbar) toolbar.remove();
+      window.dispatchEvent(new Event('state-navigateend'));
+      await new Promise(r => setTimeout(r, 100));
+      const sameMetadataOnReactivate = navigator.mediaSession.metadata === initialMeta;
+      const writesAfterReactivate = window.__msLog.metaWrites;
+
+      // Simulate YouTube sOa.updateMetadata() overwriting with empty/ad values and sOa.pa() wiping session.
+      const posBeforeSite = window.__msLog.positions.length;
+      navigator.mediaSession.metadata = new MediaMetadata({ title: '', artist: '', artwork: [] });
+      navigator.mediaSession.metadata = new MediaMetadata({ title: 'Video Ad', artist: 'YouTube Ads' });
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.playbackState = 'none';
+      navigator.mediaSession.setPositionState();
+      for (const action of ['play', 'pause', 'seekbackward', 'seekforward', 'seekto', 'nexttrack', 'previoustrack']) {
+        navigator.mediaSession.setActionHandler(action, null);
+      }
+      navigator.mediaSession.setActionHandler('nexttrack', () => { window.__siteNextCalled = true; });
+
+      const afterSiteAttack = {
+        title: navigator.mediaSession.metadata?.title,
+        artist: navigator.mediaSession.metadata?.artist,
+        playbackState: navigator.mediaSession.playbackState,
+        posCountDelta: window.__msLog.positions.length - posBeforeSite,
+        hasSeekForward: typeof window.__msLog.handlers.seekforward === 'function',
+        hasPause: typeof window.__msLog.handlers.pause === 'function',
+        nextHandler: window.__msLog.handlers.nexttrack,
+      };
+
+      // Simulate mobile YouTube SPA navigation (state-navigateend) where og:title/og:image remain stale.
+      history.pushState(null, '', '/watch?v=dQw4w9WgXcQ');
+      player.getVideoData = () => ({ video_id: 'dQw4w9WgXcQ' });
+      player.getPlayerResponse = () => ({ videoDetails: { videoId: 'dQw4w9WgXcQ' } });
+      document.querySelector('ytm-slim-video-information-renderer h2').textContent = 'Second Mobile Song';
+      document.querySelector('ytm-slim-owner-renderer .slim-owner-channel-name').textContent = 'Second Channel';
+      window.dispatchEvent(new Event('state-navigateend'));
+      await new Promise(r => setTimeout(r, 150));
+
+      const afterSpa = {
+        title: navigator.mediaSession.metadata?.title,
+        artist: navigator.mediaSession.metadata?.artist,
+        art0: navigator.mediaSession.metadata?.artwork?.[0]?.src,
+        videoTitle: video.getAttribute('title'),
+      };
+
+      return {
+        initialTitle: initialMeta?.title,
+        initialArtist: initialMeta?.artist,
+        initialArt,
+        initialNext,
+        initialPrev,
+        sameMetadataOnResume,
+        writesDeltaOnResume: writesAfterResume - writesAfterClaim,
+        sameMetadataOnReactivate,
+        writesDeltaOnReactivate: writesAfterReactivate - writesAfterResume,
+        afterSiteAttack,
+        afterSpa,
+      };
+    });
+
+    assert.equal(np.initialTitle, 'Scar Tissue', 'uses playerResponse title when getVideoData is empty');
+    assert.equal(np.initialArtist, 'Red Hot Chili Peppers - Topic', 'uses playerResponse artist');
+    assert.equal(np.initialArt[0]?.src, 'https://i.ytimg.com/vi/tpYdGgzCW-M/sddefault.jpg', 'puts highest-res thumbnail first');
+    assert.equal(np.initialArt[0]?.sizes, '640x480', 'includes artwork sizes');
+    assert.equal(np.initialArt[0]?.type, 'image/jpeg', 'includes artwork MIME type');
+    assert.ok(np.initialArt.some(a => a.src === 'https://i.ytimg.com/vi/tpYdGgzCW-M/hqdefault.jpg'), 'includes clean hqdefault fallback');
+    assert.equal(np.initialNext, null, 'clears pre-existing YouTube nexttrack handler on claim');
+    assert.equal(np.initialPrev, null, 'clears pre-existing YouTube previoustrack handler on claim');
+    assert.equal(np.sameMetadataOnResume, true, 'does not churn MediaMetadata on unchanged background resume');
+    assert.equal(np.writesDeltaOnResume, 0, 'skips redundant session.metadata assignment on resume');
+    assert.equal(np.sameMetadataOnReactivate, true, 'does not wipe MediaMetadata when re-activating the same video');
+    assert.equal(np.writesDeltaOnReactivate, 0, 'skips redundant session.metadata writes on same-video reactivation');
+    assert.equal(np.afterSiteAttack.title, 'Scar Tissue', 'blocks YouTube sOa metadata overwrite and null wipe');
+    assert.equal(np.afterSiteAttack.artist, 'Red Hot Chili Peppers - Topic', 'preserves artist against YouTube sOa');
+    assert.equal(np.afterSiteAttack.playbackState, 'playing', 'blocks YouTube sOa playbackState reset');
+    assert.equal(np.afterSiteAttack.posCountDelta, 0, 'blocks YouTube sOa setPositionState clear');
+    assert.equal(np.afterSiteAttack.hasSeekForward, true, 'blocks YouTube sOa clearing seekforward handler');
+    assert.equal(np.afterSiteAttack.hasPause, true, 'blocks YouTube sOa clearing pause handler');
+    assert.equal(np.afterSiteAttack.nextHandler, null, 'blocks YouTube sOa re-registering nexttrack');
+    assert.equal(np.afterSpa.title, 'Second Mobile Song', 'refreshes title on mobile state-navigateend without stale og:title');
+    assert.equal(np.afterSpa.artist, 'Second Channel', 'refreshes artist from mobile watch DOM');
+    assert.equal(np.afterSpa.art0, 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg', 'replaces stale og:image with new video thumbnail');
+    assert.equal(np.afterSpa.videoTitle, 'Second Mobile Song', 'syncs iOS video title attribute after SPA navigation');
+    assert.deepEqual(errors, []);
+    console.log('PASS Tube Cleaner iPhone Now Playing (MediaSession guard, artwork metadata, resume dedupe, state-navigateend)');
+    await context.close();
+  }
+
+  // ------------------------------------------------------------------
   // 3. Player Cleaner (macOS desktop): MediaSession captionTracks sync,
   //    volume/rate locking, PiP/FS/contextmenu guards, spurious play,
   //    and visibilitychange/webkitvisibilitychange capture blocking
