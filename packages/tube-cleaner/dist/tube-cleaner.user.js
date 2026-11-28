@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tube Cleaner
 // @namespace    com.skula.wblock
-// @version      0.1.86
+// @version      0.1.87
 // @description  Gives YouTube Safari-native controls, chapters, subtitles, SponsorBlock, picture-in-picture, background playback, quality selection, and audio-only mode.
 // @description:de  Bietet YouTube native Safari-Steuerelemente, Kapitel, Untertitel, SponsorBlock, Bild-in-Bild, Hintergrundwiedergabe, Qualitätsauswahl und einen Nur-Audio-Modus.
 // @description:es  Añade a YouTube controles nativos de Safari, capítulos, subtítulos, SponsorBlock, imagen en imagen, reproducción en segundo plano, selección de calidad y modo de solo audio.
@@ -2384,6 +2384,7 @@
 
         setupPlaybackPreferences(player, video);
         setupOriginalAudioTrack(player, video);
+        setupYouTubePlayerOverrides(player, video);
         setupMobilePageGuards();
         setupVideoAspectLayout(player, video);
         setupPinchFullscreen(player, video);
@@ -3521,7 +3522,9 @@
             sponsorBlock: true,
             resumePosition: true,
             toolbar: true,
-            hideShorts: false
+            hideShorts: false,
+            disableAutoplay: false,
+            disableStableVolume: false
         };
         var injected = typeof __wblockTubeCleanerFeatures === 'object' ? __wblockTubeCleanerFeatures : null;
         if (!injected) return features;
@@ -3531,6 +3534,87 @@
         return features;
     })();
     function featureEnabled(name) { return tubeCleanerFeatures[name] !== false; }
+
+    function writeYouTubePlayerPref(key, value, ttlSeconds) {
+        var now = Date.now();
+        var payload = JSON.stringify({
+            data: JSON.stringify(value),
+            expiration: ttlSeconds > 0 ? now + ttlSeconds * 1000 : now + 31536000 * 1000,
+            creation: now
+        });
+        try { localStorage.setItem(key, payload); } catch (e) { /* ignore */ }
+        if (!ttlSeconds) {
+            try { sessionStorage.setItem(key, payload); } catch (e) { /* ignore */ }
+        }
+    }
+
+    function seedYouTubePlayerOverrides() {
+        if (IS_YOUTUBE_MUSIC) return;
+        if (featureEnabled('disableStableVolume')) {
+            writeYouTubePlayerPref('yt-player-drc-pref', 0, 31536000);
+        }
+        if (featureEnabled('disableAutoplay')) {
+            writeYouTubePlayerPref('yt-player-autonavstate', 1, 0);
+        }
+    }
+    seedYouTubePlayerOverrides();
+
+    function setupYouTubePlayerOverrides(player, video) {
+        if (IS_YOUTUBE_MUSIC) return;
+        var disableAutoplay = featureEnabled('disableAutoplay');
+        var disableStableVolume = featureEnabled('disableStableVolume');
+        if (!disableAutoplay && !disableStableVolume) return;
+
+        function applyOverrides() {
+            var currentPlayer = findPlayer() || player;
+            if (disableStableVolume) {
+                writeYouTubePlayerPref('yt-player-drc-pref', 0, 31536000);
+                try {
+                    if (currentPlayer && typeof currentPlayer.setDrcUserPreference === 'function' &&
+                        (typeof currentPlayer.getDrcUserPreference !== 'function' ||
+                         currentPlayer.getDrcUserPreference() !== 0)) {
+                        currentPlayer.setDrcUserPreference(0);
+                    }
+                } catch (e) { /* ignore */ }
+            }
+            if (disableAutoplay) {
+                writeYouTubePlayerPref('yt-player-autonavstate', 1, 0);
+                try {
+                    if (currentPlayer && typeof currentPlayer.setAutonavState === 'function') {
+                        currentPlayer.setAutonavState(1, true);
+                    } else if (currentPlayer && typeof currentPlayer.setAutonav === 'function') {
+                        currentPlayer.setAutonav(false, true);
+                    }
+                } catch (e) { /* ignore */ }
+                try {
+                    var toggle = document.querySelector(
+                        'ytm-autonav-toggle-button-renderer button[aria-pressed="true"], ' +
+                        '.ytp-autonav-toggle-button[aria-checked="true"]'
+                    );
+                    if (toggle && typeof toggle.click === 'function') toggle.click();
+                } catch (e) { /* ignore */ }
+            }
+        }
+
+        function cancelAutonavCountdown() {
+            if (!disableAutoplay) return;
+            applyOverrides();
+            try {
+                var cancel = document.querySelector(
+                    '.ytp-autonav-endscreen-upnext-cancel-button, ' +
+                    'ytm-autonav-bar .autonav-cancel-button, ' +
+                    '.ytp-autonav-endscreen-countdown-overlay button'
+                );
+                if (cancel && typeof cancel.click === 'function') cancel.click();
+            } catch (e) { /* ignore */ }
+        }
+
+        applyOverrides();
+        onActive(video, ['loadedmetadata', 'playing'], applyOverrides);
+        onActive(video, 'ended', cancelAutonavCountdown);
+        onActive(document, ['yt-navigate-finish', 'yt-page-data-updated'], applyOverrides, true);
+        onActive(window, 'state-navigateend', applyOverrides, true);
+    }
 
 
     // Chapters

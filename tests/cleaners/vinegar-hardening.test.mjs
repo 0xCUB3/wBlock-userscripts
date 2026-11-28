@@ -522,6 +522,71 @@ try {
   }
 
   // ------------------------------------------------------------------
+  // 2c. Tube Cleaner (iPhone): Disable Autoplay and Disable Stable Volume (#1174)
+  // ------------------------------------------------------------------
+  {
+    const context = await browser.newContext(devices['iPhone 13']);
+    await context.route('https://m.youtube.com/watch*', route => route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><html><head>
+        <meta name="viewport" content="width=device-width">
+        <style>#movie_player { width: 390px; height: 220px; } video { width: 100%; height: 100%; }</style>
+      </head><body>
+        <div id="movie_player" class="html5-video-player">
+          <div class="html5-video-container"><video playsinline></video></div>
+        </div>
+        <ytm-autonav-toggle-button-renderer><button id="autonav-btn" aria-pressed="true"></button></ytm-autonav-toggle-button-renderer>
+        <div class="ytp-autonav-endscreen-countdown-overlay"><button class="ytp-autonav-endscreen-upnext-cancel-button"></button></div>
+      </body></html>`,
+    }));
+    await context.addInitScript(`
+      const __wblockTubeCleanerFeatures = { disableAutoplay: true, disableStableVolume: true };
+      window.__ytOverrides = { drc: 1, drcCalls: [], autonavCalls: [], toggleClicks: 0, cancelClicks: 0 };
+      document.addEventListener('DOMContentLoaded', () => {
+        const player = document.getElementById('movie_player');
+        player.getDrcUserPreference = () => window.__ytOverrides.drc;
+        player.setDrcUserPreference = v => { window.__ytOverrides.drc = v; window.__ytOverrides.drcCalls.push(v); };
+        player.setAutonavState = (state, force) => { window.__ytOverrides.autonavCalls.push([state, force]); };
+        const toggle = document.getElementById('autonav-btn');
+        toggle.addEventListener('click', () => { window.__ytOverrides.toggleClicks++; toggle.setAttribute('aria-pressed', 'false'); });
+        const cancel = document.querySelector('.ytp-autonav-endscreen-upnext-cancel-button');
+        cancel.addEventListener('click', () => { window.__ytOverrides.cancelClicks++; });
+      }, true);
+    ` + '\n' + tubeScript);
+    const page = await context.newPage();
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+    await page.goto('https://m.youtube.com/watch?v=tpYdGgzCW-M');
+    await page.waitForSelector('.wblock-tc-native');
+
+    const res = await page.evaluate(() => {
+      const video = document.querySelector('#movie_player video');
+      const drcStorage = JSON.parse(localStorage.getItem('yt-player-drc-pref') || 'null');
+      const autonavStorage = JSON.parse(localStorage.getItem('yt-player-autonavstate') || 'null');
+      video.dispatchEvent(new Event('ended'));
+      return {
+        drcData: drcStorage && drcStorage.data,
+        autonavData: autonavStorage && autonavStorage.data,
+        drc: window.__ytOverrides.drc,
+        drcCalls: window.__ytOverrides.drcCalls,
+        autonavCalls: window.__ytOverrides.autonavCalls,
+        toggleClicks: window.__ytOverrides.toggleClicks,
+        cancelClicks: window.__ytOverrides.cancelClicks,
+      };
+    });
+
+    assert.equal(res.drcData, '0', 'seeds yt-player-drc-pref to 0 at document-start');
+    assert.equal(res.autonavData, '1', 'seeds yt-player-autonavstate to 1 at document-start');
+    assert.equal(res.drc, 0, 'calls player.setDrcUserPreference(0) to disable Stable Volume');
+    assert.ok(res.autonavCalls.some(([state, force]) => state === 1 && force === true), 'calls player.setAutonavState(1, true)');
+    assert.equal(res.toggleClicks, 1, 'flips mobile autonav toggle off');
+    assert.equal(res.cancelClicks, 1, 'cancels autonav countdown on ended');
+    assert.deepEqual(errors, []);
+    console.log('PASS Tube Cleaner iPhone overrides (Disable Autoplay and Disable Stable Volume)');
+    await context.close();
+  }
+
+  // ------------------------------------------------------------------
   // 3. Player Cleaner (macOS desktop): MediaSession captionTracks sync,
   //    volume/rate locking, PiP/FS/contextmenu guards, spurious play,
   //    and visibilitychange/webkitvisibilitychange capture blocking
